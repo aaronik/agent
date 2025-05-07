@@ -1,0 +1,74 @@
+import requests
+import duckduckgo_search as ddgs
+from src.util import extract_text
+
+MAX_RESPONSE_LENGTH = 1000000
+
+
+def fetch(url: str):
+    """Fetch content from the provided URL."""
+
+    print(f"\n🔧 [fetch], url: [{url}]")
+
+    response = requests.get(url)
+    try:
+        response.raise_for_status()
+        text = extract_text(response.text)
+
+        if len(text) > MAX_RESPONSE_LENGTH:
+            print("⚠️ truncating response")
+            return (
+                f"{text[:MAX_RESPONSE_LENGTH]}\n\n"
+                "[Content truncated due to size limitations]"
+            )
+
+        return (
+            f"[URL]: {url}\n\n",
+            text
+        )
+
+    except Exception as e:
+        print(f"⚠️ status: [{response.status_code}]")
+        return f"Error fetching URL {url}: {e}"
+
+
+def search_text(text: str, max_results: int = 3):
+    """
+    Search the web for the provided text
+    Limit the search to max_results
+    """
+
+    print(f"\n🔧 [search], string: [{text}], max_results: [{max_results}]")
+
+    dds = ddgs.duckduckgo_search.DDGS()
+    results = dds.text(text, max_results=max_results)
+
+    text = ""
+
+    for i, result in enumerate(results or [], start=1):
+        print(f"🔗 {result['href']}")
+        text += f"{i}. {result['title']}\n   {result['href']}\n"
+
+    return text
+
+
+def search_images(text: str, max_results: int = 3):
+    """
+    Search the web for images that match the provided text
+    Limit the search to max_results
+    """
+
+    print(
+        f"\n🔧 [search_images], string: [{text}], max_results: [{max_results}]"
+    )
+
+    dds = ddgs.duckduckgo_search.DDGS()
+    results = dds.images(text, max_results=max_results)
+
+    text = ""
+
+    for i, result in enumerate(results or [], start=1):
+        print(f"🖼️ {result['image']}")
+        text += f"{i}. {result['title']}\n   {result['image']}\n"
+
+    return text
