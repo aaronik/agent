@@ -21,16 +21,20 @@ messages = [{
     "content": user_request
 }]
 
-
-response = client.chat.completions.create(
+response: ai.framework.ChatCompletionResponse = client.chat.completions.create(
     model="openai:gpt-4.1-mini",
     messages=messages,
-    tools=[tools.fetch, tools.search_text, tools.search_images],
+    tools=[
+        tools.fetch,
+        tools.search_text,
+        tools.search_images,
+        tools.run_bash_command
+    ],
     max_turns=20  # Maximum number of back-and-forth tool calls
 )
 
 pp = pprint.PrettyPrinter(indent=4, width=80, compact=False)
-pp.pprint(response)
+# pp.pprint(response)
 
 for i, choice in enumerate(response.choices):
     print(f"\n--- Choice {i} ---\n")

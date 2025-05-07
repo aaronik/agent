@@ -1,4 +1,5 @@
 import requests
+import subprocess
 import duckduckgo_search as ddgs
 from src.util import extract_text
 
@@ -70,5 +71,31 @@ def search_images(text: str, max_results: int = 3):
     for i, result in enumerate(results or [], start=1):
         print(f"🖼️ {result['image']}")
         text += f"{i}. {result['title']}\n   {result['image']}\n"
+
+    return text
+
+
+def run_bash_command(cmd: str):
+    """
+    Run a bash command on the user's machine
+    """
+
+    print(
+        f"\n🔧 [run_bash_command], cmd: [{cmd}]"
+    )
+
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+    print(f"⮑ {result.returncode}")
+
+    text = (
+        "[STDOUT]",
+        result.stdout,
+        "[STDERR]",
+        result.stderr,
+        "[CODE]",
+        result.returncode,
+
+    )
 
     return text
