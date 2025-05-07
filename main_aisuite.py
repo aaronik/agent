@@ -30,7 +30,8 @@ response: ChatCompletion = client.chat.completions.create(
         tools.fetch,
         tools.search_text,
         tools.search_images,
-        tools.shell_command
+        tools.shell_command,
+        tools.printz,
     ],
     max_turns=20  # Maximum number of back-and-forth tool calls
 )
@@ -39,7 +40,7 @@ pp = pprint.PrettyPrinter(indent=4, width=80, compact=False)
 # pp.pprint(response)
 
 for i, choice in enumerate(response.choices):
-    print(f"\n--- Choice {i} ---\n")
+    print("\n---\n")
     print(choice.message.content)
 
 print(f"\n---\ntotal tokens: {response.usage and response.usage.total_tokens}")

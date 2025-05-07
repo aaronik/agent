@@ -100,3 +100,15 @@ def shell_command(cmd: str):
     )
 
     return text
+
+
+def printz(cmd: str):
+    """
+    Place a command on the user's command buffer.
+    Use this when the user has asked for a command to do such and such.
+    Named after the zsh print -z command.
+    """
+
+    print(
+        f"\n🔧 [printz], cmd: [{cmd}]"
+    )
