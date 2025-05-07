@@ -75,18 +75,19 @@ def search_images(text: str, max_results: int = 3):
     return text
 
 
-def run_bash_command(cmd: str):
+def shell_command(cmd: str):
     """
-    Run a bash command on the user's machine
+    Run a shell command on the user's machine
+    Use as many of these as needed to satisfy the user response
     """
 
     print(
-        f"\n🔧 [run_bash_command], cmd: [{cmd}]"
+        f"\n🔧 [shell_command], cmd: [{cmd}]"
     )
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
-    print(f"⮑ {result.returncode}")
+    print(f"⮑  {result.returncode}")
 
     text = (
         "[STDOUT]",

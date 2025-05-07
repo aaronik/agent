@@ -2,6 +2,7 @@ import sys
 import pprint
 import aisuite as ai
 import src.tools as tools
+from openai.types.chat.chat_completion import ChatCompletion
 
 client = ai.Client()
 
@@ -10,7 +11,8 @@ cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
 system_string = (
     "You are a helpful assistant."
-    "You cite all sources and you include links in every citation."
+    "Cite all sources and you include links in every citation."
+    "Use as many shell commands as needed if it helps meet the user's request."
 )
 
 messages = [{
@@ -21,14 +23,14 @@ messages = [{
     "content": user_request
 }]
 
-response: ai.framework.ChatCompletionResponse = client.chat.completions.create(
+response: ChatCompletion = client.chat.completions.create(
     model="openai:gpt-4.1-mini",
     messages=messages,
     tools=[
         tools.fetch,
         tools.search_text,
         tools.search_images,
-        tools.run_bash_command
+        tools.shell_command
     ],
     max_turns=20  # Maximum number of back-and-forth tool calls
 )
@@ -40,4 +42,4 @@ for i, choice in enumerate(response.choices):
     print(f"\n--- Choice {i} ---\n")
     print(choice.message.content)
 
-print(f"\n---\ntotal tokens: {response.usage.total_tokens}")
+print(f"\n---\ntotal tokens: {response.usage and response.usage.total_tokens}")
