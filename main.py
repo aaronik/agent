@@ -1,18 +1,25 @@
-import os
-import sys
-import openai
-import argparse
+from typing import Any, Dict
+from time import sleep
+import json
 import requests
+from openai import OpenAI
 from openai.types.chat import ChatCompletionToolParam
 from openai.types.shared_params.function_definition import FunctionDefinition
 
 
-def fetch(url: str):
-    """Fetch content from the given URL."""
+client = OpenAI()
+starting_assistant = ""
+starting_thread = ""
+
+def fetch(url: str, max_length: int = 1000000):
+    """Fetch content from the given URL with a size limit."""
     try:
         response = requests.get(url)
         response.raise_for_status()
-        return response.text
+        text = response.text
+        if len(text) > max_length:
+            return text[:max_length] + "\n\n[Content truncated due to size limitations]"
+        return text
     except Exception as e:
         return f"Error fetching URL {url}: {e}"
 
@@ -31,56 +38,111 @@ tool_fetch = ChatCompletionToolParam(
     )
 )
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="AI-powered CLI automation tool"
-    )
-    _ = parser.add_argument(
-        'task',
-        type=str,
-        nargs=argparse.REMAINDER,
-        help="Describe the CLI task or flow you want to automate."
-    )
-
-    args = parser.parse_args()
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("Please set your OPENAI_API_KEY environment variable.")
-        sys.exit(1)
-    openai.api_key = api_key
-
-    user_input = ' '.join(args.task) if args.task else ""
-    if not user_input:
-        print("Please enter a description of the CLI task to automate.")
-        sys.exit(1)
-
-    prompt = "You are a helpful assistant"
-
-    response = openai.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_input}
-        ],
-        tools=[tool_fetch],
-        tool_choice="auto"
-    )
-
-    message = response.choices[0].message
-
-    if message.tool_calls:
-        for tool_call in message.tool_calls:
-            function_name = tool_call.function.name
-            arguments = tool_call.function.arguments
-
-            if function_name == "fetch":
-                print("Fetching: " + arguments)
-
+def create_assistant():
+    if starting_assistant == "":
+        my_assistant = client.beta.assistants.create(
+            instructions="You are a helpful assistant.",
+            name="MyQuickstartAssistant",
+            model="gpt-3.5-turbo",
+            tools=[tool_fetch],
+        )
     else:
-        print(message.content)
+        my_assistant = client.beta.assistants.retrieve(starting_assistant)
+
+    return my_assistant
+
+def create_thread():
+    empty_thread = client.beta.threads.create()
+    return empty_thread
+
+
+def send_message(thread_id: str, message: str):
+    thread_message = client.beta.threads.messages.create(
+        thread_id,
+        role="user",
+        content=message,
+    )
+    return thread_message
+
+
+def run_assistant(thread_id: str, assistant_id: str):
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id, assistant_id=assistant_id
+    )
+    return run
+
+
+def get_newest_message(thread_id: str):
+    thread_messages = client.beta.threads.messages.list(thread_id)
+    return thread_messages.data[0]
+
+
+def get_run_status(thread_id: str, run_id: str):
+    run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
+    return run.status
+
+
+def run_action(thread_id: str, run_id: str):
+    run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
+
+    if not run.required_action:
+        return
+
+    for tool in run.required_action.submit_tool_outputs.tool_calls:
+
+        if tool.function.name == "fetch":
+            arguments: dict[str, Any] = json.loads(tool.function.arguments)
+            url: str = arguments["url"]
+
+            print("using tool [fetch], url: " + url)
+            resp = fetch(url)
+
+            _ = client.beta.threads.runs.submit_tool_outputs(
+                thread_id=thread_id,
+                run_id=run.id,
+                tool_outputs=[
+                    {
+                        "tool_call_id": tool.id,
+                        "output": resp,
+                    },
+                ],
+            )
+        else:
+            raise Exception(
+                f"Unsupported function call: {tool.function.name} provided."
+            )
+
+
+def main():
+    my_assistant = create_assistant()
+    my_thread = create_thread()
+
+    while True:
+        user_message = input("Enter your message: ")
+        if user_message.lower() == "exit":
+            break
+
+        _ = send_message(my_thread.id, user_message)
+        run = run_assistant(my_thread.id, my_assistant.id)
+
+        while run.status != "completed":
+            run.status = get_run_status(my_thread.id, run.id)
+
+            # If assistant needs to call a function, it will enter the "requires_action" state
+            if run.status == "requires_action":
+                run_action(my_thread.id, run.id)
+
+            sleep(1)
+            print("⏳", end="\r", flush=True)
+
+        sleep(0.5)
+
+        response = get_newest_message(my_thread.id)
+        for content in response.content:
+            obj = content.to_dict()["text"]
+            print("\n---\n")
+            print(obj["value"])
 
 
 if __name__ == "__main__":
     main()
-
