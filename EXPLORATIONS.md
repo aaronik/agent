@@ -23,3 +23,10 @@ CONS:
 5. Instructor
 GitHub: https://github.com/jxnl/instructor
 Abstraction for LLMs focused on structured output and prompt engineering, with support for multiple models/providers.
+
+AISuite
+
+PROS:
+
+CONS:
+* No advanced types in func sigs, including Literal[str1, str2]

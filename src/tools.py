@@ -1,9 +1,13 @@
+import os
 import requests
 import subprocess
 import duckduckgo_search as ddgs
 from src.util import extract_text
 
 MAX_RESPONSE_LENGTH = 1000000
+
+# Fetching the OpenAI API key from environment variable
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 def fetch(url: str):
@@ -114,15 +118,57 @@ def printz(cmd: str):
     )
 
 
-def gen_image(number: int, model: "dall-e-3", size: str, prompt: str):
+def gen_image(
+    number: int,
+    model: str,
+    size: str,
+    prompt: str
+):
     """
     Generate an image
 
     Use gen_image only when explicitly asked for an image,
     like 'generate an image of ..', or 'make a high quality image of ..'.
+    If the user has asked for a generated or created image, use this method.
+
+    Arguments:
+        number: number of images to create in parallel
+        model: either "dall-e-2" for low to normal quality images,
+               or "dall-e-3" for high quality images
+        size: the image dimensions
+        prompt: what text to give to the AI image creation service
     """
 
-    fmt.Printf(
-        "Generating %d image(s) using [%s], size: [%s] with prompt: %s\n",
-        params.N, params.Model, params.Size, params.Prompt,
+    print(
+        f"Generating {number} image(s) using [{model}], size: [{size}]",
+        f"with prompt: {prompt}\n"
     )
+
+    url = "https://api.openai.com/v1/images/generations"
+    data = {
+        "n": number,
+        "model": model,
+        "size": size,
+        "prompt": prompt
+    }
+
+    response = requests.post(
+        url,
+        json=data,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+    )
+
+    try:
+        response.raise_for_status()
+
+        print(response.text)
+        return (
+            response.text
+        )
+
+    except Exception as e:
+        print(f"⚠️ status: [{response.status_code}]")
+        return f"Error creating images: {e}"

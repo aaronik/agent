@@ -37,6 +37,7 @@ response: ChatCompletion = client.chat.completions.create(
         tools.search_images,
         tools.shell_command,
         tools.printz,
+        tools.gen_image,
     ],
     max_turns=20  # Maximum number of back-and-forth tool calls
 )
