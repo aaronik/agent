@@ -1,4 +1,5 @@
-from typing import Any, Dict
+import inspect
+from typing import Any, Callable
 from time import sleep
 import json
 import requests
@@ -11,6 +12,48 @@ client = OpenAI()
 starting_assistant = ""
 starting_thread = ""
 
+
+def function_to_tool(fn: Callable) -> ChatCompletionToolParam:
+    sig = inspect.signature(fn)
+
+    # Mapping from python type names to OpenAI-compatible types
+    type_map = {
+        'str': 'string',
+        'int': 'integer',
+        'float': 'number',
+        'bool': 'boolean',
+        'list': 'array',
+        'dict': 'object',
+    }
+
+    def get_openai_type(annotation):
+        # Handle annotations given as types
+        if hasattr(annotation, '__name__'):
+            return type_map.get(annotation.__name__, 'string')
+        # Fallback for other cases
+        return 'string'
+
+    return {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": fn.__doc__ or "",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    name: {"type": get_openai_type(param.annotation)}
+                    for name, param in sig.parameters.items()
+                    if param.annotation != inspect.Parameter.empty
+                },
+                "required": [
+                    name for name, param in sig.parameters.items()
+                    if param.default == inspect.Parameter.empty
+                ]
+            }
+        }
+    }
+
+
 def fetch(url: str, max_length: int = 1000000):
     """Fetch content from the given URL with a size limit."""
     try:
@@ -22,6 +65,7 @@ def fetch(url: str, max_length: int = 1000000):
         return text
     except Exception as e:
         return f"Error fetching URL {url}: {e}"
+
 
 tool_fetch = ChatCompletionToolParam(
     type="function",
@@ -38,6 +82,9 @@ tool_fetch = ChatCompletionToolParam(
     )
 )
 
+tool_fetch = function_to_tool(fetch)
+
+
 def create_assistant():
     if starting_assistant == "":
         my_assistant = client.beta.assistants.create(
@@ -50,6 +97,7 @@ def create_assistant():
         my_assistant = client.beta.assistants.retrieve(starting_assistant)
 
     return my_assistant
+
 
 def create_thread():
     empty_thread = client.beta.threads.create()
