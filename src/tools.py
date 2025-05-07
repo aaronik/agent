@@ -112,3 +112,17 @@ def printz(cmd: str):
     print(
         f"\n🔧 [printz], cmd: [{cmd}]"
     )
+
+
+def gen_image(number: int, model: "dall-e-3", size: str, prompt: str):
+    """
+    Generate an image
+
+    Use gen_image only when explicitly asked for an image,
+    like 'generate an image of ..', or 'make a high quality image of ..'.
+    """
+
+    fmt.Printf(
+        "Generating %d image(s) using [%s], size: [%s] with prompt: %s\n",
+        params.N, params.Model, params.Size, params.Prompt,
+    )

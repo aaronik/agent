@@ -1,11 +1,15 @@
 import sys
 import pprint
 import aisuite as ai
+import subprocess
 import src.tools as tools
 from openai.types.chat.chat_completion import ChatCompletion
 
 client = ai.Client()
 
+system_info = subprocess.run(
+    "uname -a", shell=True, capture_output=True, text=True
+).stdout
 
 cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
@@ -13,6 +17,7 @@ system_string = (
     "You are a helpful assistant."
     "Cite all sources and you include links in every citation."
     "Use as many shell commands as needed if it helps meet the user's request."
+    f"The user's system is: uname -a => {system_info}"
 )
 
 messages = [{

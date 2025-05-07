@@ -75,7 +75,10 @@ tool_fetch = ChatCompletionToolParam(
         parameters={
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "URL to fetch data from"}
+                "url": {
+                    "type": "string",
+                    "description": "URL to fetch data from"
+                }
             },
             "required": ["url"]
         }
@@ -176,7 +179,8 @@ def main():
         while run.status != "completed":
             run.status = get_run_status(my_thread.id, run.id)
 
-            # If assistant needs to call a function, it will enter the "requires_action" state
+            # If assistant needs to call a function, it will enter the
+            # "requires_action" state
             if run.status == "requires_action":
                 run_action(my_thread.id, run.id)
 

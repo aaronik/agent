@@ -3,7 +3,7 @@ from types import FunctionType
 from functools import wraps
 
 
-# Like a memoization, but just blanks out the tool call if it's been done before
+# Like a memoization, but blanks out the tool call if it's been done before
 def refuse_if_duplicate(func: FunctionType):
     cache = {}
 
