@@ -86,15 +86,19 @@ def search_images(text: str, max_results: int = 3):
     return text
 
 
-def run_shell_command(cmd: str):
+def run_shell_command(cmd: str, timeout: int = 10):
     """
-    Run a shell command on the user's machine
-    Use as many of these as needed to satisfy the user request
+    Run a shell command on the user's machine.
+    Use as many of these as needed to satisfy the user request.
+    A timeout, which defaults to 10, can be specified.
     """
 
     print(
-        f"\n🔧 [run_shell_command], cmd: [{cmd}]"
+        f"\n🔧 [run_shell_command], cmd: [{cmd}], timeout: [{timeout}]"
     )
+
+    # Long running commands will hose the agent, so let's prevent that:
+    cmd = f"timeout {timeout} {cmd}"
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
