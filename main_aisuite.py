@@ -19,10 +19,11 @@ user_request = cli_input if cli_input else input("What'll it be, boss? ")
 
 system_info = get_sys_info()
 system_string = (
-    "You are a helpful assistant."
-    "Cite all sources and you include links in every citation."
-    "Use as many shell commands as needed if it helps meet the user's request."
-    f"The user's system is: uname -a => {system_info}"
+    "* You are a CLI agent tool. You're run from the command line."
+    "* Cite all sources and you include links in every citation."
+    "* Use as many shell commands as needed if it helps meet"
+    "the user's request."
+    f"* The user's system is: uname -a => {system_info}"
 )
 
 messages: list[ai.Message] = [
