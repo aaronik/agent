@@ -214,7 +214,7 @@ def write_file(path: str, contents: str):
 
     path = sanitize_path(path)
 
-    print(f"\n🔧 [write_file], path [{path}], contents: [{contents[:10]}]")
+    print(f"\n🔧 [write_file], path [{path}], contents: [{contents[:20]}...]")
 
     try:
         # Ensure the directory exists, create if not
