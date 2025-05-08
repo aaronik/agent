@@ -3,7 +3,7 @@ import time
 import requests
 import subprocess
 import duckduckgo_search as ddgs
-from src.util import extract_text
+from src.util import extract_text, sanitize_path
 
 MAX_RESPONSE_LENGTH = 1000000
 
@@ -89,7 +89,7 @@ def search_images(text: str, max_results: int = 3):
 def run_shell_command(cmd: str):
     """
     Run a shell command on the user's machine
-    Use as many of these as needed to satisfy the user response
+    Use as many of these as needed to satisfy the user request
     """
 
     print(
@@ -185,8 +185,7 @@ def read_file(path: str):
             Must contain folder, even if just ./
     """
 
-    # Expand ~ to the full home directory path
-    path = os.path.expanduser(path)
+    path = sanitize_path(path)
 
     print(f"\n🔧 [read_file], path [{path}]")
 
@@ -213,8 +212,7 @@ def write_file(path: str, contents: str):
         contents - the contents you want written to the file
     """
 
-    # Expand ~ to the full home directory path
-    path = os.path.expanduser(path)
+    path = sanitize_path(path)
 
     print(f"\n🔧 [write_file], path [{path}], contents: [{contents[:10]}]")
 

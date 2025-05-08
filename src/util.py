@@ -6,6 +6,7 @@ from openai.types.chat.chat_completion import Choice
 import aisuite as ai
 from pydantic import BaseModel
 from static.pricing import pricing
+import os
 
 
 class TokenUsage(BaseModel):
@@ -82,3 +83,17 @@ def message_from_choice(choice: Choice) -> ai.Message:
 
 def message_from_user_input(user_input: str) -> ai.Message:
     return ai.Message(role="user", content=user_input)
+
+
+# Do some basic path sanitization:
+# * Ensure path is prefixed with folder
+# * Get shorthands like ~ expanded
+def sanitize_path(path: str):
+    expanded_path = os.path.expanduser(path)
+    if not (
+        expanded_path.startswith('/') or
+        expanded_path.startswith('./') or
+        expanded_path.startswith('../')
+    ):
+        expanded_path = './' + expanded_path
+    return expanded_path
