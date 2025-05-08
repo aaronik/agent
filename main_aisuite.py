@@ -66,6 +66,8 @@ while True:
             tools.run_shell_command,
             tools.printz,
             tools.gen_image,
+            tools.read_file,
+            tools.write_file,
         ],
         max_turns=20  # Maximum number of back-and-forth tool calls
     )

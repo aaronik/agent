@@ -174,3 +174,62 @@ def gen_image(
     except Exception as e:
         print(f"⚠️ status: [{response.status_code}]")
         return f"Error creating images: {e}"
+
+
+def read_file(path: str):
+    """
+    Read a file from the file system
+
+    Args:
+        path - relative path, ex. ./file.ext, or absolute path.
+            Must contain folder, even if just ./
+    """
+
+    # Expand ~ to the full home directory path
+    path = os.path.expanduser(path)
+
+    print(f"\n🔧 [read_file], path [{path}]")
+
+    try:
+        with open(path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except FileNotFoundError:
+        print(f"❌ File not found: {path}")
+        return f"file not found: {path}"
+    except IOError as e:
+        print(f"❌ IOError while reading file: {e}")
+        return f"IOError while reading file: {e}"
+
+
+def write_file(path: str, contents: str):
+    """
+    Write {contents} to the file at {path}
+    Overwrites file
+
+    Args:
+        path - relative path, ex. ./file.ext, or absolute path.
+            Must contain folder, even if just ./
+
+        contents - the contents you want written to the file
+    """
+
+    # Expand ~ to the full home directory path
+    path = os.path.expanduser(path)
+
+    print(f"\n🔧 [write_file], path [{path}], contents: [{contents[:10]}]")
+
+    try:
+        # Ensure the directory exists, create if not
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception as e:
+        print(f"❌ Error creating directories: {e}")
+        return f"Error creating directories: {e}"
+
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(contents)
+    except Exception as e:
+        print(f"❌ Error writing to file: {e}")
+        return f"Error writing to file: {e}"
+
+    return "Success"

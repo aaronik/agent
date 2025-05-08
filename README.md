@@ -37,7 +37,9 @@ python main.py [your arguments]
 
 ## Development
 - Pricing data changes over time, and there doesn't seem to be a good API to get at it.
-- So periodically we need to scrape good pricing pages and update this repo. To do that:
+  So periodically we need to scrape good pricing pages and update this repo. To do that:
 ```sh
 ./scripts/updating_pricing.sh
 ```
+  It's also possible to use the extract_prices.py script, if their page hasn't changed
+  too much since it was vibe coded.
