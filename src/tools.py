@@ -46,18 +46,18 @@ def search_text(text: str, max_results: int = 3):
 
     print(f"\n🔧 [search], string: [{text}], max_results: [{max_results}]")
 
-    try:
-        dds = ddgs.duckduckgo_search.DDGS()
-    except Exception as e:
-        print(f"⚠️ duck duck go search error: {e}")
-        time.sleep(0.5)
-        return search_text(text, max_results)
+    dds = ddgs.duckduckgo_search.DDGS()
 
-    results = dds.text(text, max_results=max_results)
+    results = []
+    try:
+        results = dds.text(text, max_results=max_results)
+    except Exception as e:
+        print(f"⚠️ duck duck go search error: [{e}] (retrying...)")
+        time.sleep(0.5)
 
     text = ""
 
-    for i, result in enumerate(results or [], start=1):
+    for i, result in enumerate(results, start=1):
         print(f"🔗 {result['href']}")
         text += f"{i}. {result['title']}\n   {result['href']}\n"
 
