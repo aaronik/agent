@@ -5,6 +5,7 @@ from functools import wraps
 from openai.types.chat.chat_completion import Choice
 import aisuite as ai
 from pydantic import BaseModel
+from static.pricing import pricing
 
 
 class TokenUsage(BaseModel):
@@ -12,13 +13,27 @@ class TokenUsage(BaseModel):
     completion_tokens: int
 
 
-def print_token_usage(token_usage: TokenUsage):
-    print(
-        "\n---\ntoken usage",
-        f"\nprompt: {token_usage.prompt_tokens}",
-        f"\ncompletion: {token_usage.completion_tokens}",
-        f"\ntotal: {token_usage.completion_tokens + token_usage.prompt_tokens}"
-    )
+def print_token_usage(model: str, tu: TokenUsage):
+    model_pricing = pricing.get(model, None)
+    if not model_pricing:
+        print(
+            "\n---\ntoken usage (pricing not available)",
+            f"\nprompt: {tu.prompt_tokens}",
+            f"\ncompletion: {tu.completion_tokens}",
+            f"\ntotal: {tu.completion_tokens + tu.prompt_tokens}"
+        )
+    else:
+        input_pricing = model_pricing["input"]
+        output_pricing = model_pricing["output"]
+        input_price = round(input_pricing * tu.prompt_tokens, 4)
+        output_price = round(output_pricing * tu.completion_tokens, 4)
+        total = round(input_price + output_price, 4)
+        print(
+            "\n---\nusage",
+            f"\nprompt: {tu.prompt_tokens} (${input_price})",
+            f"\ncompletion: {tu.completion_tokens} (${output_price})",
+            f"\ntotal: {tu.completion_tokens + tu.prompt_tokens} (${total})"
+        )
 
 
 # Like a memoization, but blanks out the tool call if it's been done before

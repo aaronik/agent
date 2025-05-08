@@ -34,7 +34,7 @@ def fetch(url: str):
         )
 
     except Exception as e:
-        print(f"⚠️ status: [{response.status_code}]")
+        print(f"⚠️ status: [{response.status_code}], e: [{e}]")
         return f"Error fetching URL {url}: {e}"
 
 
@@ -86,14 +86,14 @@ def search_images(text: str, max_results: int = 3):
     return text
 
 
-def shell_command(cmd: str):
+def run_shell_command(cmd: str):
     """
     Run a shell command on the user's machine
     Use as many of these as needed to satisfy the user response
     """
 
     print(
-        f"\n🔧 [shell_command], cmd: [{cmd}]"
+        f"\n🔧 [run_shell_command], cmd: [{cmd}]"
     )
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)

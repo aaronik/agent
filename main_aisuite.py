@@ -13,6 +13,7 @@ from src.util import (
     print_token_usage,
 )
 
+MODEL = "openai:gpt-4.1-mini"
 
 cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
@@ -46,7 +47,7 @@ token_usage = TokenUsage(
 
 # Handle Ctrl-C: print total tokens and exit
 def signal_handler(*_):
-    print_token_usage(token_usage)
+    print_token_usage(MODEL, token_usage)
     exit(0)
 
 
@@ -56,13 +57,13 @@ client = ai.Client()
 
 while True:
     response: ChatCompletion = client.chat.completions.create(
-        model="openai:gpt-4.1-mini",
+        model=MODEL,
         messages=messages,
         tools=[
             tools.fetch,
             tools.search_text,
             tools.search_images,
-            tools.shell_command,
+            tools.run_shell_command,
             tools.printz,
             tools.gen_image,
         ],

@@ -34,3 +34,10 @@ python main.py [your arguments]
 - Automate arbitrary command-line flows with natural language
 - Chain shell commands together based on AI instructions
 - Integrate with OpenAI GPT models
+
+## Development
+- Pricing data changes over time, and there doesn't seem to be a good API to get at it.
+- So periodically we need to scrape good pricing pages and update this repo. To do that:
+```sh
+./scripts/updating_pricing.sh
+```
