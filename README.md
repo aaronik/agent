@@ -1,6 +1,6 @@
 # AI CLI Tool
 
-A command-line tool to automate arbitrary flows using AI (OpenAI API).
+A command-line tool to automate arbitrary flows using AI.
 
 ## Setup
 
@@ -25,15 +25,20 @@ export OPENAI_API_KEY=your_api_key_here
 ## Running the CLI
 
 ```bash
-python main.py [your arguments]
+./run.sh [your initial message]
 ```
 
 ---
 
-## Features (Planned)
-- Automate arbitrary command-line flows with natural language
-- Chain shell commands together based on AI instructions
-- Integrate with OpenAI GPT models
+## Running Tests
+
+To run the tests, use your preferred test runner or execute the following command in the project root directory:
+
+```bash
+pytest tests
+```
+
+---
 
 ## Development
 - Pricing data changes over time, and there doesn't seem to be a good API to get at it.
