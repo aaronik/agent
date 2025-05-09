@@ -14,6 +14,7 @@ from src.util import (
 )
 
 MODEL = "openai:gpt-4.1-mini"
+# MODEL = "ollama:llama3.1:latest"
 
 cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
@@ -69,7 +70,7 @@ while True:
             tools.read_file,
             tools.write_file,
         ],
-        max_turns=20  # Maximum number of back-and-forth tool calls
+        max_turns=50  # Maximum number of back-and-forth tool calls
     )
 
     if response.usage:
