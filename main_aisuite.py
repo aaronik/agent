@@ -23,11 +23,12 @@ user_request = cli_input if cli_input else input("What'll it be, boss? ")
 
 system_info = get_sys_info()
 system_string = (
-    "* You are a CLI agent tool. You're run from the command line."
-    "* Cite all sources and you include links in every citation."
-    "* Use as many shell commands as needed if it helps meet"
-    "the user's request."
-    f"* The user's system is: uname -a => {system_info}"
+    "You are a CLI agent tool. You're run from the command line."
+    "Your purpose is to automate tasks for the user."
+    "You have been supplied with a series of tools to get the job done."
+    "Remember to:"
+    "- Cite all sources include links in every citation."
+    f"The user's system is: uname -a => {system_info}"
 )
 
 
@@ -61,6 +62,8 @@ client = ai.Client()
 
 
 while True:
+    print("\n---\n")
+
     response: ChatCompletion = client.chat.completions.create(
         model=MODEL,
         # model_dumps are for ollama, otherwise they no worky
@@ -94,5 +97,3 @@ while True:
 
     user_message = message_from_user_input(user_input)
     messages.append(user_message)
-
-    print("\n---\n")
