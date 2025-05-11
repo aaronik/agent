@@ -13,8 +13,8 @@ from src.util import (
     print_token_usage,
 )
 
-# MODEL = "openai:gpt-4.1-mini"
-MODEL = "openai:o4-mini"
+MODEL = "openai:gpt-4.1-mini"
+# MODEL = "openai:o4-mini"
 # MODEL = "openai:gpt-3.5-turbo"
 # MODEL = "ollama:llama3.1:latest"  # Doesn't seem to accept tool calls
 
@@ -73,6 +73,7 @@ while True:
             tools.gen_image,
             tools.read_file,
             tools.write_file,
+            tools.apply_diff,
         ],
         max_turns=50  # Maximum number of back-and-forth tool calls
     )
@@ -81,11 +82,11 @@ while True:
         token_usage.prompt_tokens += response.usage.prompt_tokens
         token_usage.completion_tokens += response.usage.completion_tokens
 
-    for i, choice in enumerate(response.choices):
-        messages.append(message_from_choice(choice))
+    choice = response.choices[0]
+    messages.append(message_from_choice(choice))
 
-        print("\n---\n")
-        print(choice.message.content)
+    print("\n---\n")
+    print(choice.message.content)
 
     print("\n---\n")
     user_input = input("Anything else? ")

@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Any
 import requests
 import subprocess
 import duckduckgo_search as ddgs
@@ -9,6 +10,18 @@ MAX_RESPONSE_LENGTH = 1000000
 
 # Fetching the OpenAI API key from environment variable
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+
+# This is the logging utility used to log from tools
+def log_tool(name: str, **kwargs: Any):
+    # Format each key-value pair in kwargs as key: [value]
+    args_str = ", ".join(f"{key}: [{value}]" for key, value in kwargs.items())
+    print(f"🔧 [{name}]" + (", " + args_str if args_str else ""))
+
+    def p(string: str):
+        print("  " + string)
+
+    return p
 
 
 def fetch(url: str):
@@ -235,3 +248,48 @@ def write_file(path: str, contents: str):
         return f"Error writing to file: {e}"
 
     return "Success"
+
+
+def apply_diff(file_path: str, diff: str):
+    """
+    Apply a unified diff string patch to the file at file_path.
+
+    Args:
+        file_path: path to the target file to patch
+        diff: the unified diff string to apply
+
+    Returns:
+        A string indicating success or error message
+    """
+
+    file_path = sanitize_path(file_path)
+    p = log_tool("apply_diff_to_file", file_path=file_path)
+
+    # Write the diff content to a temporary patch file
+    tmp_patch_file_path = file_path + ".patch_temp"
+    try:
+        with open(tmp_patch_file_path, "w", encoding="utf-8") as patch_file:
+            patch_file.write(diff)
+    except Exception as e:
+        p(f"❌ Error writing patch file: {e}")
+        return f"Error writing patch file: {e}"
+
+    # Apply the patch using the patch command
+    try:
+        # Flags:
+        # -u unified diff format
+        # -r disables reject files generation
+        cmd = f"patch -u {file_path} -i {tmp_patch_file_path} -r -"
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            p(f"❌ Patch command failed: {result.stderr.strip()}")
+            return f"Patch command failed: {result.stderr.strip()}"
+    finally:
+        try:
+            os.remove(tmp_patch_file_path)
+        except Exception as e:
+            p(f"⚠️ Warning: could not remove temporary patch file: {e}")
+
+    return "Patch applied successfully"

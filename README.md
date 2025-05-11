@@ -50,5 +50,6 @@ pytest tests
   too much since it was vibe coded.
 
 ## TODO
-- Add files to initial request as tool
+- Trim messages
+- Add files to initial request as tool, README.md
 - Change uname -a to a tool message rather than part of system message
