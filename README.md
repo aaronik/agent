@@ -48,3 +48,7 @@ pytest tests
 ```
   It's also possible to use the extract_prices.py script, if their page hasn't changed
   too much since it was vibe coded.
+
+## TODO
+- Add files to initial request as tool
+- Change uname -a to a tool message rather than part of system message

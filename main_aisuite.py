@@ -13,8 +13,10 @@ from src.util import (
     print_token_usage,
 )
 
-MODEL = "openai:gpt-4.1-mini"
-# MODEL = "ollama:llama3.1:latest"
+# MODEL = "openai:gpt-4.1-mini"
+MODEL = "openai:o4-mini"
+# MODEL = "openai:gpt-3.5-turbo"
+# MODEL = "ollama:llama3.1:latest"  # Doesn't seem to accept tool calls
 
 cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
@@ -27,6 +29,7 @@ system_string = (
     "the user's request."
     f"* The user's system is: uname -a => {system_info}"
 )
+
 
 messages: list[ai.Message] = [
     ai.Message(
@@ -56,10 +59,11 @@ signal.signal(signal.SIGINT, signal_handler)
 
 client = ai.Client()
 
+
 while True:
     response: ChatCompletion = client.chat.completions.create(
         model=MODEL,
-        messages=messages,
+        messages=[message.model_dump() for message in messages],  # for ollama
         tools=[
             tools.fetch,
             tools.search_text,
@@ -73,7 +77,7 @@ while True:
         max_turns=50  # Maximum number of back-and-forth tool calls
     )
 
-    if response.usage:
+    if hasattr(response, 'usage') and response.usage is not None:
         token_usage.prompt_tokens += response.usage.prompt_tokens
         token_usage.completion_tokens += response.usage.completion_tokens
 
