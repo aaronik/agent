@@ -1,6 +1,8 @@
 import os
-import time
+import inspect
 from typing import Any
+
+import time
 import requests
 import subprocess
 import duckduckgo_search as ddgs
@@ -13,7 +15,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 # This is the logging utility used to log from tools
-def log_tool(name: str, **kwargs: Any):
+def log_tool(**kwargs: Any):
+    # Get the name of the calling function from the call stack
+    frame = inspect.currentframe()
+    caller_frame = frame.f_back if frame is not None else None
+
+    name = (
+        caller_frame.f_code.co_name
+        if caller_frame is not None
+        else '<unknown>'
+    )
+
     # Format each key-value pair in kwargs as key: [value]
     args_str = ", ".join(f"{key}: [{value}]" for key, value in kwargs.items())
     print(f"🔧 [{name}]" + (", " + args_str if args_str else ""))
@@ -27,7 +39,7 @@ def log_tool(name: str, **kwargs: Any):
 def fetch(url: str):
     """Fetch content from the provided URL."""
 
-    print(f"\n🔧 [fetch], url: [{url}]")
+    p = log_tool(url=url)
 
     response = requests.get(url)
     try:
@@ -35,7 +47,7 @@ def fetch(url: str):
         text = extract_text(response.text)
 
         if len(text) > MAX_RESPONSE_LENGTH:
-            print("⚠️ truncating response")
+            p("⚠️ truncating response")
             return (
                 f"{text[:MAX_RESPONSE_LENGTH]}\n\n"
                 "[Content truncated due to size limitations]"
@@ -47,7 +59,7 @@ def fetch(url: str):
         )
 
     except Exception as e:
-        print(f"⚠️ status: [{response.status_code}], e: [{e}]")
+        p(f"⚠️ status: [{response.status_code}], e: [{e}]")
         return f"Error fetching URL {url}: {e}"
 
 
@@ -57,7 +69,7 @@ def search_text(text: str, max_results: int = 3):
     Limit the search to max_results
     """
 
-    print(f"\n🔧 [search], string: [{text}], max_results: [{max_results}]")
+    p = log_tool(text=text, max_results=max_results)
 
     dds = ddgs.duckduckgo_search.DDGS()
 
@@ -65,13 +77,13 @@ def search_text(text: str, max_results: int = 3):
     try:
         results = dds.text(text, max_results=max_results)
     except Exception as e:
-        print(f"⚠️ duck duck go search error: [{e}] (retrying...)")
+        p(f"⚠️ duck duck go search error: [{e}] (retrying...)")
         time.sleep(0.5)
 
     text = ""
 
     for i, result in enumerate(results, start=1):
-        print(f"🔗 {result['href']}")
+        p(f"🔗 {result['href']}")
         text += f"{i}. {result['title']}\n   {result['href']}\n"
 
     return text
@@ -83,9 +95,7 @@ def search_images(text: str, max_results: int = 3):
     Limit the search to max_results
     """
 
-    print(
-        f"\n🔧 [search_images], string: [{text}], max_results: [{max_results}]"
-    )
+    p = log_tool(text=text, max_results=max_results)
 
     dds = ddgs.duckduckgo_search.DDGS()
     results = dds.images(text, max_results=max_results)
@@ -93,7 +103,7 @@ def search_images(text: str, max_results: int = 3):
     text = ""
 
     for i, result in enumerate(results or [], start=1):
-        print(f"🖼️ {result['image']}")
+        p(f"🖼️ {result['image']}")
         text += f"{i}. {result['title']}\n   {result['image']}\n"
 
     return text
@@ -106,16 +116,14 @@ def run_shell_command(cmd: str, timeout: int = 10):
     A timeout, which defaults to 10, can be specified.
     """
 
-    print(
-        f"\n🔧 [run_shell_command], cmd: [{cmd}], timeout: [{timeout}]"
-    )
+    p = log_tool(cmd=cmd, timeout=timeout)
 
     # Long running commands will hose the agent, so let's prevent that:
     cmd = f"timeout {timeout} {cmd}"
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
-    print(f"⮑  {result.returncode}")
+    p(f"⮑  {result.returncode}")
 
     text = (
         "[STDOUT]",
@@ -136,9 +144,7 @@ def printz(cmd: str):
     Named after the zsh print -z command.
     """
 
-    print(
-        f"\n🔧 [printz], cmd: [{cmd}]"
-    )
+    log_tool(cmd=cmd)
 
 
 def gen_image(
@@ -162,10 +168,7 @@ def gen_image(
         prompt: what text to give to the AI image creation service
     """
 
-    print(
-        f"Generating {number} image(s) using [{model}], size: [{size}]",
-        f"with prompt: {prompt}\n"
-    )
+    p = log_tool(number=number, model=model, size=size, prompt=prompt)
 
     url = "https://api.openai.com/v1/images/generations"
     data = {
@@ -189,7 +192,7 @@ def gen_image(
         return response.text
 
     except Exception as e:
-        print(f"⚠️ status: [{response.status_code}]")
+        p(f"⚠️ status: [{response.status_code}]")
         return f"Error creating images: {e}"
 
 
@@ -204,16 +207,16 @@ def read_file(path: str):
 
     path = sanitize_path(path)
 
-    print(f"\n🔧 [read_file], path [{path}]")
+    p = log_tool(path=path)
 
     try:
         with open(path, 'r', encoding='utf-8') as file:
             return file.read()
     except FileNotFoundError:
-        print(f"❌ File not found: {path}")
+        p(f"❌ File not found: {path}")
         return f"file not found: {path}"
     except IOError as e:
-        print(f"❌ IOError while reading file: {e}")
+        p(f"❌ IOError while reading file: {e}")
         return f"IOError while reading file: {e}"
 
 
@@ -231,20 +234,20 @@ def write_file(path: str, contents: str):
 
     path = sanitize_path(path)
 
-    print(f"\n🔧 [write_file], path [{path}], contents: [{contents[:20]}...]")
+    p = log_tool(path=path, contents=contents[:20])
 
     try:
         # Ensure the directory exists, create if not
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except Exception as e:
-        print(f"❌ Error creating directories: {e}")
+        p(f"❌ Error creating directories: {e}")
         return f"Error creating directories: {e}"
 
     try:
         with open(path, 'w', encoding='utf-8') as f:
             f.write(contents)
     except Exception as e:
-        print(f"❌ Error writing to file: {e}")
+        p(f"❌ Error writing to file: {e}")
         return f"Error writing to file: {e}"
 
     return "Success"
@@ -263,7 +266,7 @@ def apply_diff(file_path: str, diff: str):
     """
 
     file_path = sanitize_path(file_path)
-    p = log_tool("apply_diff_to_file", file_path=file_path)
+    p = log_tool(file_path=file_path, diff=diff)
 
     # Write the diff content to a temporary patch file
     tmp_patch_file_path = file_path + ".patch_temp"

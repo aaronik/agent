@@ -63,7 +63,8 @@ client = ai.Client()
 while True:
     response: ChatCompletion = client.chat.completions.create(
         model=MODEL,
-        messages=[message.model_dump() for message in messages],  # for ollama
+        # model_dumps are for ollama, otherwise they no worky
+        messages=[message.model_dump() for message in messages],
         tools=[
             tools.fetch,
             tools.search_text,
