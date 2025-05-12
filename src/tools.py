@@ -29,7 +29,7 @@ def log_tool(**kwargs: Any):
 
     # Format each key-value pair in kwargs as key: [value]
     args_str = ", ".join(f"{key}: [{value}]" for key, value in kwargs.items())
-    print(f"🔧 [{name}]" + (", " + args_str if args_str else ""))
+    print(f"[{name}]" + (", " + args_str if args_str else ""))
 
     def p(string: str):
         print("  " + string)
@@ -110,11 +110,11 @@ def search_images(text: str, max_results: int = 3):
     return text
 
 
-def run_shell_command(cmd: str, timeout: int = 10):
+def run_shell_command(cmd: str, timeout: int = 30):
     """
     Run a shell command on the user's machine.
     Use as many of these as needed to satisfy the user request.
-    A timeout, which defaults to 10, can be specified.
+    A timeout, which defaults to 30, can be specified.
     """
 
     p = log_tool(cmd=cmd, timeout=timeout)
