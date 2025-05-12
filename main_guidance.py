@@ -1,18 +1,17 @@
 import os
 import sys
-from functions import fetch  # Simulated tool interface, replace with actual integration
+# Simulated tool interface, replace with actual integration
+from src.tools import fetch
 
 from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
-def fetch_content(url):
-    # Use the fetch tool to get document content from the web
-    result = fetch.fetch(url=url, max_length=10000)
-    return result['text'] if 'text' in result else ''
 
 def get_ai_answer(prompt):
     # Setup AzureOpenAI client with environment variables and Azure AD token provider
-    token_provider = get_bearer_token_provider(DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default")
+    token_provider = get_bearer_token_provider(
+        DefaultAzureCredential(),
+        "https://cognitiveservices.azure.com/.default"
+    )
 
     client = AzureOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -31,6 +30,7 @@ def get_ai_answer(prompt):
     )
     return response.choices[0].text.strip()
 
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python ai_cli.py <question>")
@@ -42,16 +42,18 @@ def main():
     doc_url = "https://learn.microsoft.com/en-us/azure/ai-services/openai/quickstart"
 
     print(f"Fetching documentation content from: {doc_url}")
-    doc_content = fetch_content(doc_url)
+    doc_content = fetch(doc_url)
 
     # Compose prompt with fetched doc content and user question
-    prompt = f"Using the following document content, answer the question:\n\n{doc_content}\n\nQuestion: {user_question}\nAnswer:"
+    prompt = f"Using the following document content, answer the question:\n\n{
+        doc_content}\n\nQuestion: {user_question}\nAnswer:"
 
     print("Querying AI model...")
     answer = get_ai_answer(prompt)
 
     print("\nAI Answer:")
     print(answer)
+
 
 if __name__ == "__main__":
     main()
