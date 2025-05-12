@@ -50,3 +50,5 @@ pytest tests
   too much since it was vibe coded.
 
 ## TODO
+
+- Test infinite loop
