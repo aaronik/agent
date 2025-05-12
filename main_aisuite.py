@@ -76,8 +76,39 @@ client = ai.Client()
 
 MAX_RETRIES = 5
 
+
+def trim_messages_for_context_limit(
+        messages: list[ai.Message],
+        retries: int,
+        max_retries: int,
+        max_trim: int = 2
+):
+    """
+    Trim recent user and assistant messages to reduce context length.
+    Keeps at least the first system message and user request.
+    Returns updated messages and whether trimming was done.
+    """
+    if retries >= max_retries:
+        return
+    if len(messages) > 4:
+        messages = messages[:-max_trim]
+        messages.append(ai.Message(
+            role='system',
+            content=(
+                f"[SYSTEM NOTE] Previous messages trimmed"
+                "due to context length limit "
+                f"after {retries} retry(ies)."
+            )
+        ))
+        print(
+            f"[INFO] Context length exceeded,"
+            f"trimming recent messages. Retry {retries}/{max_retries}")
+        return
+    print("[ERROR] Cannot trim messages further. Aborting.")
+    return
+
+
 while True:
-    print("\n---\n")
     retries = 0
     while True:
         try:
@@ -103,25 +134,13 @@ while True:
             err_str = str(e)
             # Check if it's a JSON error string with
             # .code context_length_exceeded and try trimming messages
-            if 'context_length_exceeded' in err_str and retries < MAX_RETRIES:
+            if 'context_length_exceeded' in err_str:
                 retries += 1
-                # Remove recent user and assistant messages except system
-                # Keep at least first system message and user request
-                # Remove 2 messages per retry if possible
-                if len(messages) > 4:
-                    messages = messages[:-2]
-                    # Add a system note about trimming
-                    messages.append(ai.Message(
-                        role='system',
-                        content=f"[SYSTEM NOTE] Previous messages trimmed due to context length limit after {retries} retry(ies)."
-                    ))
-                    print(f"[INFO] Context length exceeded, trimming recent messages. Retry {retries}/{MAX_RETRIES}")
-                    continue
-                else:
-                    print("[ERROR] Cannot trim messages further. Aborting.")
-                    raise
+                trim_messages_for_context_limit(
+                    messages, retries, MAX_RETRIES
+                )
             else:
-                raise
+                raise e
 
     if hasattr(response, 'usage') and response.usage is not None:
         token_usage.prompt_tokens += response.usage.prompt_tokens
@@ -139,3 +158,5 @@ while True:
 
     user_message = message_from_user_input(user_input)
     messages.append(user_message)
+
+    print("\n---\n")
