@@ -1,6 +1,8 @@
-# AI CLI Tool
+# Agent
 
-A command-line tool to automate arbitrary flows using AI.
+A command-line tool to automate arbitrary requests autonomously using AI.
+This program gives the AI full control to runs arbitrary code, so don't use
+this with AIs you don't totally trust.
 
 ## Setup
 
