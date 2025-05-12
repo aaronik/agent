@@ -54,10 +54,7 @@ def fetch(url: str):
                 "[Content truncated due to size limitations]"
             )
 
-        return (
-            f"[URL]: {url}\n\n",
-            text
-        )
+        return f"[URL]: {url}\n\n" + text
 
     except Exception as e:
         p(f"⚠️ status: [{response.status_code}], e: [{e}]")
