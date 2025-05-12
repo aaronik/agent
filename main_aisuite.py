@@ -97,11 +97,14 @@ while True:
         max_turns=50  # Maximum number of back-and-forth tool calls
     )
 
+    # Update price state, ollama has none and response is "object"
     if hasattr(response, 'usage') and response.usage is not None:
         token_usage.prompt_tokens += response.usage.prompt_tokens
         token_usage.completion_tokens += response.usage.completion_tokens
 
     choice = response.choices[0]
+
+    # Tested once and I believe this is necessary, should test
     messages.append(message_from_choice(choice))
 
     print("\n---\n")
