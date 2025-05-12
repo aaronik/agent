@@ -101,8 +101,8 @@ while True:
             break
         except Exception as e:
             err_str = str(e)
-            # Check if it's a JSON error string with .code context_length_exceeded
-            # and try trimming messages
+            # Check if it's a JSON error string with
+            # .code context_length_exceeded and try trimming messages
             if 'context_length_exceeded' in err_str and retries < MAX_RETRIES:
                 retries += 1
                 # Remove recent user and assistant messages except system
