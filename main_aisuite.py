@@ -7,7 +7,9 @@ from openai.types.chat.chat_completion import ChatCompletion
 
 from src.util import (
     TokenUsage,
-    get_sys_info,
+    sys_ls,
+    sys_pwd,
+    sys_uname,
     message_from_choice,
     message_from_user_input,
     print_token_usage,
@@ -21,17 +23,16 @@ MODEL = "openai:gpt-4.1-mini"
 cli_input = " ".join(sys.argv[1:])
 user_request = cli_input if cli_input else input("What'll it be, boss? ")
 
-system_info = get_sys_info()
 system_string = (
     "You are a CLI agent tool. You're run from the command line."
     "Your purpose is to automate tasks for the user."
     "You have been supplied with a series of tools to get the job done."
+    "Prefer taking action over asking the user permission."
     "Remember to:"
     "- Cite all sources include links in every citation."
-    f"The user's system is: uname -a => {system_info}"
 )
 
-
+# Main chat state
 messages: list[ai.Message] = [
     ai.Message(
         role="system",
@@ -40,10 +41,22 @@ messages: list[ai.Message] = [
     ai.Message(
         role="user",
         content=user_request
+    ),
+    ai.Message(
+        role="system",
+        content=f"[SYSTEM INFO] uname -a:\n{sys_uname()}"
+    ),
+    ai.Message(
+        role="system",
+        content=f"[SYSTEM INFO] pwd:\n{sys_pwd()}"
+    ),
+    ai.Message(
+        role="system",
+        content=f"[SYSTEM INFO] ls -l:\n{sys_ls()}"
     )
 ]
 
-
+# Our token usage state, periodically updated throughout session
 token_usage = TokenUsage(
     prompt_tokens=0,
     completion_tokens=0

@@ -1,7 +1,7 @@
 import unittest
 import os
 
-from src.util import extract_text, get_sys_info, sanitize_path
+from src.util import extract_text, sys_uname, sanitize_path
 
 
 class TestUtilFunctions(unittest.TestCase):
@@ -11,8 +11,8 @@ class TestUtilFunctions(unittest.TestCase):
         expected = 'Hello World!'
         self.assertEqual(extracted, expected)
 
-    def test_get_sys_info(self):
-        info = get_sys_info()
+    def test_sys_uname(self):
+        info = sys_uname()
         self.assertIn('Darwin', info)
 
     def test_sanitize_path(self):

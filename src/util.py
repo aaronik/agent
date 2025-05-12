@@ -71,9 +71,29 @@ def extract_text(html: str):
 
 
 # Simple one to get the uname info of the running machine
-def get_sys_info():
+def sys_uname():
     return subprocess.run(
         "uname -a", shell=True, capture_output=True, text=True
+    ).stdout
+
+
+def sys_ls():
+    return subprocess.run(
+        "ls -l", shell=True, capture_output=True, text=True
+    ).stdout
+
+
+def sys_pwd():
+    return subprocess.run(
+        "pwd", shell=True, capture_output=True, text=True
+    ).stdout
+
+
+
+# Simple one to get the uname info of the running machine
+def get_current_filetree():
+    return subprocess.run(
+        "find . -maxdepth 2", shell=True, capture_output=True, text=True
     ).stdout
 
 

@@ -51,6 +51,4 @@ pytest tests
 
 ## TODO
 - Trim messages
-- Add files to initial request as tool, README.md
-- Change uname -a to a tool message rather than part of system message
 - Optimize all tool call messages

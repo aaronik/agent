@@ -277,7 +277,7 @@ def apply_diff(file_path: str, diff: str):
         p(f"❌ Error writing patch file: {e}")
         return f"Error writing patch file: {e}"
 
-    # Apply the patch using the patch command
+    # Apply the patch
     try:
         # Flags:
         # -u unified diff format
