@@ -28,6 +28,7 @@ system_string = (
     "Your purpose is to automate tasks for the user."
     "You have been supplied with a series of tools to get the job done."
     "Prefer taking action over asking the user permission."
+    "Aggressively trim any messages that aren't pertinent to latest chat."
     "Remember to:"
     "- Cite all sources include links in every citation."
 )
@@ -91,6 +92,7 @@ while True:
             tools.read_file,
             tools.write_file,
             tools.apply_diff,
+            tools.build_trim_message(messages),
         ],
         max_turns=50  # Maximum number of back-and-forth tool calls
     )

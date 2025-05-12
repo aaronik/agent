@@ -50,5 +50,3 @@ pytest tests
   too much since it was vibe coded.
 
 ## TODO
-- Trim messages
-- Optimize all tool call messages

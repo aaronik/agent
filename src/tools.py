@@ -3,6 +3,7 @@ import inspect
 from typing import Any
 
 import time
+import aisuite
 import requests
 import subprocess
 import duckduckgo_search as ddgs
@@ -296,3 +297,32 @@ def apply_diff(file_path: str, diff: str):
             p(f"⚠️ Warning: could not remove temporary patch file: {e}")
 
     return "Patch applied successfully"
+
+
+def build_trim_message(messages: list[aisuite.Message]):
+    def trim_message(index: int, new_content: str):
+        """
+        Remove or rewrite one of the messages in the history of this chat.
+
+        Args:
+            index: the position in the messages array of the message to modify
+            new_content:
+                If empty string, message is deleted.
+                Otherwise, message content is overwritten with new_content
+        """
+
+        p = log_tool(index=index, new_content=new_content)
+
+        try:
+            if new_content == "":
+                del messages[index]
+            else:
+                messages[index].content = new_content
+
+            p(f"✅ message {index} trimmed")
+            return f"message[{index}] successfully modified"
+        except Exception as e:
+            p(f"❌ trim failed: {e}")
+            return f"tool trim_message failed: {e}"
+
+    return trim_message
