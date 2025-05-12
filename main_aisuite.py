@@ -74,37 +74,61 @@ signal.signal(signal.SIGINT, signal_handler)
 
 client = ai.Client()
 
+MAX_RETRIES = 5
 
 while True:
     print("\n---\n")
+    retries = 0
+    while True:
+        try:
+            response: ChatCompletion = client.chat.completions.create(
+                model=MODEL,
+                messages=[message.model_dump() for message in messages],
+                tools=[
+                    tools.fetch,
+                    tools.search_text,
+                    tools.search_images,
+                    tools.run_shell_command,
+                    tools.printz,
+                    tools.gen_image,
+                    tools.read_file,
+                    tools.write_file,
+                    tools.apply_diff,
+                    tools.build_trim_message(messages),
+                ],
+                max_turns=50
+            )
+            break
+        except Exception as e:
+            err_str = str(e)
+            # Check if it's a JSON error string with .code context_length_exceeded
+            # and try trimming messages
+            if 'context_length_exceeded' in err_str and retries < MAX_RETRIES:
+                retries += 1
+                # Remove recent user and assistant messages except system
+                # Keep at least first system message and user request
+                # Remove 2 messages per retry if possible
+                if len(messages) > 4:
+                    messages = messages[:-2]
+                    # Add a system note about trimming
+                    messages.append(ai.Message(
+                        role='system',
+                        content=f"[SYSTEM NOTE] Previous messages trimmed due to context length limit after {retries} retry(ies)."
+                    ))
+                    print(f"[INFO] Context length exceeded, trimming recent messages. Retry {retries}/{MAX_RETRIES}")
+                    continue
+                else:
+                    print("[ERROR] Cannot trim messages further. Aborting.")
+                    raise
+            else:
+                raise
 
-    response: ChatCompletion = client.chat.completions.create(
-        model=MODEL,
-        # model_dumps are for ollama, otherwise they no worky
-        messages=[message.model_dump() for message in messages],
-        tools=[
-            tools.fetch,
-            tools.search_text,
-            tools.search_images,
-            tools.run_shell_command,
-            tools.printz,
-            tools.gen_image,
-            tools.read_file,
-            tools.write_file,
-            tools.apply_diff,
-            tools.build_trim_message(messages),
-        ],
-        max_turns=50  # Maximum number of back-and-forth tool calls
-    )
-
-    # Update price state, ollama has none and response is "object"
     if hasattr(response, 'usage') and response.usage is not None:
         token_usage.prompt_tokens += response.usage.prompt_tokens
         token_usage.completion_tokens += response.usage.completion_tokens
 
     choice = response.choices[0]
 
-    # Tested once and I believe this is necessary, should test
     messages.append(message_from_choice(choice))
 
     print("\n---\n")
