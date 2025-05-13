@@ -57,7 +57,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Initial user input from command line
-    user_input = sys.argv[1] or input("What's up? ")
+    user_input = " ".join(sys.argv[1:]) or input("What's up? ")
 
     # Initialize state with typed messages
     state = AgentState(messages=[
@@ -88,6 +88,7 @@ if __name__ == "__main__":
         # Get next user input
         print("\n---\n")
         user_input = input("Anything else? ")
+        print("\n---\n")
 
         # Append new user message to state
         state.messages.append(HumanMessage(content=user_input))
