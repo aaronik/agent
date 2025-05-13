@@ -1,11 +1,22 @@
 import sys
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-from src.tools import search_text, fetch
+import src.tools as tools
+from src.constants import system_string
+from src.util import sys_ls, sys_pwd, sys_uname
 
 model = ChatOpenAI(model="gpt-4.1-mini")
 
-tools = [search_text, fetch]
+tools = [
+    tools.search_text,
+    tools.search_images,
+    tools.fetch,
+    tools.read_file,
+    tools.write_file,
+    tools.apply_diff,
+    tools.gen_image,
+    tools.run_shell_command,
+]
 
 agent = create_react_agent(model, tools=tools)
 
@@ -15,10 +26,16 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Initial user input from command line
-    user_input = sys.argv[1]
+    user_input = sys.argv[1] or input("What's up? ")
 
     # State for conversation/messages
-    state = {"messages": [("user", user_input)]}
+    state = {"messages": [
+        ("system", system_string),
+        ("system", f"[SYSTEM INFO] uname -a:\n{sys_uname()}"),
+        ("system", f"[SYSTEM INFO] pwd:\n{sys_pwd()}"),
+        ("system", f"[SYSTEM INFO] ls -l:\n{sys_ls()}"),
+        ("user", user_input),
+    ]}
 
     while True:
         # Run the agent with invoke
@@ -36,10 +53,7 @@ if __name__ == "__main__":
         )
 
         # Get next user input
-        user_input = input("Enter next query (or type 'exit' to quit): ")
-        if user_input.strip().lower() == 'exit':
-            print("Exiting.")
-            break
+        user_input = input("Anything else? ")
 
         # Append new user message to state
         if "messages" not in state:

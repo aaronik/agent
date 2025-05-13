@@ -3,6 +3,7 @@ import signal
 import aisuite as ai
 
 import src.tools as tools
+from src.constants import system_string
 from openai.types.chat.chat_completion import ChatCompletion
 
 from src.util import (
@@ -21,30 +22,13 @@ MODEL = "openai:gpt-4.1-mini"
 # MODEL = "ollama:llama3.1:latest"  # Doesn't seem to accept tool calls
 
 cli_input = " ".join(sys.argv[1:])
-user_request = cli_input if cli_input else input("What'll it be, boss? ")
-
-system_string = (
-    "You are a CLI agent tool. You're run from the command line."
-    "Your purpose is to automate tasks for the user."
-    "You have been supplied with a series of tools to get the job done."
-    "Prefer taking action over asking the user permission."
-    "Aggressively trim any messages that aren't pertinent to latest chat."
-    "Remember to:"
-    "- Cite all sources and include links in every citation."
-    "- Test any code written, either manually or via test suite."
-    "- Run any type checking or linting that the project uses."
-    "- Use documentation from the web whenever it would help."
-)
+user_request = cli_input if cli_input else input("What's up? ")
 
 # Main chat state
 messages: list[ai.Message] = [
     ai.Message(
         role="system",
         content=system_string
-    ),
-    ai.Message(
-        role="user",
-        content=user_request
     ),
     ai.Message(
         role="system",
@@ -57,7 +41,11 @@ messages: list[ai.Message] = [
     ai.Message(
         role="system",
         content=f"[SYSTEM INFO] ls -l:\n{sys_ls()}"
-    )
+    ),
+    ai.Message(
+        role="user",
+        content=user_request
+    ),
 ]
 
 # Our token usage state, periodically updated throughout session
@@ -123,7 +111,6 @@ while True:
                     tools.search_text,
                     tools.search_images,
                     tools.run_shell_command,
-                    tools.printz,
                     tools.gen_image,
                     tools.read_file,
                     tools.write_file,
