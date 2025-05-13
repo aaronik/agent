@@ -2,39 +2,81 @@ import subprocess
 from bs4 import BeautifulSoup
 from types import FunctionType
 from functools import wraps
-from openai.types.chat.chat_completion import Choice
+from langchain.schema import BaseMessage
+from openai.types.chat.chat_completion import ChatCompletion, Choice
 import aisuite as ai
 from pydantic import BaseModel
-from static.pricing import pricing
 import os
 
 
 class TokenUsage(BaseModel):
-    prompt_tokens: int
-    completion_tokens: int
+    model: str
+    pricing: dict
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
+    def prompt_cost(self) -> float:
+        """
+        Return cost of prompt tokens based on pricing dict for the model
+        """
+        return round(self.prompt_tokens * self._input_pricing(), 4)
 
-def print_token_usage(model: str, tu: TokenUsage):
-    model_pricing = pricing.get(model, None)
-    if not model_pricing:
-        print(
-            "\n---\ntoken usage (pricing not available)",
-            f"\nprompt: {tu.prompt_tokens}",
-            f"\ncompletion: {tu.completion_tokens}",
-            f"\ntotal: {tu.completion_tokens + tu.prompt_tokens}"
-        )
-    else:
-        input_pricing = model_pricing["input"]
-        output_pricing = model_pricing["output"]
-        input_price = round(input_pricing * tu.prompt_tokens, 4)
-        output_price = round(output_pricing * tu.completion_tokens, 4)
-        total = round(input_price + output_price, 4)
+    def completion_cost(self) -> float:
+        """
+        Return cost of completion tokens based on pricing dict for the model
+        """
+        return round(self.completion_tokens * self._output_pricing(), 4)
+
+    def total_tokens(self) -> int:
+        """
+        Return total tokens used
+        """
+        return round(self.prompt_tokens + self.completion_tokens, 4)
+
+    def total_cost(self) -> float:
+        """
+        Return total cost as sum of prompt_cost and completion_cost
+        """
+        return round(self.prompt_cost() + self.completion_cost(), 4)
+
+    def ingest_response(self, response: ChatCompletion):
+        """
+        Take a response and update internal usage statistics
+        """
+        if hasattr(response, 'usage') and response.usage is not None:
+            self.prompt_tokens += response.usage.prompt_tokens
+            self.completion_tokens += response.usage.completion_tokens
+
+    def ingest_from_messages(self, messages: list[BaseMessage]):
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+        for message in messages:
+            if not message.response_metadata:
+                continue
+
+            c = message.response_metadata["token_usage"]["completion_tokens"]
+            p = message.response_metadata["token_usage"]["prompt_tokens"]
+
+            self.completion_tokens += c
+            self.prompt_tokens += p
+
+    def print(self):
+        """
+        Print out the usage
+        """
         print(
             "\n---\nusage",
-            f"\nprompt: {tu.prompt_tokens} (${input_price})",
-            f"\ncompletion: {tu.completion_tokens} (${output_price})",
-            f"\ntotal: {tu.completion_tokens + tu.prompt_tokens} (${total})"
+            f"\ninput: {self.prompt_tokens} (${self.prompt_cost()})",
+            f"\noutput: {self.completion_tokens} (${self.completion_cost()})",
+            f"\ntotal: {self.total_tokens()} (${self.total_cost()})"
         )
+
+    def _input_pricing(self) -> float:
+        return self.pricing.get(self.model, {}).get("input", 0)
+
+    def _output_pricing(self) -> float:
+        return self.pricing.get(self.model, {}).get("output", 0)
 
 
 # Like a memoization, but blanks out the tool call if it's been done before
@@ -89,7 +131,6 @@ def sys_pwd():
     ).stdout
 
 
-
 # Simple one to get the uname info of the running machine
 def get_current_filetree():
     return subprocess.run(
@@ -117,3 +158,13 @@ def sanitize_path(path: str):
     ):
         expanded_path = './' + expanded_path
     return expanded_path
+
+
+def format_subproc_result(result: subprocess.CompletedProcess[str]) -> str:
+    text = (
+        "[STDOUT]\n" + result.stdout +
+        "\n[STDERR]\n" + result.stderr +
+        "\n[CODE]\n" + str(result.returncode)
+    )
+
+    return text

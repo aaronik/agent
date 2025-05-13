@@ -13,4 +13,3 @@ pricing = {
     "openai:gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
     "openai:gpt-4o-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
 }
-

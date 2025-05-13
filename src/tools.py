@@ -1,18 +1,20 @@
 import os
+import shlex
+from bs4 import BeautifulSoup
 import inspect
+import requests
 from typing import Any
 
-import time
 import aisuite
-import requests
 import subprocess
 import duckduckgo_search as ddgs
-from src.util import extract_text, sanitize_path
+from src.util import extract_text, format_subproc_result, sanitize_path
 
 MAX_RESPONSE_LENGTH = 1000000
 
 # Fetching the OpenAI API key from environment variable
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BING_SEARCH_API_KEY = os.getenv("BING_SEARCH_API_KEY")
 
 
 # This is the logging utility used to log from tools
@@ -32,7 +34,7 @@ def log_tool(**kwargs: Any):
     print(f"[{name}]" + (", " + args_str if args_str else ""))
 
     def p(string: str):
-        print("  " + string)
+        print("    " + string)
 
     return p
 
@@ -48,7 +50,7 @@ def fetch(url: str):
         text = extract_text(response.text)
 
         if len(text) > MAX_RESPONSE_LENGTH:
-            p("⚠️ truncating response")
+            p(" truncating response")
             return (
                 f"{text[:MAX_RESPONSE_LENGTH]}\n\n"
                 "[Content truncated due to size limitations]"
@@ -57,7 +59,7 @@ def fetch(url: str):
         return f"[URL]: {url}\n\n" + text
 
     except Exception as e:
-        p(f"⚠️ status: [{response.status_code}], e: [{e}]")
+        p(f"❌ status: [{response.status_code}], e: [{e}]")
         return f"Error fetching URL {url}: {e}"
 
 
@@ -70,21 +72,53 @@ def search_text(text: str, max_results: int = 3):
     p = log_tool(text=text, max_results=max_results)
 
     dds = ddgs.duckduckgo_search.DDGS()
-
+    return_str = ""
     results = []
-    try:
-        results = dds.text(text, max_results=max_results)
-    except Exception as e:
-        p(f"⚠️ duck duck go search error: [{e}] (retrying...)")
-        time.sleep(0.5)
 
-    text = ""
+    try:
+        results = dds.text(text, max_results=max_results, backend="lite")
+    except Exception as e:
+        p(f" duck duck go search error: [{e}]")
+        return_str += f"duck duck go search api error: [{e}]\n"
 
     for i, result in enumerate(results, start=1):
-        p(f"🔗 {result['href']}")
-        text += f"{i}. {result['title']}\n   {result['href']}\n"
+        p(f" {result['href']}")
+        return_str += f"{i}. {result['title']}\n   {result['href']}\n"
 
-    return text
+    return return_str
+
+
+def search_text_alternative(text: str, max_results: int = 3):
+    """
+    Alternative web search for when the primary one fails.
+    """
+
+    p = log_tool(text=text, max_results=max_results)
+
+    # Using curl instead of requests to avoid bot detection
+    query = shlex.quote(text)
+
+    curl_command = (
+        f"curl -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) "
+        "Gecko/20100101 Firefox/117.0' "
+        f"-s https://html.duckduckgo.com/html/?q={query}"
+    )
+
+    result = subprocess.run(
+        curl_command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=10
+    )
+
+    if result.returncode != 0:
+        p(f"❌ curl command code [{result.returncode}]: {result.stderr}")
+        return "DuckDuckGo search error:\n" + format_subproc_result(result)
+
+    soup = BeautifulSoup(result.stdout, "html.parser")
+
+    return soup.text
 
 
 def search_images(text: str, max_results: int = 3):
@@ -101,7 +135,7 @@ def search_images(text: str, max_results: int = 3):
     text = ""
 
     for i, result in enumerate(results or [], start=1):
-        p(f"🖼️ {result['image']}")
+        p(f" {result['image']}")
         text += f"{i}. {result['title']}\n   {result['image']}\n"
 
     return text
@@ -123,16 +157,7 @@ def run_shell_command(cmd: str, timeout: int = 30):
 
     p(f"⮑  {result.returncode}")
 
-    text = (
-        "[STDOUT]",
-        result.stdout,
-        "[STDERR]",
-        result.stderr,
-        "[CODE]",
-        result.returncode
-    )
-
-    return text
+    return format_subproc_result(result)
 
 
 def printz(cmd: str):
@@ -190,7 +215,7 @@ def gen_image(
         return response.text
 
     except Exception as e:
-        p(f"⚠️ status: [{response.status_code}]")
+        p(f"❌ status: [{response.status_code}]")
         return f"Error creating images: {e}"
 
 
@@ -292,7 +317,7 @@ def apply_diff(path: str, diff: str):
         try:
             os.remove(tmp_patch_file_path)
         except Exception as e:
-            p(f"⚠️ Warning: could not remove temporary patch file: {e}")
+            p(f" Warning: could not remove temporary patch file: {e}")
 
     return "Patch applied successfully"
 
@@ -317,10 +342,10 @@ def build_trim_message(messages: list[aisuite.Message]):
             else:
                 messages[index].content = new_content
 
-            p(f"✅ message {index} trimmed")
+            p(f" message {index} trimmed")
             return f"message[{index}] successfully modified"
         except Exception as e:
-            p(f"❌ trim failed: {e}")
+            p(f" trim failed: {e}")
             return f"tool trim_message failed: {e}"
 
     return trim_message

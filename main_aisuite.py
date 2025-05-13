@@ -13,8 +13,8 @@ from src.util import (
     sys_uname,
     message_from_choice,
     message_from_user_input,
-    print_token_usage,
 )
+from static.pricing import pricing
 
 MODEL = "openai:gpt-4.1-mini"
 # MODEL = "openai:o4-mini"
@@ -50,14 +50,14 @@ messages: list[ai.Message] = [
 
 # Our token usage state, periodically updated throughout session
 token_usage = TokenUsage(
-    prompt_tokens=0,
-    completion_tokens=0
+    model=MODEL,
+    pricing=pricing
 )
 
 
 # Handle Ctrl-C: print total tokens and exit
 def signal_handler(*_):
-    print_token_usage(MODEL, token_usage)
+    token_usage.print()
     exit(0)
 
 
@@ -132,9 +132,7 @@ while True:
             else:
                 raise e
 
-    if hasattr(response, 'usage') and response.usage is not None:
-        token_usage.prompt_tokens += response.usage.prompt_tokens
-        token_usage.completion_tokens += response.usage.completion_tokens
+    token_usage.ingest_response(response)
 
     choice = response.choices[0]
 
