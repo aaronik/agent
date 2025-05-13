@@ -232,7 +232,8 @@ def write_file(path: str, contents: str):
 
     path = sanitize_path(path)
 
-    p = log_tool(path=path, contents=contents[:20])
+    # Give a line count
+    p = log_tool(path=path, contents=f"{str(contents.count('\n') + 1)} lines")
 
     try:
         # Ensure the directory exists, create if not
@@ -251,20 +252,20 @@ def write_file(path: str, contents: str):
     return "Success"
 
 
-def apply_diff(file_path: str, diff: str):
+def apply_diff(path: str, diff: str):
     """
     Apply a unified diff string patch to the file at file_path.
 
     Args:
-        file_path: path to the target file to patch
+        path: path to the target file to patch
         diff: the unified diff string to apply
 
     Returns:
         A string indicating success or error message
     """
 
-    file_path = sanitize_path(file_path)
-    p = log_tool(file_path=file_path, diff=diff)
+    file_path = sanitize_path(path)
+    p = log_tool(path=path, diff=f"{str(diff.count('\n') + 1)} lines")
 
     # Write the diff content to a temporary patch file
     tmp_patch_file_path = file_path + ".patch_temp"
