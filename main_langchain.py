@@ -1,42 +1,47 @@
+import sys
 from langchain_openai import ChatOpenAI
-from langchain.agents import initialize_agent, Tool
-from langchain.agents import AgentType
+from langgraph.prebuilt import create_react_agent
 from src.tools import search_text, fetch
 
-# Define our tools
-search_tool = Tool(
-    name="SearchText",
-    func=search_text,
-    description=(
-        "Useful for when you need to answer questions by searching "
-        "the web for text results"
-    )
-)
+model = ChatOpenAI(model="gpt-4.1-mini")
 
-fetch_tool = Tool(
-    name="FetchContent",
-    func=fetch,
-    description="Provide fully qualified url"
-)
+tools = [search_text, fetch]
 
-# Initialize the chat model
-chat = ChatOpenAI(temperature=0)
-
-# Create the agent with the tools, allowing iterative tool calls
-agent = initialize_agent(
-    tools=[search_tool, fetch_tool],
-    llm=chat,
-    agent=AgentType.OPENAI_MULTI_FUNCTIONS,
-    verbose=True
-)
-
+agent = create_react_agent(model, tools=tools)
 
 if __name__ == "__main__":
-    print("Enter your query (type 'exit' to quit):")
+    if len(sys.argv) < 2:
+        print("Please provide a query as command line argument.")
+        sys.exit(1)
+
+    # Initial user input from command line
+    user_input = sys.argv[1]
+
+    # State for conversation/messages
+    state = {"messages": [("user", user_input)]}
+
     while True:
-        query = input("\nQuery: ")
-        if query.lower() == 'exit':
+        # Run the agent with invoke
+        state = agent.invoke(state)
+
+        output = None
+        if "messages" in state and len(state["messages"]) > 0:
+            output = state["messages"][-1]
+
+        print(
+            "Answer:",
+            output.content
+            if hasattr(output, 'content') and output is not None
+            else output
+        )
+
+        # Get next user input
+        user_input = input("Enter next query (or type 'exit' to quit): ")
+        if user_input.strip().lower() == 'exit':
+            print("Exiting.")
             break
-        # Run the agent on the query
-        result = agent.run(query)
-        print("\nAnswer:", result)
+
+        # Append new user message to state
+        if "messages" not in state:
+            state["messages"] = []
+        state["messages"].append(("user", user_input))

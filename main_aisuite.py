@@ -30,7 +30,10 @@ system_string = (
     "Prefer taking action over asking the user permission."
     "Aggressively trim any messages that aren't pertinent to latest chat."
     "Remember to:"
-    "- Cite all sources include links in every citation."
+    "- Cite all sources and include links in every citation."
+    "- Test any code written, either manually or via test suite."
+    "- Run any type checking or linting that the project uses."
+    "- Use documentation from the web whenever it would help."
 )
 
 # Main chat state
