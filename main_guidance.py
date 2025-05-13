@@ -1,15 +1,21 @@
 import os
 import sys
+from typing import Any
 # Simulated tool interface, replace with actual integration
 from src.tools import fetch
 
 from openai import AzureOpenAI
 
 
+def get_bearer_token_provider(*args: Any):
+    return "provider"
+
+
 def get_ai_answer(prompt):
-    # Setup AzureOpenAI client with environment variables and Azure AD token provider
+    # Setup AzureOpenAI client with environment variables and Azure AD token
+    # provider
     token_provider = get_bearer_token_provider(
-        DefaultAzureCredential(),
+        "credential",
         "https://cognitiveservices.azure.com/.default"
     )
 

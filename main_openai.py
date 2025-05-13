@@ -117,10 +117,11 @@ def handle_tool_call(
     run_id: str
 ):
     arguments: dict[str, Any] = json.loads(tool.function.arguments)
-    url: str = arguments["url"]
 
     if tool.function.name == "fetch":
-        resp = tools.fetch(url)
+        # Note that arguments here has typing dependent on the tool
+        # definitions/schemas
+        resp = tools.fetch(arguments["url"])
 
         # Tool outputs need to have a specific relationship to the message that
         # invoked them, which the framework does in this call
@@ -136,7 +137,7 @@ def handle_tool_call(
         )
 
     elif tool.function.name == "search_text":
-        resp = tools.fetch(url)
+        resp = tools.search_text(arguments["text"])
 
         client.beta.threads.runs.submit_tool_outputs(
             thread_id=thread_id,
