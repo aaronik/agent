@@ -70,5 +70,7 @@ pytest tests
 
 ## Notes
 
-This is not meant for prime time - this is my personal little agent, something I'm hacking on on the side.
+* This is not meant for prime time - this is my personal little agent, something I'm hacking on on the side.
 I think a big part of becoming good with AI, is building your own AI assistant. Then you see how it's done, and you have full customizability of it. Have it build itself.
+
+* The structure currently is having a bunch of different main_*.py files hanging around top level. Right now this is serving both as this agent that's actually doing a lot, but also multiple ways to make the same agent. It shares tools and some other stuff across the different approaches/libraries
