@@ -17,9 +17,9 @@ from static.pricing import pricing
 model = ChatOpenAI(model="gpt-4.1-mini")
 
 tools = [
-    tools.search_text,
-    tools.search_text_alternative,
-    tools.search_images,
+    # tools.search_text,
+    # tools.search_text_alternative,
+    # tools.search_images,
     tools.fetch,
     tools.read_file,
     tools.write_file,
@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     while True:
         # Run the agent
-        new_state_dict = agent.invoke(state)
+        new_state_dict = agent.invoke(state, {"recursion_limit": 50})
 
         state = AgentState(messages=new_state_dict["messages"])
 

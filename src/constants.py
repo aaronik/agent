@@ -13,6 +13,7 @@ system_string = (
     "You don't run git commands unless explicitly asked.\n"
 
     "[REQUIRED FOLLOWUP ACTIONS]\n"
+    "- Clean up any temporary files you may have created along the way.\n"
     "- If any code was written, test it, using this order of preference:\n"
     "  - Using a unit test suite, if there is one.\n"
     "  - Manually, by running the whole system.\n"

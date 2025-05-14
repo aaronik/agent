@@ -44,7 +44,7 @@ def fetch(url: str):
 
     p = log_tool(url=url)
 
-    response = requests.get(url)
+    response = requests.get(url, allow_redirects=True)
     try:
         response.raise_for_status()
         text = extract_text(response.text)
@@ -146,6 +146,7 @@ def run_shell_command(cmd: str, timeout: int = 30):
     Run a shell command on the user's machine.
     Use as many of these as needed to satisfy the user request.
     A timeout, which defaults to 30, can be specified.
+    Please use this method and be creative to search the web.
     """
 
     p = log_tool(cmd=cmd, timeout=timeout)
