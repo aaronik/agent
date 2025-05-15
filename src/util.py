@@ -131,6 +131,12 @@ def sys_pwd():
     ).stdout
 
 
+def sys_git_ls():
+    return subprocess.run(
+        "git ls-files", shell=True, capture_output=True, text=True
+    ).stdout or "fatal: not a git repository"
+
+
 # Simple one to get the uname info of the running machine
 def get_current_filetree():
     return subprocess.run(

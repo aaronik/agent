@@ -11,7 +11,7 @@ from langchain.schema import (
 from langgraph.prebuilt import create_react_agent
 import src.tools as tools
 from src.constants import system_string
-from src.util import TokenUsage, sys_ls, sys_pwd, sys_uname
+from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
 
 model = ChatOpenAI(model="gpt-4.1-mini")
@@ -52,12 +52,11 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
+    # Initial user input from command line or prompt
     if len(sys.argv) < 2:
-        print("Please provide a query as command line argument.")
-        sys.exit(1)
-
-    # Initial user input from command line
-    user_input = " ".join(sys.argv[1:]) or input("What's up? ")
+        user_input = input("What's up? ")
+    else:
+        user_input = " ".join(sys.argv[1:])
 
     # Initialize state with typed messages
     state = AgentState(messages=[
@@ -65,6 +64,7 @@ if __name__ == "__main__":
         SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
         SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
         SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
+        SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
         HumanMessage(content=user_input),
     ])
 
