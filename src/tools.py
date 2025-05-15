@@ -39,6 +39,37 @@ def log_tool(**kwargs: Any):
     return p
 
 
+def run_shell_command(cmd: str, timeout: int = 30):
+    """
+    The primary tool you should use to accomplish the task.
+
+    This tool runs a shell command on the user's machine and is expected to
+    fulfill about 90% of the user's task requests. However, other tools are
+    still available and should be used as needed for specialized tasks.
+
+    Args:
+        cmd: The shell command string to run.
+        timeout: The maximum time in seconds to allow the command to run
+                (default is 30).
+
+    Returns:
+        The formatted output of the shell command execution,
+        including stdin, stdout, and stderr.
+
+    """
+
+    p = log_tool(cmd=cmd, timeout=timeout)
+
+    # Long running commands will hose the agent, so let's prevent that:
+    cmd = f"timeout {timeout} {cmd}"
+
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+    p(f"⮑  {result.returncode}")
+
+    return format_subproc_result(result)
+
+
 def fetch(url: str):
     """Fetch content from the provided URL."""
 
@@ -139,26 +170,6 @@ def search_images(text: str, max_results: int = 3):
         text += f"{i}. {result['title']}\n   {result['image']}\n"
 
     return text
-
-
-def run_shell_command(cmd: str, timeout: int = 30):
-    """
-    Run a shell command on the user's machine.
-    Use as many of these as needed to satisfy the user request.
-    A timeout, which defaults to 30, can be specified.
-    Please use this method and be creative to search the web.
-    """
-
-    p = log_tool(cmd=cmd, timeout=timeout)
-
-    # Long running commands will hose the agent, so let's prevent that:
-    cmd = f"timeout {timeout} {cmd}"
-
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-    p(f"⮑  {result.returncode}")
-
-    return format_subproc_result(result)
 
 
 def printz(cmd: str):
@@ -350,3 +361,34 @@ def build_trim_message(messages: list[aisuite.Message]):
             return f"tool trim_message failed: {e}"
 
     return trim_message
+
+
+def summarize_response(summary: str):
+    """
+    [MANDATORY]
+    This is one of the primary ways the user communicates with you.
+    After every response, you should speak aloud a very quick summary
+    of that response. If the user then asks for clarification, you can
+    speak for longer.
+
+    Speak a ~5 second summary using system speech synthesizer
+    (macOS 'say' command). It should take no more than 5 seconds
+    to read back the summary.
+
+    Args:
+        summary: The very short summary string to be spoken aloud
+                 in under 5 seconds.
+    """
+    p = log_tool(summary=summary)
+
+    # Sanitize summary input to avoid injection (simple quote escape)
+    safe_summary = summary.replace('"', '\"')
+
+    # Use subprocess to call say asynchronously
+    try:
+        subprocess.Popen(['say', safe_summary])
+        p("Speech synthesis started")
+        return "Speech synthesis started"
+    except Exception as e:
+        p(f"Error starting speech synthesis: {e}")
+        return f"Error starting speech synthesis: {e}"
