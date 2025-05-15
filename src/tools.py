@@ -371,9 +371,11 @@ def summarize_response(summary: str):
     of that response. If the user then asks for clarification, you can
     speak for longer.
 
-    Speak a ~5 second summary using system speech synthesizer
-    (macOS 'say' command). It should take no more than 5 seconds
-    to read back the summary.
+    This tool uses the macOS native 'say' command for speech synthesis.
+    The summary should be brief, generally taking no more than 5 seconds
+    to read aloud.
+    Only extend the spoken summary length if the user explicitly requests
+    further clarification or details.
 
     Args:
         summary: The very short summary string to be spoken aloud
