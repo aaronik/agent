@@ -26,7 +26,7 @@ tools = [
     tools.apply_diff,
     tools.gen_image,
     tools.run_shell_command,
-    tools.summarize_response,
+    # tools.summarize_response,
 ]
 
 agent = create_react_agent(model, tools=tools)
