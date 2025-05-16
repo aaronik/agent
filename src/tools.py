@@ -41,11 +41,12 @@ def log_tool(**kwargs: Any):
 
 def run_shell_command(cmd: str, timeout: int = 30):
     """
-    The primary tool you should use to accomplish the task.
-
     This tool runs a shell command on the user's machine and is expected to
-    fulfill about 90% of the user's task requests. However, other tools are
-    still available and should be used as needed for specialized tasks.
+    fulfill about most of the user's requests. However, other tools are
+    still available and should be used as needed.
+
+    Note: A 124 status code indicates a timeout. Try increasing timeout and
+    running again.
 
     Args:
         cmd: The shell command string to run.

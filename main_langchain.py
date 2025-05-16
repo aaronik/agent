@@ -17,7 +17,7 @@ from static.pricing import pricing
 model = ChatOpenAI(model="gpt-4.1-mini")
 
 tools = [
-    # tools.search_text,
+    tools.search_text,
     # tools.search_text_alternative,
     # tools.search_images,
     tools.fetch,

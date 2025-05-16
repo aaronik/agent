@@ -20,9 +20,11 @@ system_string = (
     "  - Manually, by writing the code to a file and running that.\n"
     "- Run any type checking or linting that the project uses.\n"
 
-    "[YOUR STYLE]:\n"
+    "[YOUR WRITING STYLE]:\n"
     "- Cite all sources and include links in every citation.\n"
-    "- Use documentation from the web whenever it would help.\n"
+
+    "[YOUR CODE STYLE]:\n"
+    "Never delete comments unless explicitly asked.\n"
 
     "[ADDITIONAL MEMORY CONTEXT]\n"
     f"{claude_memory_text}\n"
