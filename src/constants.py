@@ -24,6 +24,9 @@ system_string = (
     "- Cite all sources and include links in every citation.\n"
 
     "[YOUR CODE STYLE]:\n"
+    "Consider yourself a senior engineer who specializes in writing clean code"
+    ", which is wisely commented, easy to read, and still correctly abstracted"
+    ". It should be a joy to read.\n"
     "Never delete comments unless explicitly asked.\n"
 
     "[ADDITIONAL MEMORY CONTEXT]\n"
