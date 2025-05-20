@@ -14,7 +14,7 @@ from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
 
-model = ChatOpenAI(model="gpt-4.1-mini")
+model = ChatOpenAI(model="gpt-4.1")
 
 tools = [
     tools.search_text,
