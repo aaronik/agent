@@ -26,6 +26,7 @@ tools = [
     tools.apply_diff,
     tools.gen_image,
     tools.run_shell_command,
+    # tools.screenshot_and_upload,
     # tools.summarize_response,
 ]
 
@@ -73,7 +74,7 @@ if __name__ == "__main__":
 
     while True:
         # Run the agent
-        new_state_dict = agent.invoke(state, {"recursion_limit": 50})
+        new_state_dict = agent.invoke(state, {"recursion_limit": 200})
 
         state = AgentState(messages=new_state_dict["messages"])
 

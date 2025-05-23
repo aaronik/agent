@@ -1,9 +1,11 @@
 import os
+import tempfile
 import shlex
 from bs4 import BeautifulSoup
 import inspect
 import requests
 from typing import Any
+import base64
 
 import aisuite
 import subprocess
@@ -82,12 +84,13 @@ def fetch(url: str):
         text = extract_text(response.text)
 
         if len(text) > MAX_RESPONSE_LENGTH:
-            p(" truncating response")
+            p("truncating response")
             return (
                 f"{text[:MAX_RESPONSE_LENGTH]}\n\n"
                 "[Content truncated due to size limitations]"
             )
 
+        p(f"[{str(text.count('\n') + 1)}] lines fetched")
         return f"[URL]: {url}\n\n" + text
 
     except Exception as e:
@@ -110,11 +113,11 @@ def search_text(text: str, max_results: int = 3):
     try:
         results = dds.text(text, max_results=max_results, backend="lite")
     except Exception as e:
-        p(f" duck duck go search error: [{e}]")
+        p(f"X duck duck go search error: [{e}]")
         return_str += f"duck duck go search api error: [{e}]\n"
 
     for i, result in enumerate(results, start=1):
-        p(f" {result['href']}")
+        p(f"-> {result['href']}")
         return_str += f"{i}. {result['title']}\n   {result['href']}\n"
 
     return return_str
@@ -395,3 +398,64 @@ def summarize_response(summary: str):
     except Exception as e:
         p(f"Error starting speech synthesis: {e}")
         return f"Error starting speech synthesis: {e}"
+
+
+# This is great probably, but doesn't work due to langchain limitations
+# and weird provider rules regarding image uploads:
+# https://github.com/langchain-ai/langchain/discussions/25881
+def screenshot_and_upload(area: str = "screen"):
+    """
+    Captures a screenshot and returns a base64-encoded string of the image.
+
+    Args:
+        area: 'screen' (default, full screen), or a region in format 'x,y,w,h'.
+
+    Returns:
+        Dict with {'base64': ..., 'message': ...}.
+    """
+    p = log_tool(area=area)
+    tmpfile = tempfile.mktemp(suffix='.png')
+
+    # Build screencapture command
+    cmd = ["screencapture", "-x"]
+    if area != "screen":
+        coords = area.split(",")
+        if len(coords) == 4:
+            rect_arg = "-R{},{},{},{}".format(*coords)
+            cmd.append(rect_arg)
+    cmd.append(tmpfile)
+
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        return {"base64": None, "message": f"Screenshot failed: {e}"}
+
+    try:
+        with open(tmpfile, "rb") as image_file:
+            img_bytes = image_file.read()
+            base64_str = base64.b64encode(img_bytes).decode('utf-8')
+    except Exception as e:
+        return {
+            "base64": None,
+            "message": f"Failed to read screenshot file: {e}"
+        }
+    finally:
+        try:
+            os.remove(tmpfile)
+        except Exception:
+            pass
+
+    b64_shortened = f"{base64_str[:5]}...{base64_str[-5:]}"
+    p(f"screenshot captured and base64 encoded: [{b64_shortened}]")
+
+    return [{
+        "type": "image",
+        # "source": { # This would be anthropic's style
+        #     "type": "base64",
+        #     "mime_type": "image/png",  # or image/png, etc.
+        #     "data": base64_str,
+        # },
+        "source_type": "base64",
+        "mime_type": "image/png",  # or image/png, etc.
+        "data": base64_str,
+    }]
