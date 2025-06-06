@@ -30,14 +30,6 @@ You will need an OpenAI API key to use this tool. Set it as an environment varia
 export OPENAI_API_KEY=your_api_key_here
 ```
 
-### Running the CLI
-
-There's a run script that uses the .venv - so if that's installed, running this'll make it work
-
-```bash
-./run.sh [your initial message]
-```
-
 ### Installing
 
 I just alias it:
@@ -45,6 +37,13 @@ I just alias it:
 ```bash
 # ~/.zshrc
 alias agent="/<path to the agent folder>/run.sh
+```
+
+### Running the CLI
+
+```bash
+agent "Let's work on this code together" # <-- starts a loop
+agent -s "Research such and such topic" # <-- single agent invocation (including tool uses)
 ```
 
 ---

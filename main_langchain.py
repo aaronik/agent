@@ -1,5 +1,6 @@
 import sys
 import signal
+import argparse
 from dataclasses import dataclass, field
 from typing import List
 from langchain_openai import ChatOpenAI
@@ -14,10 +15,14 @@ from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
 
+HUMAN = "\n🤷‍♂️🤷🤷‍♀️ User\n"
+ROBOT = "\n🤖🤖🤖 AI\n"
+TOOLS = "\n🛠️🪚✒️ Tools used\n"
+
 model = ChatOpenAI(model="gpt-4.1")
 
 tools = [
-    tools.search_text,
+    # tools.search_text,
     # tools.search_text_alternative,
     # tools.search_images,
     tools.fetch,
@@ -54,11 +59,20 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Personal Command Line Agent')
+    parser.add_argument('--single', '-s', action='store_true',
+                       help='Run single invocation without prompting for more input')
+    parser.add_argument('query', nargs='*', help='Query to process')
+
+    args = parser.parse_args()
+
     # Initial user input from command line or prompt
-    if len(sys.argv) < 2:
-        user_input = input("What's up? ")
+    if args.query:
+        user_input = " ".join(args.query)
+        print(TOOLS)
     else:
-        user_input = " ".join(sys.argv[1:])
+        user_input = input("What's up? ")
 
     # Initialize state with typed messages
     state = AgentState(messages=[
@@ -70,8 +84,6 @@ if __name__ == "__main__":
         HumanMessage(content=user_input),
     ])
 
-    print("\n---\n")
-
     while True:
         # Run the agent
         new_state_dict = agent.invoke(state, {"recursion_limit": 200})
@@ -81,16 +93,21 @@ if __name__ == "__main__":
         output = state.messages[-1] if state.messages else None
 
         print(
-            "\n---\n",
+            ROBOT,
             output.content if output else None
         )
 
         token_usage.ingest_from_messages(state.messages)
 
+        # Exit after single invocation if --single flag is used
+        if args.single:
+            break
+
         # Get next user input
-        print("\n---\n")
+        print(HUMAN)
         user_input = input("Anything else? ")
-        print("\n---\n")
+
+        print(TOOLS)
 
         # Append new user message to state
         state.messages.append(HumanMessage(content=user_input))

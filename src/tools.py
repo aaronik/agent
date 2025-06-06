@@ -65,11 +65,18 @@ def run_shell_command(cmd: str, timeout: int = 30):
 
     # Long running commands will hose the agent, so let's prevent that:
     cmd = f"timeout {timeout} {cmd}"
-
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    p(f"⮑  {result.returncode} " + (result.stderr.splitlines()[0] if result.stderr else ""))
+    if result.stdout:
+        ellipses = ""
+        if len(result.stdout.splitlines()) > 1:
+            ellipses = "..."
 
-    p(f"⮑  {result.returncode}")
+        first_line = result.stdout.splitlines()[0]
 
+        p(f"⮑  {first_line}{ellipses}")
+
+    p("")
     return format_subproc_result(result)
 
 
