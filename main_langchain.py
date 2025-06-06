@@ -31,6 +31,7 @@ tools = [
     tools.apply_diff,
     tools.gen_image,
     tools.run_shell_command,
+    tools.spawn,
     # tools.screenshot_and_upload,
     # tools.summarize_response,
 ]

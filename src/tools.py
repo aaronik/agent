@@ -407,6 +407,63 @@ def summarize_response(summary: str):
         return f"Error starting speech synthesis: {e}"
 
 
+def spawn(task: str):
+    """
+    Spawn a new single-invocation AI agent to complete a specific task.
+
+    Creates a fresh agent using aisuite that can work independently and
+    return focused results. The spawned agent has access to basic tools.
+
+    Args:
+        task: The specific task description for the spawned agent to complete
+
+    Returns:
+        The output from the spawned agent's completion of the task
+    """
+    p = log_tool(task=task)
+
+    try:
+        # Create a lightweight aisuite client for single-shot execution
+        import aisuite as ai
+        from src.constants import system_string
+
+        client = ai.Client()
+
+        # Create a focused system prompt for the spawned agent
+        spawn_system = (
+            "You are a single-purpose AI agent spawned to complete one specific task. "
+            "Focus solely on the given task, be concise, and provide actionable results. "
+            "Complete the task efficiently and return your findings."
+        )
+
+        messages = [
+            ai.Message(role="system", content=spawn_system),
+            ai.Message(role="user", content=task)
+        ]
+
+        # Use a fast model with basic tools for the spawned agent
+        response = client.chat.completions.create(
+            model="openai:gpt-4o-mini",
+            messages=[message.model_dump() for message in messages],
+            tools=[
+                fetch,
+                run_shell_command,
+                read_file,
+            ],
+            max_turns=10  # Limit turns for focused execution
+        )
+
+        choice = response.choices[0]
+        result = choice.message.content
+
+        p(f"spawned agent completed, returned {len(result)} characters")
+        return f"[SPAWNED AGENT OUTPUT]\n{result}"
+
+    except Exception as e:
+        p(f"❌ spawn failed: {e}")
+        return f"Error spawning agent: {e}"
+
+
 # This is great probably, but doesn't work due to langchain limitations
 # and weird provider rules regarding image uploads:
 # https://github.com/langchain-ai/langchain/discussions/25881
