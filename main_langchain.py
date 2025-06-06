@@ -15,9 +15,9 @@ from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
 
-HUMAN = "\n🤷‍♂️🤷🤷‍♀️ User\n"
-ROBOT = "\n🤖🤖🤖 AI\n"
-TOOLS = "\n🛠️🪚✒️ Tools used\n"
+HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n"
+ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n"
+TOOLS = "\n--- 🛠️🪚✒️ Tools used 🛠️🪚✒️ ---\n"
 
 model = ChatOpenAI(model="gpt-4.1")
 
