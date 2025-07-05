@@ -300,13 +300,18 @@ def write_file(path: str, contents: str):
     return "Success"
 
 
-def apply_diff(path: str, diff: str):
+def patch_file(path: str, diff: str):
     """
     Apply a unified diff string patch to the file at file_path.
 
     Args:
         path: path to the target file to patch
         diff: the unified diff string to apply
+
+    **How to ensure reliable patching:**
+    - Always use proper unified diff format as produced by a command like:
+      `diff -u oldfile.py newfile.py > file.patch`
+    - Confirm hunk headers look like: `@@ -7,7 +7,16 @@` (not function names).
 
     Returns:
         A string indicating success or error message
@@ -324,26 +329,61 @@ def apply_diff(path: str, diff: str):
         p(f"❌ Error writing patch file: {e}")
         return f"Error writing patch file: {e}"
 
+    # Patch expects the header to match the target file; patch works from the same directory
+    # So use only the filename in the diff header, and run patch in the file's directory.
+    cwd = os.path.dirname(file_path) or "."
+    filename = os.path.basename(file_path)
+
+    # Pre-check: Ensure the diff header matches the basename
+    # Optionally rewrite the diff if necessary:
+    first_lines = diff.splitlines()
+    if len(first_lines) >= 2 and (
+        first_lines[0].startswith('--- ') and first_lines[1].startswith('+++ ')
+    ):
+        def fix_header(line, newfile):  # patch header rewrite helper
+            parts = line.split()
+            if len(parts) > 1:
+                return f"{parts[0]} {newfile}"
+            return line
+        fixed_diff = (
+            fix_header(first_lines[0], filename) + "\n" +
+            fix_header(first_lines[1], filename) + "\n" +
+            "\n".join(first_lines[2:])
+        )
+        try:
+            with open(tmp_patch_file_path, "w", encoding="utf-8") as patch_file:
+                patch_file.write(fixed_diff)
+        except Exception as e:
+            p(f"❌ Error rewriting patch file: {e}")
+            return f"Error rewriting patch file: {e}"
+
     # Apply the patch
     try:
-        # Flags:
-        # -u unified diff format
-        # -r disables reject files generation
-        cmd = f"patch -u {file_path} -i {tmp_patch_file_path} -r -"
+        cmd = f"patch -u {shlex.quote(filename)} -i {shlex.quote(os.path.basename(tmp_patch_file_path))}"
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True)
+            cmd, shell=True, capture_output=True, text=True, cwd=cwd
+        )
+
+        if result.stdout:
+            p("[patch stdout] " + result.stdout.strip())
+        if result.stderr:
+            p("[patch stderr] " + result.stderr.strip())
 
         if result.returncode != 0:
-            p(f"❌ Patch command failed: {result.stderr.strip()}")
-            return f"Patch command failed: {result.stderr.strip()}"
+            # Return all relevant output for debugging
+            return (
+                f"Patch command failed:\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+
     finally:
         try:
             os.remove(tmp_patch_file_path)
         except Exception as e:
-            p(f" Warning: could not remove temporary patch file: {e}")
+            p(f"Warning: could not remove temporary patch file: {e}")
 
     return "Patch applied successfully"
-
 
 def build_trim_message(messages: list[aisuite.Message]):
     def trim_message(index: int, new_content: str):
@@ -425,7 +465,6 @@ def spawn(task: str):
     try:
         # Create a lightweight aisuite client for single-shot execution
         import aisuite as ai
-        from src.constants import system_string
 
         client = ai.Client()
 

@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from src.tools import apply_diff
+from src.tools import patch_file
 
 diff_text = ("""
 --- original.txt
@@ -22,7 +22,7 @@ def test_apply_diff():
 
         # Apply the diff and assert no exception
         try:
-            apply_diff(tmp_file.name, diff_text)
+            patch_file(tmp_file.name, diff_text)
         except Exception as e:
             assert False, f"apply_diff raised an unexpected exception: {e}"
 
