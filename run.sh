@@ -4,5 +4,4 @@
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
 
 # Run the python interpreter and script relative to the script directory with passed arguments
-# "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main_aisuite.py" "$@"
-"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main_langchain.py" "$@"
+"$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/main.py" "$@"
