@@ -1,4 +1,3 @@
-import sys
 import signal
 import argparse
 from dataclasses import dataclass, field
@@ -19,7 +18,8 @@ HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀�
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n"
 TOOLS = "\n--- 🛠️🪚✒️ Tools used 🛠️🪚✒️ ---\n"
 
-model = ChatOpenAI(model="gpt-4.1")
+MODEL = "gpt-5"
+model = ChatOpenAI(model=MODEL)
 
 tools = [
     # tools.search_text,
@@ -68,10 +68,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    print("\n𜱜\n𜱟 " + MODEL)
+
     # Initial user input from command line or prompt
     if args.query:
         user_input = " ".join(args.query)
-        print(TOOLS)
     else:
         user_input = input("What's up? ")
 
@@ -84,6 +85,8 @@ if __name__ == "__main__":
         SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
         HumanMessage(content=user_input),
     ])
+
+    print(TOOLS)
 
     while True:
         # Run the agent
