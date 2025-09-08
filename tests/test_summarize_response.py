@@ -13,7 +13,7 @@ class TestSummarizeResponse(unittest.TestCase):
         mock_popen.assert_called_once_with(['say', "This is a short summary."])
 
     @patch('subprocess.Popen', side_effect=Exception('Failed'))
-    def test_summarize_response_failure(self):
+    def test_summarize_response_failure(self, mock_popen):
         result = summarize_response("This is a short summary.")
         self.assertIn("Error starting speech synthesis", result)
 
