@@ -19,4 +19,4 @@ test: ## Run tests with pytest
 	pytest
 
 update_prices: ## Run the pricing data update script. Wobbly at best.
-	python3 scripts/update_prices.py
+	python3 scripts/extract_prices.py

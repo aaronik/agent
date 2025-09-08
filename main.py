@@ -28,7 +28,7 @@ tools = [
     tools.fetch,
     tools.read_file,
     tools.write_file,
-    tools.patch_file,
+    tools.search_replace,
     tools.gen_image,
     tools.run_shell_command,
     tools.spawn,

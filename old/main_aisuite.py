@@ -114,7 +114,7 @@ while True:
                     tools.gen_image,
                     tools.read_file,
                     tools.write_file,
-                    tools.patch_file,
+                    tools.search_replace,
                     tools.build_trim_message(messages),
                 ],
                 max_turns=50

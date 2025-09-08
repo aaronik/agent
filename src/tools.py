@@ -300,90 +300,57 @@ def write_file(path: str, contents: str):
     return "Success"
 
 
-def patch_file(path: str, diff: str):
+def search_replace(path: str, old_text: str, new_text: str):
     """
-    Apply a unified diff string patch to the file at file_path.
+    Search for exact text in a file and replace it with new text.
 
     Args:
-        path: path to the target file to patch
-        diff: the unified diff string to apply
-
-    **How to ensure reliable patching:**
-    - Always use proper unified diff format as produced by a command like:
-      `diff -u oldfile.py newfile.py > file.patch`
-    - Confirm hunk headers look like: `@@ -7,7 +7,16 @@` (not function names).
+        path: path to the target file
+        old_text: the exact text to search for (must match exactly including whitespace)
+        new_text: the text to replace it with
 
     Returns:
         A string indicating success or error message
     """
 
     file_path = sanitize_path(path)
-    p = log_tool(path=path, diff=f"{str(diff.count('\n') + 1)} lines")
+    p = log_tool(path=path, old_text=f"{str(old_text.count('\n') + 1)} lines",
+                 new_text=f"{str(new_text.count('\n') + 1)} lines")
 
-    # Write the diff content to a temporary patch file
-    tmp_patch_file_path = file_path + ".patch_temp"
+    # Read the file contents
     try:
-        with open(tmp_patch_file_path, "w", encoding="utf-8") as patch_file:
-            patch_file.write(diff)
-    except Exception as e:
-        p(f"❌ Error writing patch file: {e}")
-        return f"Error writing patch file: {e}"
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        p(f"❌ File not found: {file_path}")
+        return f"file not found: {file_path}"
+    except IOError as e:
+        p(f"❌ IOError while reading file: {e}")
+        return f"IOError while reading file: {e}"
 
-    # Patch expects the header to match the target file; patch works from the same directory
-    # So use only the filename in the diff header, and run patch in the file's directory.
-    cwd = os.path.dirname(file_path) or "."
-    filename = os.path.basename(file_path)
+    # Check if old_text exists in the file
+    if old_text not in content:
+        p(f"❌ Text not found in file")
+        return f"Text not found in file: {file_path}"
 
-    # Pre-check: Ensure the diff header matches the basename
-    # Optionally rewrite the diff if necessary:
-    first_lines = diff.splitlines()
-    if len(first_lines) >= 2 and (
-        first_lines[0].startswith('--- ') and first_lines[1].startswith('+++ ')
-    ):
-        def fix_header(line, newfile):  # patch header rewrite helper
-            parts = line.split()
-            if len(parts) > 1:
-                return f"{parts[0]} {newfile}"
-            return line
-        fixed_diff = (
-            fix_header(first_lines[0], filename) + "\n" +
-            fix_header(first_lines[1], filename) + "\n" +
-            "\n".join(first_lines[2:])
-        )
-        try:
-            with open(tmp_patch_file_path, "w", encoding="utf-8") as patch_file:
-                patch_file.write(fixed_diff)
-        except Exception as e:
-            p(f"❌ Error rewriting patch file: {e}")
-            return f"Error rewriting patch file: {e}"
+    # Count occurrences
+    occurrences = content.count(old_text)
+    if occurrences > 1:
+        p(f"⚠️  Found {occurrences} occurrences, replacing all")
 
-    # Apply the patch
+    # Replace the text
+    new_content = content.replace(old_text, new_text)
+
+    # Write back to file
     try:
-        cmd = f"patch -u {shlex.quote(filename)} -i {shlex.quote(os.path.basename(tmp_patch_file_path))}"
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, cwd=cwd
-        )
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+    except IOError as e:
+        p(f"❌ Error writing to file: {e}")
+        return f"Error writing to file: {e}"
 
-        if result.stdout:
-            p("[patch stdout] " + result.stdout.strip())
-        if result.stderr:
-            p("[patch stderr] " + result.stderr.strip())
-
-        if result.returncode != 0:
-            # Return all relevant output for debugging
-            return (
-                f"Patch command failed:\n"
-                f"stdout:\n{result.stdout}\n"
-                f"stderr:\n{result.stderr}"
-            )
-
-    finally:
-        try:
-            os.remove(tmp_patch_file_path)
-        except Exception as e:
-            p(f"Warning: could not remove temporary patch file: {e}")
-
-    return "Patch applied successfully"
+    p(f"✓ Replaced {occurrences} occurrence(s)")
+    return f"Successfully replaced {occurrences} occurrence(s)"
 
 def build_trim_message(messages: list[aisuite.Message]):
     def trim_message(index: int, new_content: str):
