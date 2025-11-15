@@ -19,6 +19,9 @@ def test_search_replace():
         )
 
         assert 'Successfully' in result, f"search_replace failed: {result}"
+        assert 'Diff:' in result, f"No diff in result: {result}"
+        assert '-This is the ORIGINAL line.' in result, f"Old text not in diff: {result}"
+        assert '+CHANGED LINE' in result, f"New text not in diff: {result}"
 
         # Read back file and verify change
         with open(tmp_file.name, 'r') as f:
@@ -70,6 +73,7 @@ def test_search_replace_multiple_occurrences():
         )
 
         assert '3 occurrence(s)' in result, f"Expected 3 occurrences, got: {result}"
+        assert 'Diff:' in result, f"No diff in result: {result}"
 
         # Verify all were replaced
         with open(tmp_file.name, 'r') as f:

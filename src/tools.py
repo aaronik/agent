@@ -340,6 +340,33 @@ def search_replace(path: str, old_text: str, new_text: str):
 
     # Replace the text
     new_content = content.replace(old_text, new_text)
+    
+    # Generate a unified diff to show what changed
+    import difflib
+    old_lines = content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"{os.path.basename(file_path)} (before)",
+        tofile=f"{os.path.basename(file_path)} (after)",
+        lineterm='',
+        n=3
+    )
+    
+    diff_output = ''.join(diff)
+    
+    # Print the diff
+    if diff_output:
+        p("📝 Diff:")
+        for line in diff_output.splitlines():
+            if line.startswith('+') and not line.startswith('+++'):
+                p(f"  \033[32m{line}\033[0m")  # Green for additions
+            elif line.startswith('-') and not line.startswith('---'):
+                p(f"  \033[31m{line}\033[0m")  # Red for deletions
+            else:
+                p(f"  {line}")
 
     # Write back to file
     try:
@@ -350,7 +377,7 @@ def search_replace(path: str, old_text: str, new_text: str):
         return f"Error writing to file: {e}"
 
     p(f"✓ Replaced {occurrences} occurrence(s)")
-    return f"Successfully replaced {occurrences} occurrence(s)"
+    return f"Successfully replaced {occurrences} occurrence(s)\n\nDiff:\n{diff_output}"
 
 def build_trim_message(messages: list[aisuite.Message]):
     def trim_message(index: int, new_content: str):
