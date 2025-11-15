@@ -33,4 +33,5 @@ urllib3==2.4.0
 langchain==0.3.25
 langchain-openai==0.3.27
 langgraph==0.5.1
+rich==13.9.4
 

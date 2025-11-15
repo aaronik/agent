@@ -13,12 +13,14 @@ import src.tools as tools
 from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
+from src.tool_status_display import get_tool_status_display, ToolStatus
+from langchain_core.messages import AIMessage, ToolMessage
 
 HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n"
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n"
 TOOLS = "\n--- 🛠️🪚✒️ Tools used 🛠️🪚✒️ ---\n"
 
-MODEL = "gpt-5.1"
+MODEL = "gpt-5-mini"
 model = ChatOpenAI(model=MODEL)
 
 tools = [
@@ -89,10 +91,71 @@ if __name__ == "__main__":
     print(TOOLS)
 
     while True:
-        # Run the agent
-        new_state_dict = agent.invoke(state, {"recursion_limit": 200})
+        # Get the tool status display
+        display = get_tool_status_display()
+        display.clear()
 
-        state = AgentState(messages=new_state_dict["messages"])
+        # Stream the agent execution
+        final_messages = []
+        tool_call_ids_seen = set()
+
+        for chunk in agent.stream(state, {"recursion_limit": 200}):
+            # Extract messages from the chunk
+            if "agent" in chunk:
+                messages = chunk["agent"].get("messages", [])
+                final_messages.extend(messages)
+
+                for msg in messages:
+                    # Check for tool calls in AIMessage
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        # Register new tool calls
+                        new_calls = [tc for tc in msg.tool_calls if tc["id"] not in tool_call_ids_seen]
+                        if new_calls:
+                            display.register_calls(new_calls)
+                            # Immediately mark as running since they're about to execute
+                            for tc in new_calls:
+                                tool_call_ids_seen.add(tc["id"])
+                                display.update_status(tc["id"], ToolStatus.RUNNING)
+
+                    # Check for tool results in ToolMessage
+                    elif isinstance(msg, ToolMessage):
+                        # Extract result preview (first line or first 80 chars)
+                        result_preview = msg.content
+                        if isinstance(result_preview, str):
+                            lines = result_preview.split("\n")
+                            result_preview = lines[0] if lines else ""
+                            if len(result_preview) > 80:
+                                result_preview = result_preview[:77] + "..."
+
+                        display.update_status(msg.tool_call_id, ToolStatus.DONE, result_preview)
+
+            elif "tools" in chunk:
+                # Tools node - mark all as running first, then extract results
+                for tool_id in display.tool_calls.keys():
+                    if display.tool_calls[tool_id].status == ToolStatus.PENDING:
+                        display.update_status(tool_id, ToolStatus.RUNNING)
+
+                # Extract ToolMessages
+                messages = chunk["tools"].get("messages", [])
+                final_messages.extend(messages)
+
+                for msg in messages:
+                    if isinstance(msg, ToolMessage):
+                        # Extract result preview
+                        result_preview = msg.content
+                        if isinstance(result_preview, str):
+                            lines = result_preview.split("\n")
+                            result_preview = lines[0] if lines else ""
+                            if len(result_preview) > 80:
+                                result_preview = result_preview[:77] + "..."
+
+                        display.update_status(msg.tool_call_id, ToolStatus.DONE, result_preview)
+
+        # Finalize the display
+        display.finalize()
+
+        # Update state with all messages
+        state = AgentState(messages=state.messages + final_messages)
 
         output = state.messages[-1] if state.messages else None
 

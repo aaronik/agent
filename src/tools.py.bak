@@ -2,6 +2,7 @@ import os
 import tempfile
 import shlex
 from bs4 import BeautifulSoup
+import inspect
 import requests
 from typing import Any
 import base64
@@ -16,6 +17,44 @@ MAX_RESPONSE_LENGTH = 1000000
 # Fetching the OpenAI API key from environment variable
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BING_SEARCH_API_KEY = os.getenv("BING_SEARCH_API_KEY")
+
+
+# This is the logging utility used to log from tools
+def log_tool(**kwargs: Any):
+    # Get the name of the calling function from the call stack
+    frame = inspect.currentframe()
+    caller_frame = frame.f_back if frame is not None else None
+
+    name = (
+        caller_frame.f_code.co_name
+        if caller_frame is not None
+        else '<unknown>'
+    )
+
+    # Use Rich console if available for better integration with live display
+    try:
+        from src.tool_status_display import get_tool_status_display
+        console = get_tool_status_display().console
+    except:
+        console = None
+
+    # Format each key-value pair in kwargs as key: [value]
+    args_str = ", ".join(f"{key}: [{value}]" for key, value in kwargs.items())
+    output = f"[{name}]" + (", " + args_str if args_str else "")
+
+    if console:
+        console.print(output, style="dim", markup=False, highlight=False)
+    else:
+        print(output)
+
+    def p(string: str):
+        output = "    " + string
+        if console:
+            console.print(output, style="dim", markup=False, highlight=False)
+        else:
+            print(output)
+
+    return p
 
 
 def run_shell_command(cmd: str, timeout: int = 30):
@@ -102,6 +141,7 @@ def search_text_alternative(text: str, max_results: int = 3):
     Alternative web search for when the primary one fails.
     """
 
+    p = log_tool(text=text, max_results=max_results)
 
     # Using curl instead of requests to avoid bot detection
     query = shlex.quote(text)
@@ -121,6 +161,7 @@ def search_text_alternative(text: str, max_results: int = 3):
     )
 
     if result.returncode != 0:
+        p(f"❌ curl command code [{result.returncode}]: {result.stderr}")
         return "DuckDuckGo search error:\n" + format_subproc_result(result)
 
     soup = BeautifulSoup(result.stdout, "html.parser")
@@ -134,6 +175,7 @@ def search_images(text: str, max_results: int = 3):
     Limit the search to max_results
     """
 
+    p = log_tool(text=text, max_results=max_results)
 
     dds = ddgs.duckduckgo_search.DDGS()
     results = dds.images(text, max_results=max_results)
@@ -141,6 +183,7 @@ def search_images(text: str, max_results: int = 3):
     text = ""
 
     for i, result in enumerate(results or [], start=1):
+        p(f"\x03\x02 {result['image']}")
         text += f"{i}. {result['title']}\n   {result['image']}\n"
 
     return text
@@ -177,6 +220,7 @@ def gen_image(
         prompt: what text to give to the AI image creation service
     """
 
+    p = log_tool(number=number, model=model, size=size, prompt=prompt)
 
     url = "https://api.openai.com/v1/images/generations"
     data = {
@@ -200,6 +244,7 @@ def gen_image(
         return response.text
 
     except Exception as e:
+        p(f"❌ status: [{response.status_code}]")
         return f"Error creating images: {e}"
 
 
@@ -323,6 +368,7 @@ def build_trim_message(messages: list[aisuite.Message]):
                 Otherwise, message content is overwritten with new_content
         """
 
+        p = log_tool(index=index, new_content=new_content)
 
         try:
             if new_content == "":
@@ -330,8 +376,10 @@ def build_trim_message(messages: list[aisuite.Message]):
             else:
                 messages[index].content = new_content
 
+            p(f"\x03\x02 message {index} trimmed")
             return f"message[{index}] successfully modified"
         except Exception as e:
+            p(f"\x03\x02 trim failed: {e}")
             return f"tool trim_message failed: {e}"
 
     return trim_message
@@ -355,6 +403,7 @@ def summarize_response(summary: str):
         summary: The very short summary string to be spoken aloud
                  in under 5 seconds.
     """
+    p = log_tool(summary=summary)
 
     # Sanitize summary input to avoid injection (simple quote escape)
     safe_summary = summary.replace('"', '\"')
@@ -362,8 +411,10 @@ def summarize_response(summary: str):
     # Use subprocess to call say asynchronously
     try:
         subprocess.Popen(['say', safe_summary])
+        p("Speech synthesis started")
         return "Speech synthesis started"
     except Exception as e:
+        p(f"Error starting speech synthesis: {e}")
         return f"Error starting speech synthesis: {e}"
 
 
@@ -380,6 +431,7 @@ def spawn(task: str):
     Returns:
         The output from the spawned agent's completion of the task
     """
+    p = log_tool(task=task)
 
     try:
         # Create a lightweight aisuite client for single-shot execution
@@ -414,9 +466,11 @@ def spawn(task: str):
         choice = response.choices[0]
         result = choice.message.content
 
+        p(f"spawned agent completed, returned {len(result)} characters")
         return f"[SPAWNED AGENT OUTPUT]\n{result}"
 
     except Exception as e:
+        p(f"❌ spawn failed: {e}")
         return f"Error spawning agent: {e}"
 
 
@@ -433,6 +487,7 @@ def screenshot_and_upload(area: str = "screen"):
     Returns:
         Dict with {'base64': ..., 'message': ...}.
     """
+    p = log_tool(area=area)
     tmpfile = tempfile.mktemp(suffix='.png')
 
     # Build screencapture command
@@ -465,6 +520,7 @@ def screenshot_and_upload(area: str = "screen"):
             pass
 
     b64_shortened = f"{base64_str[:5]}...{base64_str[-5:]}"
+    p(f"screenshot captured and base64 encoded: [{b64_shortened}]")
 
     return [{
         "type": "image",
