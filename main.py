@@ -14,6 +14,7 @@ from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from static.pricing import pricing
 from src.agent_runner import run_agent_with_display
+from src.tool_status_display import get_tool_status_display
 
 HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n\n"
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
@@ -50,8 +51,10 @@ token_usage = TokenUsage(
 )
 
 
-# Handle Ctrl-C: print total tokens and exit
+# Handle Ctrl-C: clean up display, print total tokens and exit
 def signal_handler(*_):
+    display = get_tool_status_display()
+    display.clear()
     token_usage.print()
     exit(0)
 
@@ -104,6 +107,7 @@ if __name__ == "__main__":
 
         # Exit after single invocation if --single flag is used
         if args.single:
+            token_usage.print()
             break
 
         # Get next user input
