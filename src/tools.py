@@ -10,7 +10,7 @@ import base64
 import aisuite
 import subprocess
 import duckduckgo_search as ddgs
-from src.util import extract_text, format_subproc_result, sanitize_path
+from src.util import format_subproc_result, sanitize_path
 
 MAX_RESPONSE_LENGTH = 1000000
 
@@ -81,14 +81,26 @@ def run_shell_command(cmd: str, timeout: int = 30):
 
 
 def fetch(url: str):
-    """Fetch content from the provided URL."""
+    """Fetch content from the provided URL using jina.ai reader.
+
+    This function intentionally avoids double-prefixing URLs that already
+    target the jina.ai reader. If the caller passes a URL that already
+    starts with "https://r.jina.ai/", we use it as-is. Otherwise, we
+    prefix the provided URL with the reader base.
+    """
 
     p = log_tool(url=url)
 
-    response = requests.get(url, allow_redirects=True)
+    # Avoid double-prefixing when the caller already passed an r.jina.ai URL
+    if url.startswith("https://r.jina.ai/"):
+        jina_url = url
+    else:
+        jina_url = f"https://r.jina.ai/{url}"
+
+    response = requests.get(jina_url, allow_redirects=True)
     try:
         response.raise_for_status()
-        text = extract_text(response.text)
+        text = response.text
 
         if len(text) > MAX_RESPONSE_LENGTH:
             p("truncating response")
@@ -177,7 +189,7 @@ def search_images(text: str, max_results: int = 3):
     text = ""
 
     for i, result in enumerate(results or [], start=1):
-        p(f" {result['image']}")
+        p(f"\x03\x02 {result['image']}")
         text += f"{i}. {result['title']}\n   {result['image']}\n"
 
     return text
@@ -257,6 +269,7 @@ def read_file(path: str):
 
     try:
         with open(path, 'r', encoding='utf-8') as file:
+            p(f"lines read: {len(file.read())}")
             return file.read()
     except FileNotFoundError:
         p(f"❌ File not found: {path}")
@@ -340,12 +353,12 @@ def search_replace(path: str, old_text: str, new_text: str):
 
     # Replace the text
     new_content = content.replace(old_text, new_text)
-    
+
     # Generate a unified diff to show what changed
     import difflib
     old_lines = content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
-    
+
     diff = difflib.unified_diff(
         old_lines,
         new_lines,
@@ -354,9 +367,9 @@ def search_replace(path: str, old_text: str, new_text: str):
         lineterm='',
         n=3
     )
-    
+
     diff_output = ''.join(diff)
-    
+
     # Print the diff
     if diff_output:
         p("📝 Diff:")
@@ -399,10 +412,10 @@ def build_trim_message(messages: list[aisuite.Message]):
             else:
                 messages[index].content = new_content
 
-            p(f" message {index} trimmed")
+            p(f"\x03\x02 message {index} trimmed")
             return f"message[{index}] successfully modified"
         except Exception as e:
-            p(f" trim failed: {e}")
+            p(f"\x03\x02 trim failed: {e}")
             return f"tool trim_message failed: {e}"
 
     return trim_message

@@ -18,7 +18,7 @@ HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀�
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n"
 TOOLS = "\n--- 🛠️🪚✒️ Tools used 🛠️🪚✒️ ---\n"
 
-MODEL = "gpt-5"
+MODEL = "gpt-5.1"
 model = ChatOpenAI(model=MODEL)
 
 tools = [
