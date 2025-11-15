@@ -33,7 +33,12 @@ class ToolStatusDisplay:
     def start_live(self):
         """Start the live display"""
         if not self.live:
-            self.live = Live(self._create_table(), console=self.console, refresh_per_second=10)
+            self.live = Live(
+                self._create_table(),
+                console=self.console,
+                refresh_per_second=10,
+                transient=False
+            )
             self.live.start()
 
     def register_calls(self, tool_calls: list):
@@ -86,6 +91,7 @@ class ToolStatusDisplay:
         table.add_column("Tool", style="cyan", no_wrap=True)
         table.add_column("Arguments", style="white", max_width=50)
         table.add_column("Status", justify="center", style="bold")
+        table.add_column("Result", style="dim white", max_width=60)
 
         for tc in self.tool_calls.values():
             # Format args
@@ -95,10 +101,14 @@ class ToolStatusDisplay:
             icon, color = tc.status.value
             status_display = f"[{color}]{icon} {tc.status.name.title()}[/{color}]"
 
+            # Format result
+            result_display = tc.result or ""
+
             table.add_row(
                 tc.name,
                 args_str,
-                status_display
+                status_display,
+                result_display
             )
 
         return table
