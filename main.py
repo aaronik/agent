@@ -16,6 +16,7 @@ from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from src.agent_runner import run_agent_with_display
 from src.tool_status_display import get_tool_status_display
+from src import claude_memory
 
 HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n\n"
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
@@ -45,11 +46,15 @@ agent = create_agent(model, tools=tools)
 @dataclass
 class AgentState:
     messages: List[BaseMessage] = field(default_factory=list)
+    token_usage: 'TokenUsage | None' = None
 
 
 token_usage = TokenUsage(
     model=model.model_name
 )
+
+# Ensure the display updates with running cost as tokens accumulate
+display = get_tool_status_display()
 
 
 # Handle Ctrl-C: clean up display, print total tokens and exit
@@ -75,7 +80,22 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + MODEL)
+
+    # Discover CLAUDE.md memory files and print line counts for each
+    memory_files = claude_memory.find_all_claude_md_files()
+    if memory_files:
+        print("\nMemory files found:")
+        for mf in memory_files:
+            try:
+                with open(mf, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                print(f"- {mf}: {len(lines)} lines")
+            except Exception:
+                print(f"- {mf}: (could not read)")
+    else:
+        print("\nNo CLAUDE.md memory files found")
 
     # Initial user input from command line or prompt
     if args.query:
@@ -84,21 +104,24 @@ if __name__ == "__main__":
         user_input = session.prompt("What's up? ")
 
     # Initialize state with typed messages
-    state = AgentState(messages=[
-        SystemMessage(content=system_string),
-        SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
-        SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
-        SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
-        SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
-        HumanMessage(content=user_input),
-    ])
+    state = AgentState(
+        messages=[
+            SystemMessage(content=system_string),
+            SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+            SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
+            SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
+            SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
+            HumanMessage(content=user_input),
+        ],
+        token_usage=token_usage
+    )
 
     while True:
         # Run agent with live status display
         new_messages = run_agent_with_display(agent, state)
 
         # Update state with new messages
-        state = AgentState(messages=state.messages + new_messages)
+        state = AgentState(messages=state.messages + new_messages, token_usage=token_usage)
 
         output = state.messages[-1] if state.messages else None
 

@@ -93,16 +93,46 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
     communicate_calls = set()  # Track communicate tool calls separately
 
     # Stream agent execution
+    # Keep the running cost updated as messages arrive
+    token_usage = None
+    try:
+        # attempt to get token usage cache from state if present
+        token_usage = getattr(state, 'token_usage', None)
+    except Exception:
+        token_usage = None
+
     for chunk in agent.stream(state, {"recursion_limit": recursion_limit}):
         if "agent" in chunk:
             messages = chunk["agent"].get("messages", [])
             final_messages.extend(messages)
             process_agent_chunk(messages, tool_call_ids_seen, display, communicate_calls)
+            # Update running cost if token_usage is available on the state
+            if token_usage is not None:
+                try:
+                    # First try incremental ingestion if available
+                    if hasattr(token_usage, 'ingest_messages_incremental'):
+                        token_usage.ingest_messages_incremental(messages)
+                    else:
+                        token_usage.ingest_from_messages(messages)
+
+                    display.update_cost(token_usage)
+                except Exception:
+                    # Don't let cost reporting break execution
+                    pass
 
         elif "tools" in chunk:
             messages = chunk["tools"].get("messages", [])
             final_messages.extend(messages)
             process_tools_chunk(messages, display, communicate_calls)
+            if token_usage is not None:
+                try:
+                    if hasattr(token_usage, 'ingest_messages_incremental'):
+                        token_usage.ingest_messages_incremental(messages)
+                    else:
+                        token_usage.ingest_from_messages(messages)
+                    display.update_cost(token_usage)
+                except Exception:
+                    pass
 
     display.finalize()
 

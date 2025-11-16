@@ -15,11 +15,14 @@ class TokenUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     _cost_map: dict = None
+    _seen_message_ids: set = None
 
     def model_post_init(self, __context):
         """Load cost map after model initialization"""
         if self._cost_map is None:
             object.__setattr__(self, '_cost_map', get_model_cost_map(url=''))
+        if self._seen_message_ids is None:
+            object.__setattr__(self, '_seen_message_ids', set())
 
     def prompt_cost(self) -> float:
         """
@@ -90,6 +93,34 @@ class TokenUsage(BaseModel):
 
             self.completion_tokens += c
             self.prompt_tokens += p
+
+    def ingest_messages_incremental(self, messages: list[BaseMessage]):
+        """
+        Ingest token usage from a list of messages incrementally, avoiding double-counting.
+        Uses the object id of message objects to track which messages have been processed.
+        """
+        if self._seen_message_ids is None:
+            self._seen_message_ids = set()
+
+        for message in messages:
+            mid = id(message)
+            if mid in self._seen_message_ids:
+                continue
+            self._seen_message_ids.add(mid)
+
+            if not getattr(message, 'response_metadata', None):
+                continue
+
+            try:
+                c = message.response_metadata["token_usage"]["completion_tokens"]
+                p = message.response_metadata["token_usage"]["prompt_tokens"]
+
+                # Be defensive about types
+                self.completion_tokens += int(c)
+                self.prompt_tokens += int(p)
+            except Exception:
+                # If structure is unexpected, skip
+                continue
 
     def print(self):
         """

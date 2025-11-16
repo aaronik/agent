@@ -304,6 +304,42 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         call_args = mock_agent.stream.call_args[0]
         self.assertEqual(call_args[1]["recursion_limit"], 150)
 
+    @patch('src.agent_runner.get_tool_status_display')
+    def test_updates_cost_display_when_token_usage_present(self, mock_get_display):
+        """Test that cost display is updated when token_usage is on state"""
+        mock_display = Mock()
+        mock_display.display_sequence = []
+        mock_get_display.return_value = mock_display
+
+        # Create mock token_usage with necessary methods
+        mock_token_usage = Mock()
+        mock_token_usage.prompt_cost.return_value = 0.001
+        mock_token_usage.completion_cost.return_value = 0.002
+        mock_token_usage.total_cost.return_value = 0.003
+
+        # Setup state with token_usage
+        state = Mock()
+        state.token_usage = mock_token_usage
+
+        # Setup mock agent
+        mock_agent = Mock()
+        tool_call = {"id": "call_1", "name": "read_file", "args": {"path": "test.txt"}}
+        ai_msg = AIMessage(content="", tool_calls=[tool_call])
+        tool_result = ToolMessage(content="File contents", tool_call_id="call_1")
+
+        mock_agent.stream.return_value = [
+            {"agent": {"messages": [ai_msg]}},
+            {"tools": {"messages": [tool_result]}}
+        ]
+
+        # Run agent
+        run_agent_with_display(mock_agent, state)
+
+        # Verify update_cost was called
+        self.assertTrue(mock_display.update_cost.called)
+        # Should be called at least once (after agent and tools chunks)
+        self.assertGreaterEqual(mock_display.update_cost.call_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

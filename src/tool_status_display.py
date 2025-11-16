@@ -29,6 +29,7 @@ class ToolStatusDisplay:
         self.console = Console()
         self.display_sequence: list[dict] = []  # Sequence of tables and communications
         self.live: Optional[Live] = None
+        self._cost_line: Optional[str] = None
 
     def start_live(self):
         """Start the live display"""
@@ -89,6 +90,23 @@ class ToolStatusDisplay:
         if self.live:
             self.live.update(self._create_display())
 
+    def update_cost(self, token_usage):
+        """Update the running cost line shown in the display.
+
+        token_usage: object with prompt_cost(), completion_cost(), total_cost() methods
+        """
+        try:
+            input_cost = token_usage.prompt_cost()
+            output_cost = token_usage.completion_cost()
+            total = token_usage.total_cost()
+            self._cost_line = f"Cost — input: ${input_cost:.4f} | output: ${output_cost:.4f} | total: ${total:.4f}"
+        except Exception:
+            # Be resilient: if token_usage doesn't have expected methods, skip
+            self._cost_line = None
+
+        if self.live:
+            self.live.update(self._create_display())
+
     def clear(self):
         """Clear the display and reset state"""
         if self.live:
@@ -96,6 +114,7 @@ class ToolStatusDisplay:
             self.live = None
 
         self.display_sequence = []
+        self._cost_line = None
 
     def _create_table(self, tool_calls: Dict[str, ToolCall]) -> Table:
         """Create a Rich table for the current tool calls"""
@@ -150,6 +169,10 @@ class ToolStatusDisplay:
         from rich.console import Group
 
         renderables = []
+
+        # Add cost line at the top if available
+        if self._cost_line:
+            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="green", padding=(0, 1)))
 
         for item in self.display_sequence:
             if item["type"] == "table":
