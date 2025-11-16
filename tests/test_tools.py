@@ -68,75 +68,159 @@ class TestFileOperations(unittest.TestCase):
 
 
 class TestRunShellCommand(unittest.TestCase):
-    def test_simple_command_success(self):
+    @patch('src.tools.subprocess.run')
+    def test_simple_command_success(self, mock_run):
+        mock_result = Mock()
+        mock_result.stdout = "Hello World\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo 'Hello World'")
         self.assertIn("Hello World", result)
         self.assertIn("[STDOUT]", result)
         self.assertIn("[CODE]", result)
 
-    def test_command_with_stderr(self):
+    @patch('src.tools.subprocess.run')
+    def test_command_with_stderr(self, mock_run):
+        mock_result = Mock()
+        mock_result.stdout = ""
+        mock_result.stderr = "error message\n"
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo 'error message' >&2")
         self.assertIn("error message", result)
         self.assertIn("[STDERR]", result)
 
-    def test_command_exit_code(self):
+    @patch('src.tools.subprocess.run')
+    def test_command_exit_code(self, mock_run):
+        mock_result = Mock()
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        mock_result.returncode = 42
+        mock_run.return_value = mock_result
+
         result = run_shell_command("sh -c 'exit 42'")
         self.assertIn("42", result)
         self.assertIn("[CODE]", result)
 
-    def test_command_timeout(self):
+    @patch('src.tools.subprocess.run')
+    def test_command_timeout(self, mock_run):
+        mock_result = Mock()
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        mock_result.returncode = 124
+        mock_run.return_value = mock_result
+
         result = run_shell_command("sleep 5", timeout=1)
         self.assertIn("124", result)
 
-    def test_pwd_command(self):
+    @patch('src.tools.subprocess.run')
+    def test_pwd_command(self, mock_run):
+        mock_result = Mock()
+        mock_result.stdout = "/Users/test/projects/agent\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("pwd")
         self.assertIn("/", result)
         self.assertIn("[STDOUT]", result)
 
-    def test_large_output(self):
+    @patch('src.tools.subprocess.run')
+    def test_large_output(self, mock_run):
         """Test handling of commands with large output"""
-        # Generate a large amount of output (10,000 lines using seq)
+        # Generate a large amount of output (10,000 lines)
+        large_output = "\n".join([f"Line {i}" for i in range(1, 10001)])
+        mock_result = Mock()
+        mock_result.stdout = large_output
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("seq 1 10000 | while read i; do echo 'Line '$i; done")
         self.assertIn("[STDOUT]", result)
         self.assertIn("Line 1", result)
         # Verify the output is not truncated (should contain later lines)
         self.assertIn("Line 10000", result)
 
-    def test_special_characters_in_output(self):
+    @patch('src.tools.subprocess.run')
+    def test_special_characters_in_output(self, mock_run):
         """Test handling of special characters in command output"""
-        # Test various special characters
+        mock_result = Mock()
+        mock_result.stdout = "Special: !@#$%^&*()[]{}|\\;:,.<>?/~`\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo 'Special: !@#$%^&*()[]{}|\\;:,.<>?/~`'")
         self.assertIn("Special:", result)
         self.assertIn("!@#$%^&*", result)
 
-    def test_newlines_in_output(self):
+    @patch('src.tools.subprocess.run')
+    def test_newlines_in_output(self, mock_run):
         """Test handling of multiple newlines"""
+        mock_result = Mock()
+        mock_result.stdout = "Line1\n\n\nLine2\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("printf 'Line1\\n\\n\\nLine2\\n'")
         self.assertIn("Line1", result)
         self.assertIn("Line2", result)
 
-    def test_unicode_characters(self):
+    @patch('src.tools.subprocess.run')
+    def test_unicode_characters(self, mock_run):
         """Test handling of unicode characters"""
+        mock_result = Mock()
+        mock_result.stdout = "你好世界 🌍 Ñoño\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo '你好世界 🌍 Ñoño'")
         self.assertIn("你好世界", result)
         self.assertIn("🌍", result)
         self.assertIn("Ñoño", result)
 
-    def test_multiline_command(self):
+    @patch('src.tools.subprocess.run')
+    def test_multiline_command(self, mock_run):
         """Test handling of multiline commands"""
+        mock_result = Mock()
+        mock_result.stdout = "First\nSecond\nThird\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo 'First' && echo 'Second' && echo 'Third'")
         self.assertIn("First", result)
         self.assertIn("Second", result)
         self.assertIn("Third", result)
 
-    def test_empty_output(self):
+    @patch('src.tools.subprocess.run')
+    def test_empty_output(self, mock_run):
         """Test handling of commands with no output"""
+        mock_result = Mock()
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("true")
         self.assertIn("[CODE]", result)
         self.assertIn("0", result)
 
-    def test_command_with_quotes(self):
+    @patch('src.tools.subprocess.run')
+    def test_command_with_quotes(self, mock_run):
         """Test handling of commands containing quotes"""
+        mock_result = Mock()
+        mock_result.stdout = "Hello 'World'\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
         result = run_shell_command("echo \"Hello 'World'\"")
         self.assertIn("Hello 'World'", result)
 
