@@ -11,10 +11,11 @@ from rich.markup import escape
 
 
 class ToolStatus(Enum):
-    PENDING = ("⏳", "dim yellow")
-    RUNNING = ("▶️", "bold cyan")
-    DONE = ("✓", "bold green")
-    ERROR = ("✗", "bold red")
+    # Use a more subdued, professional palette (avoid bold/bright colors)
+    PENDING = ("⏳", "grey50")
+    RUNNING = ("▶️", "cyan")
+    DONE = ("✓", "green")
+    ERROR = ("✗", "red")
 
 
 @dataclass
@@ -135,16 +136,17 @@ class ToolStatusDisplay:
             title="🛠️ Tool Execution",
             box=box.ROUNDED,
             show_header=True,
-            header_style="bold cyan",
-            border_style="blue",
-            title_style="bold magenta",
+            header_style="cyan",
+            border_style="grey37",
+            title_style="bold",
             width=terminal_width - 2  # Ensure table fits in terminal
         )
 
-        table.add_column("Tool", style="cyan", no_wrap=True, max_width=15)
-        table.add_column("Arguments", style="white", max_width=args_width, no_wrap=True)
-        table.add_column("Status", justify="center", style="bold", no_wrap=True)
-        table.add_column("Result", style="dim white", max_width=result_width, no_wrap=False)
+        # Left-align columns for a cleaner, more professional look
+        table.add_column("Tool", style="cyan", no_wrap=True, max_width=15, justify="left")
+        table.add_column("Arguments", style="white", max_width=args_width, no_wrap=True, justify="left")
+        table.add_column("Status", justify="left", style="", no_wrap=True)
+        table.add_column("Result", style="dim", max_width=result_width, no_wrap=False, justify="left")
 
         for tc in tool_calls.values():
             # Format args - escape Rich markup to prevent MarkupError
@@ -165,6 +167,8 @@ class ToolStatusDisplay:
                 result_display
             )
 
+        # Use more muted colors for panels and syntax themes
+
         return table
 
     def _create_display(self):
@@ -175,7 +179,7 @@ class ToolStatusDisplay:
 
         # Add cost line at the top if available
         if self._cost_line:
-            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="green", padding=(0, 1)))
+            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="grey37", padding=(0, 1)))
 
         for item in self.display_sequence:
             if item["type"] == "table":
@@ -191,7 +195,7 @@ class ToolStatusDisplay:
                         Panel(
                             item["message"],
                             title="💭 Agent Communication",
-                            border_style="blue",
+                            border_style="grey37",
                             padding=(1, 2)
                         )
                     )
@@ -224,8 +228,8 @@ class ToolStatusDisplay:
         diff_text: unified diff text to render with syntax highlighting
         """
         # Create a Syntax renderable for nice diff coloring
-        syntax = Syntax(diff_text or "", "diff", theme="monokai", line_numbers=False)
-        panel = Panel(syntax, title=f"🧾 {filename} — Diff", border_style="yellow", padding=(1, 2))
+        syntax = Syntax(diff_text or "", "diff", theme="native", line_numbers=False)
+        panel = Panel(syntax, title=f"🧾 {filename} — Diff", border_style="grey37", padding=(1, 2))
 
         comm = {"type": "communication", "renderable": panel}
         self.display_sequence.append(comm)
