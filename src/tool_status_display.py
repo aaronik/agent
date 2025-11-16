@@ -6,6 +6,8 @@ from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
 from rich import box
+from rich.syntax import Syntax
+from rich.markup import escape
 
 
 class ToolStatus(Enum):
@@ -145,15 +147,16 @@ class ToolStatusDisplay:
         table.add_column("Result", style="dim white", max_width=result_width, no_wrap=False)
 
         for tc in tool_calls.values():
-            # Format args
+            # Format args - escape Rich markup to prevent MarkupError
             args_str = ", ".join(f"{k}={v}" for k, v in tc.args.items())
+            args_str = escape(args_str)
 
             # Get status icon and color
             icon, color = tc.status.value
             status_display = f"[{color}]{icon} {tc.status.name.title()}[/{color}]"
 
-            # Format result - single line only
-            result_display = tc.result or ""
+            # Format result - escape Rich markup to prevent MarkupError
+            result_display = escape(tc.result) if tc.result else ""
 
             table.add_row(
                 tc.name,
@@ -180,14 +183,18 @@ class ToolStatusDisplay:
                 if item["tool_calls"]:
                     renderables.append(self._create_table(item["tool_calls"]))
             else:  # communication
-                renderables.append(
-                    Panel(
-                        item["message"],
-                        title="💭 Agent Communication",
-                        border_style="blue",
-                        padding=(1, 2)
+                # Support either a simple message or a pre-built renderable (like a Syntax panel)
+                if "renderable" in item:
+                    renderables.append(item["renderable"])
+                else:
+                    renderables.append(
+                        Panel(
+                            item["message"],
+                            title="💭 Agent Communication",
+                            border_style="blue",
+                            padding=(1, 2)
+                        )
                     )
-                )
 
         return Group(*renderables)
 
@@ -201,6 +208,27 @@ class ToolStatusDisplay:
         # Print a newline for spacing
         if self.display_sequence:
             self.console.print()
+
+    def get_tool_call(self, tool_call_id: str):
+        """Return the ToolCall object for the given id or None"""
+        for item in self.display_sequence:
+            if item.get("type") == "table":
+                if tool_call_id in item["tool_calls"]:
+                    return item["tool_calls"][tool_call_id]
+        return None
+
+    def add_diff(self, filename: str, diff_text: str):
+        """Add a rich diff panel to the display.
+
+        filename: short label for the diff (typically basename)
+        diff_text: unified diff text to render with syntax highlighting
+        """
+        # Create a Syntax renderable for nice diff coloring
+        syntax = Syntax(diff_text or "", "diff", theme="monokai", line_numbers=False)
+        panel = Panel(syntax, title=f"🧾 {filename} — Diff", border_style="yellow", padding=(1, 2))
+
+        comm = {"type": "communication", "renderable": panel}
+        self.display_sequence.append(comm)
 
 
 # Global instance

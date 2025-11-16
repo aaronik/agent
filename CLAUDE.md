@@ -19,7 +19,7 @@ Test guidelines:
 - Every bug fix should include a test that would have caught the bug
 - Tests are more important than the code itself - they guarantee stability
 
-Current test count: 103 tests
+Current test count: 108 tests
 Target test execution time: < 2 seconds for full suite
 
 ## Note on Interaction with the User
