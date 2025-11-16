@@ -137,6 +137,7 @@ class ToolStatusDisplay:
             box=box.ROUNDED,
             show_header=True,
             header_style="cyan",
+            title_justify="left",
             border_style="grey37",
             title_style="bold",
             width=terminal_width - 2  # Ensure table fits in terminal
