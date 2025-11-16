@@ -9,6 +9,8 @@ from langchain.schema import (
     HumanMessage,
 )
 from langgraph.prebuilt import create_react_agent
+from prompt_toolkit import PromptSession
+from prompt_toolkit.enums import EditingMode
 import src.tools as tools
 from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
@@ -61,6 +63,9 @@ def signal_handler(*_):
 
 signal.signal(signal.SIGINT, signal_handler)
 
+# Create prompt session with vim mode
+session = PromptSession(editing_mode=EditingMode.VI)
+
 
 if __name__ == "__main__":
     # Parse command line arguments
@@ -77,7 +82,7 @@ if __name__ == "__main__":
     if args.query:
         user_input = " ".join(args.query)
     else:
-        user_input = input("What's up? ")
+        user_input = session.prompt("What's up? ")
 
     # Initialize state with typed messages
     state = AgentState(messages=[
@@ -112,7 +117,7 @@ if __name__ == "__main__":
 
         # Get next user input
         print(HUMAN)
-        user_input = input("Anything else? ")
+        user_input = session.prompt("Anything else? ")
 
         # Append new user message to state
         state.messages.append(HumanMessage(content=user_input))
