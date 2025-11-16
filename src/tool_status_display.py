@@ -91,7 +91,7 @@ class ToolStatusDisplay:
         table.add_column("Tool", style="cyan", no_wrap=True)
         table.add_column("Arguments", style="white", max_width=50)
         table.add_column("Status", justify="center", style="bold")
-        table.add_column("Result", style="dim white", max_width=60)
+        table.add_column("Result", style="dim white", max_width=80, no_wrap=True)
 
         for tc in self.tool_calls.values():
             # Format args
@@ -101,7 +101,7 @@ class ToolStatusDisplay:
             icon, color = tc.status.value
             status_display = f"[{color}]{icon} {tc.status.name.title()}[/{color}]"
 
-            # Format result
+            # Format result - single line only
             result_display = tc.result or ""
 
             table.add_row(

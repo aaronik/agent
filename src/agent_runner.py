@@ -3,14 +3,22 @@ from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
-def extract_result_preview(content: str, max_length: int = 80) -> str:
+def extract_result_preview(content: str, max_length: int = 200) -> str:
     """Extract a preview from tool result content"""
     if not isinstance(content, str):
         return ""
 
+    # Take only the first line
     lines = content.split("\n")
-    preview = lines[0] if lines else ""
+    first_line = lines[0] if lines else ""
 
+    # Strip whitespace
+    preview = first_line.strip()
+
+    # Remove any control characters or problematic chars
+    preview = "".join(char for char in preview if char.isprintable())
+
+    # Truncate if too long
     if len(preview) > max_length:
         preview = preview[:max_length - 3] + "..."
 
