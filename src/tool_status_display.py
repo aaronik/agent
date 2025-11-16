@@ -79,19 +79,31 @@ class ToolStatusDisplay:
 
     def _create_table(self) -> Table:
         """Create a Rich table for the current tool calls"""
+        # Get terminal width and calculate available space
+        terminal_width = self.console.width
+        # Reserve space for table borders, padding, and columns
+        # Tool: ~15, Arguments: variable, Status: ~10, Result: remainder
+        reserved_width = 40  # borders, padding, tool name, status
+        available_for_content = max(terminal_width - reserved_width, 40)
+
+        # Split remaining space between Arguments and Result
+        args_width = min(50, available_for_content // 2)
+        result_width = min(60, available_for_content - args_width)
+
         table = Table(
             title="🛠️ Tool Execution",
             box=box.ROUNDED,
             show_header=True,
             header_style="bold cyan",
             border_style="blue",
-            title_style="bold magenta"
+            title_style="bold magenta",
+            width=terminal_width - 2  # Ensure table fits in terminal
         )
 
-        table.add_column("Tool", style="cyan", no_wrap=True)
-        table.add_column("Arguments", style="white", max_width=50)
-        table.add_column("Status", justify="center", style="bold")
-        table.add_column("Result", style="dim white", max_width=80, no_wrap=True)
+        table.add_column("Tool", style="cyan", no_wrap=True, max_width=15)
+        table.add_column("Arguments", style="white", max_width=args_width, no_wrap=True)
+        table.add_column("Status", justify="center", style="bold", no_wrap=True)
+        table.add_column("Result", style="dim white", max_width=result_width, no_wrap=False)
 
         for tc in self.tool_calls.values():
             # Format args

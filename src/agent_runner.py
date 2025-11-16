@@ -3,26 +3,30 @@ from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
-def extract_result_preview(content: str, max_length: int = 200) -> str:
-    """Extract a preview from tool result content"""
+def extract_result_preview(content: str, max_lines: int = 3, max_line_length: int = 80) -> str:
+    """Extract a preview from tool result content with multiline support"""
     if not isinstance(content, str):
         return ""
 
-    # Take only the first line
+    # Get first N non-empty lines
     lines = content.split("\n")
-    first_line = lines[0] if lines else ""
+    preview_lines = []
 
-    # Strip whitespace
-    preview = first_line.strip()
+    for line in lines[:max_lines * 3]:  # Look through more lines to find non-empty ones
+        stripped = line.strip()
+        if stripped:
+            # Remove control characters
+            cleaned = "".join(char for char in stripped if char.isprintable())
+            # Truncate each line individually
+            if len(cleaned) > max_line_length:
+                cleaned = cleaned[:max_line_length - 3] + "..."
+            preview_lines.append(cleaned)
 
-    # Remove any control characters or problematic chars
-    preview = "".join(char for char in preview if char.isprintable())
+        if len(preview_lines) >= max_lines:
+            break
 
-    # Truncate if too long
-    if len(preview) > max_length:
-        preview = preview[:max_length - 3] + "..."
-
-    return preview
+    # Join with actual newlines for multiline display
+    return "\n".join(preview_lines)
 
 
 def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str], display):
