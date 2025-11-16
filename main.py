@@ -17,6 +17,7 @@ from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
 from src.agent_runner import run_agent_with_display
 from src.tool_status_display import get_tool_status_display
 from src import claude_memory
+import sys
 
 HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n\n"
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
@@ -57,12 +58,28 @@ token_usage = TokenUsage(
 display = get_tool_status_display()
 
 
+# Graceful exit helper used for Ctrl-C handling
+def graceful_exit() -> None:
+    """Clean up UI and print token usage before exiting."""
+    try:
+        display.clear()
+    except Exception:
+        # Fallback: try obtaining a fresh display instance
+        try:
+            get_tool_status_display().clear()
+        except Exception:
+            pass
+    try:
+        token_usage.print()
+    except Exception:
+        pass
+    print("Goodbye!")
+    sys.exit(0)
+
+
 # Handle Ctrl-C: clean up display, print total tokens and exit
 def signal_handler(*_):
-    display = get_tool_status_display()
-    display.clear()
-    token_usage.print()
-    exit(0)
+    graceful_exit()
 
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -101,7 +118,10 @@ if __name__ == "__main__":
     if args.query:
         user_input = " ".join(args.query)
     else:
-        user_input = session.prompt("What's up? ")
+        try:
+            user_input = session.prompt("What's up? ")
+        except (KeyboardInterrupt, SystemExit):
+            graceful_exit()
 
     # Initialize state with typed messages
     state = AgentState(
@@ -132,14 +152,20 @@ if __name__ == "__main__":
 
         token_usage.ingest_from_messages(state.messages)
 
+        # Show persistent cost display after each turn
+        print()  # Add spacing
+        token_usage.print_panel()
+
         # Exit after single invocation if --single flag is used
         if args.single:
-            token_usage.print()
             break
 
         # Get next user input
         print(HUMAN)
-        user_input = session.prompt("Anything else? ")
+        try:
+            user_input = session.prompt("Anything else? ")
+        except (KeyboardInterrupt, SystemExit):
+            graceful_exit()
 
         # Append new user message to state
         state.messages.append(HumanMessage(content=user_input))

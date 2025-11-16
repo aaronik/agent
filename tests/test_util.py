@@ -128,6 +128,20 @@ class TestTokenUsage(unittest.TestCase):
         cost = usage.prompt_cost()
         self.assertEqual(cost, 0.0)
 
+    @patch('src.util.get_model_cost_map')
+    @patch('builtins.print')
+    def test_print_panel(self, mock_print, mock_get_cost_map):
+        """Test that print_panel creates a Rich panel with cost information"""
+        mock_get_cost_map.return_value = self.mock_cost_map
+        usage = TokenUsage(model="test-model", prompt_tokens=1000, completion_tokens=500)
+
+        # Should not raise any exceptions
+        usage.print_panel()
+
+        # Verify the method completes without error (Rich will handle the actual formatting)
+        # We can't easily test Rich output without mocking the entire Console,
+        # but we can verify the method runs successfully
+
 
 class TestSystemUtilityFunctions(unittest.TestCase):
     def test_sys_ls(self):

@@ -133,6 +133,21 @@ class TokenUsage(BaseModel):
             f"\ntotal: {self.total_tokens()} (${self.total_cost()})"
         )
 
+    def print_panel(self):
+        """
+        Print a Rich panel showing the running cost
+        """
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console()
+        cost_text = (
+            f"[cyan]Input:[/cyan] {self.prompt_tokens} tokens (${self.prompt_cost():.4f}) | "
+            f"[yellow]Output:[/yellow] {self.completion_tokens} tokens (${self.completion_cost():.4f}) | "
+            f"[green]Total:[/green] ${self.total_cost():.4f}"
+        )
+        console.print(Panel(cost_text, title="💰 Running Cost", border_style="green", padding=(0, 1)))
+
 
 # Like a memoization, but blanks out the tool call if it's been done before
 def refuse_if_duplicate(func: FunctionType):
