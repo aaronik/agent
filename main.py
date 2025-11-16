@@ -3,7 +3,7 @@ import argparse
 from dataclasses import dataclass, field
 from typing import List
 from langchain_openai import ChatOpenAI
-from langchain.schema import (
+from langchain_core.messages import (
     BaseMessage,
     SystemMessage,
     HumanMessage,
@@ -14,7 +14,6 @@ from prompt_toolkit.enums import EditingMode
 import src.tools as tools
 from src.constants import system_string
 from src.util import TokenUsage, sys_git_ls, sys_ls, sys_pwd, sys_uname
-from static.pricing import pricing
 from src.agent_runner import run_agent_with_display
 from src.tool_status_display import get_tool_status_display
 
@@ -49,8 +48,7 @@ class AgentState:
 
 
 token_usage = TokenUsage(
-    model=f"openai:{model.model_name}",
-    pricing=pricing
+    model=model.model_name
 )
 
 

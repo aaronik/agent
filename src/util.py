@@ -2,30 +2,60 @@ import subprocess
 from bs4 import BeautifulSoup
 from types import FunctionType
 from functools import wraps
-from langchain.schema import BaseMessage
+from langchain_core.messages import BaseMessage
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 import aisuite as ai
 from pydantic import BaseModel
 import os
+from litellm import get_model_cost_map
 
 
 class TokenUsage(BaseModel):
     model: str
-    pricing: dict
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    _cost_map: dict = None
+
+    def model_post_init(self, __context):
+        """Load cost map after model initialization"""
+        if self._cost_map is None:
+            object.__setattr__(self, '_cost_map', get_model_cost_map(url=''))
 
     def prompt_cost(self) -> float:
         """
-        Return cost of prompt tokens based on pricing dict for the model
+        Return cost of prompt tokens using LiteLLM pricing data
         """
-        return round(self.prompt_tokens * self._input_pricing(), 4)
+        if self.prompt_tokens == 0:
+            return 0.0
+
+        try:
+            if self.model not in self._cost_map:
+                print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
+                return 0.0
+
+            input_cost_per_token = self._cost_map[self.model].get('input_cost_per_token', 0)
+            return round(self.prompt_tokens * input_cost_per_token, 4)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not get pricing for model '{self.model}': {e}")
+            return 0.0
 
     def completion_cost(self) -> float:
         """
-        Return cost of completion tokens based on pricing dict for the model
+        Return cost of completion tokens using LiteLLM pricing data
         """
-        return round(self.completion_tokens * self._output_pricing(), 4)
+        if self.completion_tokens == 0:
+            return 0.0
+
+        try:
+            if self.model not in self._cost_map:
+                print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
+                return 0.0
+
+            output_cost_per_token = self._cost_map[self.model].get('output_cost_per_token', 0)
+            return round(self.completion_tokens * output_cost_per_token, 4)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not get pricing for model '{self.model}': {e}")
+            return 0.0
 
     def total_tokens(self) -> int:
         """
@@ -71,12 +101,6 @@ class TokenUsage(BaseModel):
             f"\noutput: {self.completion_tokens} (${self.completion_cost()})",
             f"\ntotal: {self.total_tokens()} (${self.total_cost()})"
         )
-
-    def _input_pricing(self) -> float:
-        return self.pricing.get(self.model, {}).get("input", 0)
-
-    def _output_pricing(self) -> float:
-        return self.pricing.get(self.model, {}).get("output", 0)
 
 
 # Like a memoization, but blanks out the tool call if it's been done before

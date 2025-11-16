@@ -1,4 +1,4 @@
-.PHONY: help setup install run test update_prices
+.PHONY: help setup install run test
 
 help: ## Displays this information.
 	@printf '%s\n' "Usage: make <command>"
@@ -17,6 +17,3 @@ run: ## Run the CLI tool with an optional initial message
 
 test: ## Run tests with pytest
 	pytest
-
-update_prices: ## Run the pricing data update script. Wobbly at best.
-	python3 scripts/extract_prices.py
