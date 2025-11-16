@@ -7,6 +7,7 @@ from langchain_core.messages import (
     BaseMessage,
     SystemMessage,
     HumanMessage,
+    trim_messages,
 )
 from langchain.agents import create_agent
 from prompt_toolkit import PromptSession
@@ -23,6 +24,8 @@ HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀�
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
 
 MODEL = "gpt-5-mini"
+# Keep token limit well below the model's max to allow for response
+MAX_CONTEXT_TOKENS = 150000
 model = ChatOpenAI(model=MODEL)
 
 tools = [
@@ -137,8 +140,23 @@ if __name__ == "__main__":
     )
 
     while True:
+        # Trim messages to stay within token limits while preserving system messages
+        trimmed_messages = trim_messages(
+            state.messages,
+            max_tokens=MAX_CONTEXT_TOKENS,
+            strategy="last",
+            token_counter=model,
+            # Always keep system messages at the start
+            include_system=True,
+            start_on="human",
+            allow_partial=False,
+        )
+
+        # Create trimmed state for agent execution
+        trimmed_state = AgentState(messages=trimmed_messages, token_usage=token_usage)
+
         # Run agent with live status display
-        new_messages = run_agent_with_display(agent, state)
+        new_messages = run_agent_with_display(agent, trimmed_state)
 
         # Update state with new messages
         state = AgentState(messages=state.messages + new_messages, token_usage=token_usage)

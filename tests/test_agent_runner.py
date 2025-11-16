@@ -7,7 +7,8 @@ from src.agent_runner import (
     run_agent_with_display
 )
 from src.tool_status_display import ToolStatus
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, SystemMessage, HumanMessage, trim_messages
+from langchain_openai import ChatOpenAI
 
 
 class TestExtractResultPreview(unittest.TestCase):
@@ -380,6 +381,122 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         self.assertTrue(mock_display.update_cost.called)
         # Should be called at least once (after agent and tools chunks)
         self.assertGreaterEqual(mock_display.update_cost.call_count, 1)
+
+
+class TestMessageTrimming(unittest.TestCase):
+    """Tests for message trimming to prevent token limit errors"""
+
+    def test_trim_messages_preserves_system_messages(self):
+        """Test that system messages are preserved when trimming"""
+        messages = [
+            SystemMessage(content="System context"),
+            HumanMessage(content="Question 1"),
+            AIMessage(content="Answer 1"),
+            HumanMessage(content="Question 2"),
+            AIMessage(content="Answer 2"),
+        ]
+
+        # Create a mock model for token counting
+        model = Mock()
+        model.get_num_tokens_from_messages = Mock(side_effect=lambda msgs: len(str(msgs)))
+
+        # Trim to a very small size to force trimming
+        trimmed = trim_messages(
+            messages,
+            max_tokens=50,
+            strategy="last",
+            token_counter=model,
+            include_system=True,
+            start_on="human",
+            allow_partial=False,
+        )
+
+        # System message should always be present
+        self.assertTrue(any(isinstance(msg, SystemMessage) for msg in trimmed))
+        # Should have fewer messages than original
+        self.assertLessEqual(len(trimmed), len(messages))
+
+    def test_trim_messages_with_large_history(self):
+        """Test trimming with a large message history"""
+        # Create a large message history
+        messages = [SystemMessage(content="System context")]
+        for i in range(100):
+            messages.append(HumanMessage(content=f"Question {i}"))
+            messages.append(AIMessage(content=f"Answer {i}" * 100))  # Make answers long
+
+        model = Mock()
+        # Simulate realistic token counting (roughly 1 token per 4 chars)
+        model.get_num_tokens_from_messages = Mock(
+            side_effect=lambda msgs: sum(len(str(m.content)) // 4 for m in msgs)
+        )
+
+        # Trim to 1000 tokens
+        trimmed = trim_messages(
+            messages,
+            max_tokens=1000,
+            strategy="last",
+            token_counter=model,
+            include_system=True,
+            start_on="human",
+            allow_partial=False,
+        )
+
+        # Should have significantly fewer messages
+        self.assertLess(len(trimmed), len(messages))
+        # System message should still be present
+        self.assertTrue(any(isinstance(msg, SystemMessage) for msg in trimmed))
+        # Should not exceed token limit (approximately)
+        trimmed_tokens = sum(len(str(m.content)) // 4 for m in trimmed)
+        self.assertLessEqual(trimmed_tokens, 1200)  # Allow some margin
+
+    def test_prevents_token_limit_exceeded_error(self):
+        """Integration test: verify trimming prevents token limit errors"""
+        # Simulate the scenario that caused the original error
+        messages = [
+            SystemMessage(content="System prompt here"),
+            SystemMessage(content="[SYSTEM INFO] uname -a: Darwin"),
+            SystemMessage(content="[SYSTEM INFO] pwd: /Users/test"),
+        ]
+
+        # Add many conversation turns
+        for i in range(200):
+            messages.append(HumanMessage(content=f"User message {i}" * 50))
+            messages.append(AIMessage(content=f"AI response {i}" * 100))
+            # Simulate tool calls
+            messages.append(AIMessage(
+                content="",
+                tool_calls=[{"id": f"call_{i}", "name": "read_file", "args": {"path": f"file{i}.txt"}}]
+            ))
+            messages.append(ToolMessage(content=f"File content {i}" * 200, tool_call_id=f"call_{i}"))
+
+        # Create a realistic token counter
+        model = Mock()
+        model.get_num_tokens_from_messages = Mock(
+            side_effect=lambda msgs: sum(len(str(m.content)) // 4 for m in msgs)
+        )
+
+        # This would have caused ~800k tokens without trimming
+        # Trim to 150k tokens (same as MAX_CONTEXT_TOKENS in main.py)
+        trimmed = trim_messages(
+            messages,
+            max_tokens=150000,
+            strategy="last",
+            token_counter=model,
+            include_system=True,
+            start_on="human",
+            allow_partial=False,
+        )
+
+        # Verify we're well under the limit
+        trimmed_tokens = sum(len(str(m.content)) // 4 for m in trimmed)
+        self.assertLess(trimmed_tokens, 150000)
+
+        # Verify we kept system messages
+        system_msgs = [m for m in trimmed if isinstance(m, SystemMessage)]
+        self.assertGreater(len(system_msgs), 0)
+
+        # Verify we have recent conversation history
+        self.assertTrue(any("199" in str(m.content) for m in trimmed))
 
 
 if __name__ == '__main__':
