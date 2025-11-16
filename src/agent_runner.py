@@ -101,9 +101,16 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
     except Exception:
         token_usage = None
 
-    for chunk in agent.stream(state, {"recursion_limit": recursion_limit}):
-        if "agent" in chunk:
-            messages = chunk["agent"].get("messages", [])
+    # Convert state to the format expected by create_agent
+    # Handle both dict and AgentState object
+    if isinstance(state, dict):
+        agent_input = state
+    else:
+        agent_input = {"messages": state.messages}
+
+    for chunk in agent.stream(agent_input, {"recursion_limit": recursion_limit}):
+        if "model" in chunk:
+            messages = chunk["model"].get("messages", [])
             final_messages.extend(messages)
             process_agent_chunk(messages, tool_call_ids_seen, display, communicate_calls)
             # Update running cost if token_usage is available on the state

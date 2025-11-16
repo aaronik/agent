@@ -242,7 +242,7 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         tool_result = ToolMessage(content="File contents", tool_call_id="call_1")
 
         mock_agent.stream.return_value = [
-            {"agent": {"messages": [ai_msg]}},
+            {"model": {"messages": [ai_msg]}},
             {"tools": {"messages": [tool_result]}}
         ]
 
@@ -274,7 +274,7 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         comm_result = ToolMessage(content="Communication sent", tool_call_id="call_comm")
 
         mock_agent.stream.return_value = [
-            {"agent": {"messages": [ai_msg]}},
+            {"model": {"messages": [ai_msg]}},
             {"tools": {"messages": [comm_result]}}
         ]
 
@@ -305,6 +305,46 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         self.assertEqual(call_args[1]["recursion_limit"], 150)
 
     @patch('src.agent_runner.get_tool_status_display')
+    def test_handles_model_chunk_key_from_new_agent_api(self, mock_get_display):
+        """Test that agent runner correctly processes 'model' chunk key (not 'agent')
+
+        This test captures a regression where the agent runner was checking for
+        'agent' chunk keys, but the new LangChain create_agent API returns 'model'
+        chunk keys instead. This caused the display and token tracking to break.
+        """
+        mock_display = Mock()
+        mock_display.display_sequence = []
+        mock_get_display.return_value = mock_display
+
+        mock_agent = Mock()
+
+        # Simulate chunks with 'model' key (not 'agent')
+        tool_call = {"id": "call_1", "name": "read_file", "args": {"path": "test.txt"}}
+        ai_msg = AIMessage(content="Reading file", tool_calls=[tool_call])
+        tool_result = ToolMessage(content="File contents", tool_call_id="call_1")
+        final_msg = AIMessage(content="Here are the contents")
+
+        mock_agent.stream.return_value = [
+            {"model": {"messages": [ai_msg]}},  # First model call with tool decision
+            {"tools": {"messages": [tool_result]}},  # Tool execution
+            {"model": {"messages": [final_msg]}}  # Final model response
+        ]
+
+        # Run agent
+        result = run_agent_with_display(mock_agent, {"messages": []})
+
+        # Verify messages were processed correctly
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0], ai_msg)
+        self.assertEqual(result[1], tool_result)
+        self.assertEqual(result[2], final_msg)
+
+        # Verify display was updated (tool registered and updated)
+        mock_display.clear.assert_called_once()
+        mock_display.register_calls.assert_called_once()
+        mock_display.finalize.assert_called_once()
+
+    @patch('src.agent_runner.get_tool_status_display')
     def test_updates_cost_display_when_token_usage_present(self, mock_get_display):
         """Test that cost display is updated when token_usage is on state"""
         mock_display = Mock()
@@ -320,6 +360,7 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         # Setup state with token_usage
         state = Mock()
         state.token_usage = mock_token_usage
+        state.messages = []
 
         # Setup mock agent
         mock_agent = Mock()
@@ -328,7 +369,7 @@ class TestRunAgentWithDisplay(unittest.TestCase):
         tool_result = ToolMessage(content="File contents", tool_call_id="call_1")
 
         mock_agent.stream.return_value = [
-            {"agent": {"messages": [ai_msg]}},
+            {"model": {"messages": [ai_msg]}},
             {"tools": {"messages": [tool_result]}}
         ]
 
