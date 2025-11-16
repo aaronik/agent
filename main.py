@@ -8,7 +8,7 @@ from langchain_core.messages import (
     SystemMessage,
     HumanMessage,
 )
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from prompt_toolkit import PromptSession
 from prompt_toolkit.enums import EditingMode
 import src.tools as tools
@@ -39,7 +39,7 @@ tools = [
     # tools.summarize_response,
 ]
 
-agent = create_react_agent(model, tools=tools)
+agent = create_agent(model, tools=tools)
 
 
 @dataclass
