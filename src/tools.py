@@ -59,8 +59,8 @@ def fetch(url: str):
     else:
         jina_url = f"https://r.jina.ai/{url}"
 
-    response = requests.get(jina_url, allow_redirects=True)
     try:
+        response = requests.get(jina_url, allow_redirects=True)
         response.raise_for_status()
         text = response.text
 
@@ -186,16 +186,15 @@ def gen_image(
         "prompt": prompt
     }
 
-    response = requests.post(
-        url,
-        json=data,
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-    )
-
     try:
+        response = requests.post(
+            url,
+            json=data,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+        )
         response.raise_for_status()
         return response.text
 
