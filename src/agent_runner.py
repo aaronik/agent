@@ -29,37 +29,58 @@ def extract_result_preview(content: str, max_lines: int = 3, max_line_length: in
     return "\n".join(preview_lines)
 
 
-def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str], display):
+def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str], display, communicate_calls: Set[str]):
     """Process messages from the agent node"""
     for msg in messages:
         # Handle tool calls in AIMessage
         if isinstance(msg, AIMessage) and msg.tool_calls:
             new_calls = [tc for tc in msg.tool_calls if tc["id"] not in tool_call_ids_seen]
             if new_calls:
-                display.register_calls(new_calls)
-                # Mark as running since they're about to execute
+                # Separate communicate calls from normal tool calls
+                normal_calls = []
                 for tc in new_calls:
                     tool_call_ids_seen.add(tc["id"])
-                    display.update_status(tc["id"], ToolStatus.RUNNING)
+                    if tc["name"] == "communicate":
+                        # Track communicate calls separately
+                        communicate_calls.add(tc["id"])
+                    else:
+                        normal_calls.append(tc)
+
+                # Only register non-communicate calls with the display
+                if normal_calls:
+                    display.register_calls(normal_calls)
+                    # Mark as running since they're about to execute
+                    for tc in normal_calls:
+                        display.update_status(tc["id"], ToolStatus.RUNNING)
 
         # Handle tool results in ToolMessage
         elif isinstance(msg, ToolMessage):
-            preview = extract_result_preview(msg.content)
-            display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            # Skip communicate tool results here (handled in process_tools_chunk)
+            if msg.tool_call_id not in communicate_calls:
+                preview = extract_result_preview(msg.content)
+                display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
 
 
-def process_tools_chunk(messages: List[BaseMessage], display):
+def process_tools_chunk(messages: List[BaseMessage], display, communicate_calls: Set[str]):
     """Process messages from the tools node"""
-    # Mark pending tools as running
-    for tool_id in display.tool_calls.keys():
-        if display.tool_calls[tool_id].status == ToolStatus.PENDING:
-            display.update_status(tool_id, ToolStatus.RUNNING)
+    # Mark pending tools as running (check all tables in sequence)
+    for item in display.display_sequence:
+        if item["type"] == "table":
+            for tool_id, tool_call in item["tool_calls"].items():
+                if tool_call.status == ToolStatus.PENDING:
+                    display.update_status(tool_id, ToolStatus.RUNNING)
 
     # Process tool results
     for msg in messages:
         if isinstance(msg, ToolMessage):
-            preview = extract_result_preview(msg.content)
-            display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            # Handle communicate tool specially
+            if msg.tool_call_id in communicate_calls:
+                # Add communication to display (it will update live)
+                display.add_communication(msg.content)
+            else:
+                # Normal tool result handling
+                preview = extract_result_preview(msg.content)
+                display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
 
 
 def run_agent_with_display(agent, state, recursion_limit: int = 200):
@@ -69,18 +90,19 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
 
     final_messages = []
     tool_call_ids_seen = set()
+    communicate_calls = set()  # Track communicate tool calls separately
 
     # Stream agent execution
     for chunk in agent.stream(state, {"recursion_limit": recursion_limit}):
         if "agent" in chunk:
             messages = chunk["agent"].get("messages", [])
             final_messages.extend(messages)
-            process_agent_chunk(messages, tool_call_ids_seen, display)
+            process_agent_chunk(messages, tool_call_ids_seen, display, communicate_calls)
 
         elif "tools" in chunk:
             messages = chunk["tools"].get("messages", [])
             final_messages.extend(messages)
-            process_tools_chunk(messages, display)
+            process_tools_chunk(messages, display, communicate_calls)
 
     display.finalize()
 

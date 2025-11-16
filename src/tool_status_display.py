@@ -27,14 +27,14 @@ class ToolCall:
 class ToolStatusDisplay:
     def __init__(self):
         self.console = Console()
-        self.tool_calls: Dict[str, ToolCall] = {}
+        self.display_sequence: list[dict] = []  # Sequence of tables and communications
         self.live: Optional[Live] = None
 
     def start_live(self):
         """Start the live display"""
         if not self.live:
             self.live = Live(
-                self._create_table(),
+                self._create_display(),
                 console=self.console,
                 refresh_per_second=10,
                 transient=False
@@ -43,8 +43,16 @@ class ToolStatusDisplay:
 
     def register_calls(self, tool_calls: list):
         """Register tool calls from an AIMessage"""
+        # Find or create current table
+        if not self.display_sequence or self.display_sequence[-1]["type"] != "table":
+            # Need a new table
+            new_table = {"type": "table", "tool_calls": {}}
+            self.display_sequence.append(new_table)
+
+        # Add to last table
+        current_table = self.display_sequence[-1]
         for call in tool_calls:
-            self.tool_calls[call["id"]] = ToolCall(
+            current_table["tool_calls"][call["id"]] = ToolCall(
                 id=call["id"],
                 name=call["name"],
                 args=call["args"],
@@ -56,18 +64,30 @@ class ToolStatusDisplay:
         self.start_live()
         # Update display with new calls
         if self.live:
-            self.live.update(self._create_table())
+            self.live.update(self._create_display())
 
     def update_status(self, tool_call_id: str, status: ToolStatus, result: Optional[str] = None):
         """Update the status of a tool call"""
-        if tool_call_id in self.tool_calls:
-            self.tool_calls[tool_call_id].status = status
-            if result:
-                self.tool_calls[tool_call_id].result = result
+        # Find the tool call in any table
+        for item in self.display_sequence:
+            if item["type"] == "table" and tool_call_id in item["tool_calls"]:
+                item["tool_calls"][tool_call_id].status = status
+                if result:
+                    item["tool_calls"][tool_call_id].result = result
 
-            # Update live display if active
-            if self.live:
-                self.live.update(self._create_table())
+                # Update live display if active
+                if self.live:
+                    self.live.update(self._create_display())
+                break
+
+    def add_communication(self, message: str):
+        """Add a communication message to the display"""
+        comm = {"type": "communication", "message": message}
+        self.display_sequence.append(comm)
+
+        # Update live display if active
+        if self.live:
+            self.live.update(self._create_display())
 
     def clear(self):
         """Clear the display and reset state"""
@@ -75,9 +95,9 @@ class ToolStatusDisplay:
             self.live.stop()
             self.live = None
 
-        self.tool_calls = {}
+        self.display_sequence = []
 
-    def _create_table(self) -> Table:
+    def _create_table(self, tool_calls: Dict[str, ToolCall]) -> Table:
         """Create a Rich table for the current tool calls"""
         # Get terminal width and calculate available space
         terminal_width = self.console.width
@@ -105,7 +125,7 @@ class ToolStatusDisplay:
         table.add_column("Status", justify="center", style="bold", no_wrap=True)
         table.add_column("Result", style="dim white", max_width=result_width, no_wrap=False)
 
-        for tc in self.tool_calls.values():
+        for tc in tool_calls.values():
             # Format args
             args_str = ", ".join(f"{k}={v}" for k, v in tc.args.items())
 
@@ -125,6 +145,29 @@ class ToolStatusDisplay:
 
         return table
 
+    def _create_display(self):
+        """Create the complete display with tables and communications"""
+        from rich.console import Group
+
+        renderables = []
+
+        for item in self.display_sequence:
+            if item["type"] == "table":
+                # Only render table if it has tool calls
+                if item["tool_calls"]:
+                    renderables.append(self._create_table(item["tool_calls"]))
+            else:  # communication
+                renderables.append(
+                    Panel(
+                        item["message"],
+                        title="💭 Agent Communication",
+                        border_style="blue",
+                        padding=(1, 2)
+                    )
+                )
+
+        return Group(*renderables)
+
     def finalize(self):
         """Finalize the display (no more updates)"""
         # Stop live display and show final state
@@ -133,7 +176,7 @@ class ToolStatusDisplay:
             self.live = None
 
         # Print a newline for spacing
-        if self.tool_calls:
+        if self.display_sequence:
             self.console.print()
 
 

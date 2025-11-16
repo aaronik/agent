@@ -34,6 +34,7 @@ tools = [
     tools.search_replace,
     tools.gen_image,
     tools.run_shell_command,
+    tools.communicate,
     tools.spawn,
     # tools.screenshot_and_upload,
     # tools.summarize_response,

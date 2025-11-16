@@ -367,6 +367,24 @@ def summarize_response(summary: str):
         return f"Error starting speech synthesis: {e}"
 
 
+def communicate(message: str):
+    """
+    Communicate intermediate thoughts, reasoning, or progress updates to the user.
+
+    Use this tool to share your thought process as you work through complex tasks,
+    explain what you're doing and why, or provide status updates during long-running operations.
+
+    Args:
+        message: The message to communicate to the user
+
+    Returns:
+        A confirmation that the message was delivered
+    """
+    # The actual display logic is handled in agent_runner.py
+    # This tool just needs to return the message so it can be extracted
+    return message
+
+
 def spawn(task: str):
     """
     Spawn a new single-invocation AI agent to complete a specific task.
