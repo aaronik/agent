@@ -33,7 +33,8 @@ class TokenUsage(BaseModel):
 
         try:
             if self.model not in self._cost_map:
-                print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
+                if not self.model.startswith('ollama:'):
+                    print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
                 return 0.0
 
             input_cost_per_token = self._cost_map[self.model].get('input_cost_per_token', 0)
@@ -51,7 +52,8 @@ class TokenUsage(BaseModel):
 
         try:
             if self.model not in self._cost_map:
-                print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
+                if not self.model.startswith('ollama:'):
+                    print(f"⚠️  Warning: Model '{self.model}' not found in LiteLLM cost map")
                 return 0.0
 
             output_cost_per_token = self._cost_map[self.model].get('output_cost_per_token', 0)
