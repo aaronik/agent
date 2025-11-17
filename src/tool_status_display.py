@@ -176,23 +176,23 @@ class ToolStatusDisplay:
         """Create the complete display with tables and communications"""
         from rich.console import Group
 
-        renderables = []
-
-        # Add cost line at the top if available
-        if self._cost_line:
-            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="grey37", padding=(0, 1)))
+        # We'll render communications first so they appear "on top" of the running cost
+        # panel in the combined live view. This ensures messages like the user banner
+        # are visible above the cost panel instead of being pushed outside the live
+        # view area.
+        comm_renderables = []
+        other_renderables = []
 
         for item in self.display_sequence:
             if item["type"] == "table":
                 # Only render table if it has tool calls
                 if item["tool_calls"]:
-                    renderables.append(self._create_table(item["tool_calls"]))
+                    other_renderables.append(self._create_table(item["tool_calls"]))
             else:  # communication
-                # Support either a simple message or a pre-built renderable (like a Syntax panel)
                 if "renderable" in item:
-                    renderables.append(item["renderable"])
+                    comm_renderables.append(item["renderable"])
                 else:
-                    renderables.append(
+                    comm_renderables.append(
                         Panel(
                             item["message"],
                             title="💭 Agent Communication",
@@ -200,6 +200,18 @@ class ToolStatusDisplay:
                             padding=(1, 2)
                         )
                     )
+
+        renderables = []
+
+        # Add communications first so they appear above the cost line/panels
+        renderables.extend(comm_renderables)
+
+        # Add cost line after communications
+        if self._cost_line:
+            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="grey37", padding=(0, 1)))
+
+        # Then add the rest (tables, etc.)
+        renderables.extend(other_renderables)
 
         return Group(*renderables)
 
