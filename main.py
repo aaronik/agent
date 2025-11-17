@@ -2,6 +2,7 @@ import signal
 import argparse
 from dataclasses import dataclass, field
 from typing import List
+import os
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import (
     BaseMessage,
@@ -23,10 +24,39 @@ import sys
 HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n\n"
 ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
 
+# Default model
 MODEL = "gpt-5-mini"
-# Keep token limit well below the model's max to allow for response
 MAX_CONTEXT_TOKENS = 150000
-model = ChatOpenAI(model=MODEL)
+
+
+class SimpleTokenCounter:
+    """Simple token counter for Ollama models that approximates tokens as characters / 4"""
+
+    def get_num_tokens_from_messages(self, messages: List[BaseMessage]) -> int:
+        """Approximate token count using character length / 4"""
+        return sum(len(str(msg.content)) // 4 for msg in messages)
+
+
+# If the user set Ollama configuration, prefer that local model
+OLLAMA_URL = os.getenv("OLLAMA_URL")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+
+if OLLAMA_URL and OLLAMA_MODEL:
+    # Use the Ollama model name and point the OpenAI-compatible client at the Ollama API base URL.
+    # ChatOpenAI accepts a `base_url` parameter which will be used as the OpenAI base; Ollama
+    # implements an OpenAI-like subset of the API at /v1, so this works reasonably well for simple usage.
+    MODEL = OLLAMA_MODEL
+    # Instantiate ChatOpenAI but direct it to the Ollama server
+    # We intentionally do not set an API key here (Ollama typically doesn't require one for localhost).
+    ollama_base_url = OLLAMA_URL.rstrip('/') + '/v1'
+    model = ChatOpenAI(model=MODEL, base_url=ollama_base_url, api_key="dummy")
+    # Use simple token counter for Ollama models since they don't support OpenAI's token counting
+    token_counter = SimpleTokenCounter()
+else:
+    # Default: use the managed OpenAI-compatible client
+    model = ChatOpenAI(model=MODEL)
+    # Use the model itself for accurate token counting
+    token_counter = model
 
 tools = [
     # tools.search_text,
@@ -145,7 +175,7 @@ if __name__ == "__main__":
             state.messages,
             max_tokens=MAX_CONTEXT_TOKENS,
             strategy="last",
-            token_counter=model,
+            token_counter=token_counter,
             # Always keep system messages at the start
             include_system=True,
             start_on="human",

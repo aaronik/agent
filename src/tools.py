@@ -430,6 +430,11 @@ def spawn(task: str):
     Creates a fresh agent using aisuite that can work independently and
     return focused results. The spawned agent has access to basic tools.
 
+    If environment variables OLLAMA_URL and OLLAMA_MODEL are set, the
+    spawn will attempt to use the local Ollama HTTP API instead of
+    aisuite/OpenAI. Otherwise it falls back to the existing aisuite
+    client behavior.
+
     Args:
         task: The specific task description for the spawned agent to complete
 
@@ -438,17 +443,67 @@ def spawn(task: str):
     """
 
     try:
-        # Create a lightweight aisuite client for single-shot execution
-        import aisuite as ai
-
-        client = ai.Client()
-
         # Create a focused system prompt for the spawned agent
         spawn_system = (
             "You are a single-purpose AI agent spawned to complete one specific task. "
             "Focus solely on the given task, be concise, and provide actionable results. "
             "Complete the task efficiently and return your findings."
         )
+
+        # If user configured Ollama, prefer that local model
+        ollama_url = os.getenv("OLLAMA_URL")  # e.g., http://localhost:11434
+        ollama_model = os.getenv("OLLAMA_MODEL")  # e.g., deepseek-r1:32b
+
+        if ollama_url and ollama_model:
+            try:
+                # Prepare messages for Ollama chat completion
+                messages = [
+                    {"role": "system", "content": spawn_system},
+                    {"role": "user", "content": task}
+                ]
+
+                # Ollama chat completions endpoint (best-effort) - support common endpoints
+                endpoint = ollama_url.rstrip("/") + "/v1/chat/completions"
+
+                payload = {
+                    "model": ollama_model,
+                    "messages": messages,
+                    "temperature": 0.0,
+                    "max_tokens": 2048
+                }
+
+                resp = requests.post(endpoint, json=payload, timeout=30)
+                resp.raise_for_status()
+
+                # Try to extract content from common response shapes
+                data = resp.json()
+                if isinstance(data, dict):
+                    # Ollama often uses choices[0].message.content or choices[0].content
+                    choices = data.get("choices") or []
+                    if choices:
+                        first = choices[0]
+                        if isinstance(first, dict):
+                            msg = first.get("message") or first.get("content") or {}
+                            if isinstance(msg, dict):
+                                content = msg.get("content") or msg.get("text")
+                            else:
+                                content = msg
+                            if content:
+                                return f"[SPAWNED AGENT OUTPUT]\n{content}"
+                    # Fallback: try top-level text
+                    if "text" in data:
+                        return f"[SPAWNED AGENT OUTPUT]\n{data['text']}"
+
+                return f"[SPAWNED AGENT OUTPUT]\n{resp.text}"
+
+            except Exception as e:
+                # If Ollama call fails, fall back to aisuite below
+                print(f"OLLAMA spawn failed: {e}")
+
+        # Default behavior: use aisuite client
+        import aisuite as ai
+
+        client = ai.Client()
 
         messages = [
             ai.Message(role="system", content=spawn_system),
