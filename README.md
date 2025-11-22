@@ -24,7 +24,7 @@ that you wouldn't give to your real CLI agent.
 
 ## Usage
 
-You will need an OpenAI API key to use this tool. Set it as an environment variable:
+You will need an OpenAI API key to use openai models. Set it as an environment variable:
 
 ```bash
 export OPENAI_API_KEY=your_api_key_here
@@ -42,7 +42,7 @@ alias agent="/<path to the agent folder>/run.sh
 ### Running the CLI
 
 ```bash
-agent "Let's work on this code together" # <-- starts a loop
+agent "Let's work on this code together" # <-- starts a loop (human in the loop)
 agent -s "Research such and such topic" # <-- single agent invocation (including tool uses)
 ```
 
@@ -62,5 +62,3 @@ pytest tests
 
 * This is not meant for prime time - this is my personal little agent, something I'm hacking on on the side.
 I think a big part of becoming good with AI, is building your own AI assistant. Then you see how it's done, and you have full customizability of it. Have it build itself.
-
-* The structure currently is having a bunch of different main_*.py files hanging around top level. Right now this is serving both as this agent that's actually doing a lot, but also multiple ways to make the same agent. It shares tools and some other stuff across the different approaches/libraries
