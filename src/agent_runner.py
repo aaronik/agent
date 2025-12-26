@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
-def extract_result_preview(content: str, max_lines: int = 3, max_line_length: int = 80) -> str:
+def extract_result_preview(content: str, max_lines: int = 30, max_line_length: int = 120) -> str:
     """Extract a preview from tool result content with multiline support."""
     if not isinstance(content, str):
         return ""
@@ -18,9 +18,11 @@ def extract_result_preview(content: str, max_lines: int = 3, max_line_length: in
 
     # Get first N non-empty lines
     lines = content.split("\n")
-    preview_lines = []
+    preview_lines: list[str] = []
 
+    scanned = 0
     for line in lines[: max_lines * 3]:  # Look through more lines to find non-empty ones
+        scanned += 1
         stripped = line.strip()
         if stripped:
             # Remove control characters
@@ -34,7 +36,17 @@ def extract_result_preview(content: str, max_lines: int = 3, max_line_length: in
             break
 
     # Join with actual newlines for multiline display
-    return "\n".join(preview_lines)
+    preview = "\n".join(preview_lines)
+
+    # Add a visual truncation indicator if there was more content beyond what
+    # we included in the preview.
+    remaining_has_content = any(l.strip() for l in lines[scanned:])
+    if remaining_has_content:
+        if preview and not preview.endswith("\n"):
+            preview += "\n"
+        preview += "…"
+
+    return preview
 
 
 def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str], display):

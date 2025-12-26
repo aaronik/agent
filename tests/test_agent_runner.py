@@ -19,7 +19,7 @@ class TestExtractResultPreview(unittest.TestCase):
     def test_extract_multiline(self):
         content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5"
         result = extract_result_preview(content, max_lines=3)
-        self.assertEqual(result, "Line 1\nLine 2\nLine 3")
+        self.assertEqual(result, "Line 1\nLine 2\nLine 3\n…")
 
     def test_extract_with_empty_lines(self):
         content = "\nLine 1\n\nLine 2\n\nLine 3\n"
@@ -57,7 +57,7 @@ class TestExtractResultPreview(unittest.TestCase):
     def test_extract_with_mixed_empty_and_content_lines(self):
         content = "\n\nLine 1\nLine 2\n\n\nLine 3\n\n\n"
         result = extract_result_preview(content, max_lines=2)
-        self.assertEqual(result, "Line 1\nLine 2")
+        self.assertEqual(result, "Line 1\nLine 2\n…")
 
 
 class TestProcessAgentChunk(unittest.TestCase):
