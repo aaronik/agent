@@ -6,9 +6,15 @@ from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
 def extract_result_preview(content: str, max_lines: int = 3, max_line_length: int = 80) -> str:
-    """Extract a preview from tool result content with multiline support"""
+    """Extract a preview from tool result content with multiline support."""
     if not isinstance(content, str):
         return ""
+
+    # Hide the internal exit-code marker from the visible preview.
+    # The display title will still surface it.
+    content = content.replace("(exit code:", "(exit code:")
+    if "(exit code:" in content:
+        content = content.split("(exit code:", 1)[0].rstrip()
 
     # Get first N non-empty lines
     lines = content.split("\n")
@@ -49,7 +55,24 @@ def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str
         # Handle tool results in ToolMessage
         elif isinstance(msg, ToolMessage):
             preview = extract_result_preview(msg.content)
-            display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            # If the tool indicates a non-zero exit code, show it as an error.
+            # run_shell_command appends "(exit code: X)" on failure.
+            if isinstance(msg.content, str) and "(exit code:" in msg.content:
+                try:
+                    code_str = msg.content.split("(exit code:", 1)[1].split(")", 1)[0].strip()
+                    code = int(code_str)
+                except Exception:
+                    code = None
+
+                if code is not None and code != 0:
+                    # Preserve the raw content (with exit-code marker) so the
+                    # panel title can show `Done (X)`. The preview function
+                    # hides the marker from the panel body.
+                    display.update_status(msg.tool_call_id, ToolStatus.ERROR, msg.content)
+                else:
+                    display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            else:
+                display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
 
 
 def process_tools_chunk(messages: List[BaseMessage], display):
@@ -65,7 +88,24 @@ def process_tools_chunk(messages: List[BaseMessage], display):
     for msg in messages:
         if isinstance(msg, ToolMessage):
             preview = extract_result_preview(msg.content)
-            display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            # If the tool indicates a non-zero exit code, show it as an error.
+            # run_shell_command appends "(exit code: X)" on failure.
+            if isinstance(msg.content, str) and "(exit code:" in msg.content:
+                try:
+                    code_str = msg.content.split("(exit code:", 1)[1].split(")", 1)[0].strip()
+                    code = int(code_str)
+                except Exception:
+                    code = None
+
+                if code is not None and code != 0:
+                    # Preserve the raw content (with exit-code marker) so the
+                    # panel title can show `Done (X)`. The preview function
+                    # hides the marker from the panel body.
+                    display.update_status(msg.tool_call_id, ToolStatus.ERROR, msg.content)
+                else:
+                    display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
+            else:
+                display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
 
 
 def run_agent_with_display(agent, state, recursion_limit: int = 200):

@@ -294,8 +294,23 @@ def sanitize_path(path: str):
 
 
 def format_subproc_result(result: subprocess.CompletedProcess[str]) -> str:
-    text = (
-        "[STDOUT]\n" + result.stdout + "\n[STDERR]\n" + result.stderr + "\n[CODE]\n" + str(result.returncode)
-    )
+    """Format a subprocess result like a terminal would.
 
-    return text
+    We want tool output to read like running a command directly:
+    - no [STDOUT]/[STDERR] headings
+    - preserve stdout/stderr order as best-effort by concatenating
+      (we don't have true interleaving when capturing separately)
+    - include the exit code only when non-zero
+
+    NOTE: If callers want true streaming / interleaving, they should avoid
+    capture_output and stream to the console directly.
+    """
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+
+    combined = stdout + stderr
+
+    # Exit code is used by the UI (tool status) rather than printed inline,
+    # so we don't append it to the combined output.
+    return combined

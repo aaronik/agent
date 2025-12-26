@@ -78,8 +78,11 @@ class TestRunShellCommand(unittest.TestCase):
 
         result = run_shell_command("echo 'Hello World'")
         self.assertIn("Hello World", result)
-        self.assertIn("[STDOUT]", result)
-        self.assertIn("[CODE]", result)
+        # No [STDOUT]/[STDERR] headings for terminal-like output.
+        self.assertNotIn("[STDOUT]", result)
+        self.assertNotIn("[STDERR]", result)
+        # For successful commands we don't append an exit code line.
+        self.assertNotIn("exit code:", result)
 
     @patch('src.tools.subprocess.run')
     def test_command_with_stderr(self, mock_run):
@@ -91,7 +94,7 @@ class TestRunShellCommand(unittest.TestCase):
 
         result = run_shell_command("echo 'error message' >&2")
         self.assertIn("error message", result)
-        self.assertIn("[STDERR]", result)
+        self.assertNotIn("[STDERR]", result)
 
     @patch('src.tools.subprocess.run')
     def test_command_exit_code(self, mock_run):
@@ -103,7 +106,7 @@ class TestRunShellCommand(unittest.TestCase):
 
         result = run_shell_command("sh -c 'exit 42'")
         self.assertIn("42", result)
-        self.assertIn("[CODE]", result)
+        self.assertIn("exit code:", result)
 
     @patch('src.tools.subprocess.run')
     def test_command_timeout(self, mock_run):
@@ -126,7 +129,7 @@ class TestRunShellCommand(unittest.TestCase):
 
         result = run_shell_command("pwd")
         self.assertIn("/", result)
-        self.assertIn("[STDOUT]", result)
+        self.assertNotIn("[STDOUT]", result)
 
     @patch('src.tools.subprocess.run')
     def test_large_output(self, mock_run):
@@ -140,7 +143,7 @@ class TestRunShellCommand(unittest.TestCase):
         mock_run.return_value = mock_result
 
         result = run_shell_command("seq 1 10000 | while read i; do echo 'Line '$i; done")
-        self.assertIn("[STDOUT]", result)
+        self.assertNotIn("[STDOUT]", result)
         self.assertIn("Line 1", result)
         # Verify the output is not truncated (should contain later lines)
         self.assertIn("Line 10000", result)
@@ -209,8 +212,8 @@ class TestRunShellCommand(unittest.TestCase):
         mock_run.return_value = mock_result
 
         result = run_shell_command("true")
-        self.assertIn("[CODE]", result)
-        self.assertIn("0", result)
+        # No output is expected and no success code marker is appended.
+        self.assertEqual(result, "")
 
     @patch('src.tools.subprocess.run')
     def test_command_with_quotes(self, mock_run):

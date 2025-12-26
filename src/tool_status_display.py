@@ -183,7 +183,36 @@ class ToolStatusDisplay:
         header = Text()
         header.append(tc.name, style="cyan")
         header.append("  ")
-        header.append(f"[{icon} {tc.status.name.title()}]", style=color)
+
+        # If the tool output includes a captured exit code marker from
+        # run_shell_command, surface it in the title for quick scanning.
+        exit_code: int | None = None
+        # Parse exit code from the raw tool output if present.
+        # run_shell_command appends a marker: "(exit code: X)".
+        raw_result = tc.result or ""
+        if "(exit code:" in raw_result:
+            try:
+                code_str = raw_result.split("(exit code:", 1)[1].split(")", 1)[0].strip()
+                exit_code = int(code_str)
+            except Exception:
+                exit_code = None
+
+        # Don't show the exit-code marker in the panel body.
+        # NOTE: We must not mutate tc.result here, because we still want the
+        # raw marker available to other consumers (and to preserve state).
+        result_text = raw_result
+        if "(exit code:" in result_text:
+            result_text = result_text.split("(exit code:", 1)[0].rstrip()
+
+        if tc.status == ToolStatus.DONE:
+            header.append(f"[{icon} Done]", style=color)
+        elif tc.status == ToolStatus.ERROR:
+            if exit_code is not None:
+                header.append(f"[{icon} Done ({exit_code})]", style=color)
+            else:
+                header.append(f"[{icon} Done]", style=color)
+        else:
+            header.append(f"[{icon} {tc.status.name.title()}]", style=color)
 
         body_parts: list[Any] = []
 
@@ -191,7 +220,6 @@ class ToolStatusDisplay:
         if args_line:
             body_parts.append(Text(args_line, style="dim"))
 
-        result_text = tc.result or ""
         diff_text = _extract_unified_diff(result_text)
         if diff_text:
             result_text = _remove_diff_from_result(result_text)

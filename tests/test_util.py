@@ -194,12 +194,11 @@ class TestFormatSubprocResult(unittest.TestCase):
         mock_result.returncode = 0
 
         result = format_subproc_result(mock_result)
-        self.assertIn("[STDOUT]", result)
+        # Output should look like a terminal: no headings.
         self.assertIn("output text", result)
-        self.assertIn("[STDERR]", result)
         self.assertIn("error text", result)
-        self.assertIn("[CODE]", result)
-        self.assertIn("0", result)
+        # For successful commands we don't append an exit code line.
+        self.assertNotIn("exit code:", result)
 
 
 class TestRefuseIfDuplicate(unittest.TestCase):

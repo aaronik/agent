@@ -42,7 +42,18 @@ def run_shell_command(cmd: str, timeout: int = 30):
     # Long running commands will hose the agent, so let's prevent that:
     cmd = f"timeout {timeout} {cmd}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return format_subproc_result(result)
+
+    output = format_subproc_result(result)
+
+    # Include a small, machine-parsable marker for non-zero exit codes.
+    # The UI uses this to show `[ERR Done (X)]` in the panel title without
+    # permanently re-introducing stdout/stderr headings.
+    if result.returncode and result.returncode != 0:
+        if output and not output.endswith("\n"):
+            output += "\n"
+        output += f"(exit code: {result.returncode})"
+
+    return output
 
 
 def fetch(url: str):
