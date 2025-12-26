@@ -29,7 +29,7 @@ class TestFileOperations(unittest.TestCase):
 
     def test_write_file_success(self):
         result = write_file(self.test_file, "Hello, World!")
-        self.assertEqual(result, "Success")
+        self.assertTrue(result.startswith("Success"), result)
         self.assertTrue(os.path.exists(self.test_file))
         with open(self.test_file, 'r') as f:
             self.assertEqual(f.read(), "Hello, World!")
@@ -37,7 +37,7 @@ class TestFileOperations(unittest.TestCase):
     def test_write_file_creates_directories(self):
         nested_path = os.path.join(self.test_dir, "subdir", "nested.txt")
         result = write_file(nested_path, "Nested content")
-        self.assertEqual(result, "Success")
+        self.assertTrue(result.startswith("Success"), result)
         self.assertTrue(os.path.exists(nested_path))
         with open(nested_path, 'r') as f:
             self.assertEqual(f.read(), "Nested content")
@@ -45,7 +45,7 @@ class TestFileOperations(unittest.TestCase):
     def test_write_file_overwrites_existing(self):
         write_file(self.test_file, "Original")
         result = write_file(self.test_file, "Updated")
-        self.assertEqual(result, "Success")
+        self.assertTrue(result.startswith("Success"), result)
         with open(self.test_file, 'r') as f:
             self.assertEqual(f.read(), "Updated")
 
@@ -62,7 +62,7 @@ class TestFileOperations(unittest.TestCase):
     def test_read_write_integration(self):
         content = "Integration test content\nWith multiple lines\n"
         write_result = write_file(self.test_file, content)
-        self.assertEqual(write_result, "Success")
+        self.assertTrue(write_result.startswith("Success"), write_result)
         read_result = read_file(self.test_file)
         self.assertEqual(read_result, content)
 

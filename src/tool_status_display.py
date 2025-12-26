@@ -82,11 +82,24 @@ class ToolStatusDisplay:
     def start_live(self):
         """Start the live display"""
         if not self.live:
+            # NOTE: Rich Live uses an alternate screen by default. When the
+            # renderable exceeds the available terminal height, Rich shows an
+            # overflow indicator (often "…" / red dots) and the output stops
+            # scrolling until Live is stopped.
+            #
+            # We want normal terminal scrollback behavior so users can keep
+            # scrolling while many tool panels are emitted.
             self.live = Live(
                 self._create_display(),
                 console=self.console,
                 refresh_per_second=10,
                 transient=False,
+                # Keep normal scrollback (no alternate screen), and don't show
+                # the overflow ellipsis indicator when the renderable exceeds
+                # terminal height.
+                screen=False,
+                vertical_overflow="visible",
+                auto_refresh=True,
             )
             self.live.start()
 
