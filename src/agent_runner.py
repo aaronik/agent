@@ -66,7 +66,13 @@ def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str
 
         # Handle tool results in ToolMessage
         elif isinstance(msg, ToolMessage):
-            preview = extract_result_preview(msg.content)
+            # For search_replace we want the full diff visible (no preview
+            # truncation), since that's the main value of the tool.
+            if getattr(msg, "name", None) == "search_replace":
+                preview = msg.content if isinstance(msg.content, str) else ""
+            else:
+                preview = extract_result_preview(msg.content)
+
             # If the tool indicates a non-zero exit code, show it as an error.
             # run_shell_command appends "(exit code: X)" on failure.
             if isinstance(msg.content, str) and "(exit code:" in msg.content:
@@ -99,7 +105,13 @@ def process_tools_chunk(messages: List[BaseMessage], display):
     # Process tool results
     for msg in messages:
         if isinstance(msg, ToolMessage):
-            preview = extract_result_preview(msg.content)
+            # For search_replace we want the full diff visible (no preview
+            # truncation), since that's the main value of the tool.
+            if getattr(msg, "name", None) == "search_replace":
+                preview = msg.content if isinstance(msg.content, str) else ""
+            else:
+                preview = extract_result_preview(msg.content)
+
             # If the tool indicates a non-zero exit code, show it as an error.
             # run_shell_command appends "(exit code: X)" on failure.
             if isinstance(msg.content, str) and "(exit code:" in msg.content:
