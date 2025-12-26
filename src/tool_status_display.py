@@ -152,8 +152,20 @@ class ToolStatusDisplay:
         self.display_sequence = []
         self._cost_line = None
 
-    def _tool_panel(self, tc: ToolCall) -> Panel:
-        """Render a single tool call as a panel."""
+    def _tool_panel(self, tc: ToolCall):
+        """Render a single tool call.
+
+        Most tools are panels. The `communicate` tool is rendered as unboxed,
+        muted text so it reads like an aside but still maintains correct
+        ordering in the tool stream.
+        """
+        # Special-case: communicate is basically a UI note. Render it inline.
+        if tc.name == "communicate":
+            msg = (tc.result or "").strip("\n")
+            # No prefix: the styling is the differentiator.
+            # Italic support varies by terminal, but Rich will degrade gracefully.
+            return Text(escape(msg), style="italic dim")
+
         icon, color = tc.status.value
         header = Text()
         header.append(tc.name, style="cyan")
