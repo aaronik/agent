@@ -48,7 +48,7 @@ class TestTokenUsage(unittest.TestCase):
             }
         }
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_initialization(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model")
@@ -56,34 +56,34 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(usage.prompt_tokens, 0)
         self.assertEqual(usage.completion_tokens, 0)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_total_tokens(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model", prompt_tokens=100, completion_tokens=50)
         self.assertEqual(usage.total_tokens(), 150)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_prompt_cost(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model", prompt_tokens=1000)
         cost = usage.prompt_cost()
         self.assertEqual(cost, 0.1)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_completion_cost(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model", completion_tokens=500)
         cost = usage.completion_cost()
         self.assertEqual(cost, 0.1)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_total_cost(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model", prompt_tokens=1000, completion_tokens=500)
         cost = usage.total_cost()
         self.assertEqual(cost, 0.2)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_zero_tokens_cost(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model")
@@ -91,7 +91,7 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(usage.completion_cost(), 0.0)
         self.assertEqual(usage.total_cost(), 0.0)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_ingest_response(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model")
@@ -106,7 +106,7 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(usage.prompt_tokens, 100)
         self.assertEqual(usage.completion_tokens, 50)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_ingest_response_accumulates(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="test-model", prompt_tokens=50, completion_tokens=25)
@@ -121,14 +121,14 @@ class TestTokenUsage(unittest.TestCase):
         self.assertEqual(usage.prompt_tokens, 150)
         self.assertEqual(usage.completion_tokens, 75)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     def test_model_not_in_cost_map(self, mock_get_cost_map):
         mock_get_cost_map.return_value = self.mock_cost_map
         usage = TokenUsage(model="unknown-model", prompt_tokens=100)
         cost = usage.prompt_cost()
         self.assertEqual(cost, 0.0)
 
-    @patch('src.util.get_model_cost_map')
+    @patch('litellm.get_model_cost_map')
     @patch('builtins.print')
     def test_print_panel(self, mock_print, mock_get_cost_map):
         """Test that print_panel creates a Rich panel with cost information"""
