@@ -10,8 +10,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, tr
 from src.constants import system_string
 from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_ls, sys_pwd, sys_uname
 
-HUMAN = "\n--- 🤷‍♂️🤷🤷‍♀️ User 🤷‍♂️🤷🤷‍♀️ ---\n\n"
-ROBOT = "\n--- 🤖🤖🤖 AI 🤖🤖🤖 ---\n\n"
+HUMAN = ""
+ANSWER_HEADER = "\n"
 
 # Default model
 MODEL = "gpt-5.2"
@@ -86,6 +86,42 @@ def _build_prompt_session():
     return PromptSession(editing_mode=EditingMode.VI)
 
 
+def _prompt_boxed(session) -> str:
+    # Add vertical breathing room so the prompt isn't flush against prior panels.
+    # Kept small and theme-independent (just blank lines).
+    """Prompt for input using prompt_toolkit with a simple ASCII "box" prefix.
+
+    We intentionally avoid background-color tricks here because they can become
+    invisible depending on terminal theme. This stays readable everywhere.
+
+    Visual:
+        [ > your input…
+    """
+
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.styles import Style
+
+    style = Style.from_dict(
+        {
+            # Subtle grey for the prompt prefix.
+            "prompt.box": "fg:ansibrightblack",
+        }
+    )
+
+    # Leading newlines act like a top margin for the input area.
+    prompt = FormattedText(
+        [
+            ("", "\n"),
+            ("class:prompt.box", "[ > "),
+        ]
+    )
+
+    text = session.prompt(prompt, style=style)
+    # Small bottom margin so the next rendered output doesn't collide visually.
+    print()
+    return text
+
+
 def _build_display():
     # Local import to keep import-time cheap.
     from src.tool_status_display import get_tool_status_display
@@ -132,10 +168,6 @@ def main(argv: list[str] | None = None) -> int:
                 get_tool_status_display().clear()
             except Exception:
                 pass
-        try:
-            token_usage.print()
-        except Exception:
-            pass
         print("Goodbye!")
         raise SystemExit(0)
 
@@ -165,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         user_input = " ".join(args.query)
     else:
         try:
-            user_input = session.prompt("What's up? ")
+            user_input = _prompt_boxed(session)
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
@@ -203,19 +235,18 @@ def main(argv: list[str] | None = None) -> int:
 
         output = state.messages[-1] if state.messages else None
 
-        print(ROBOT, output.content if output else None)
+        print(ANSWER_HEADER, output.content if output else None)
 
+        # Token usage: the bottom box is the single source of truth.
         token_usage.ingest_from_messages(state.messages)
-
         print()
         token_usage.print_panel()
 
         if args.single:
             break
 
-        print(HUMAN)
         try:
-            user_input = session.prompt("Anything else? ")
+            user_input = _prompt_boxed(session)
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 

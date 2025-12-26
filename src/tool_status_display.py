@@ -1,10 +1,11 @@
 from typing import Dict, Optional, Any
 from enum import Enum
 from dataclasses import dataclass
+
 from rich.console import Console
-from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
+from rich.table import Table
 from rich import box
 from rich.syntax import Syntax
 from rich.markup import escape
@@ -41,7 +42,7 @@ class ToolStatusDisplay:
                 self._create_display(),
                 console=self.console,
                 refresh_per_second=10,
-                transient=False
+                transient=False,
             )
             self.live.start()
 
@@ -61,7 +62,7 @@ class ToolStatusDisplay:
                 name=call["name"],
                 args=call["args"],
                 status=ToolStatus.PENDING,
-                result=None
+                result=None,
             )
 
         # Start live display if not already started
@@ -133,14 +134,13 @@ class ToolStatusDisplay:
         result_width = min(60, available_for_content - args_width)
 
         table = Table(
-            title="🛠️ Tool Execution",
+            title=None,  # Intentionally omit a loud title like "Tool Execution"
             box=box.ROUNDED,
             show_header=True,
             header_style="cyan",
             title_justify="left",
             border_style="grey37",
-            title_style="bold",
-            width=terminal_width - 2  # Ensure table fits in terminal
+            width=terminal_width - 2,  # Ensure table fits in terminal
         )
 
         # Left-align columns for a cleaner, more professional look
@@ -161,14 +161,7 @@ class ToolStatusDisplay:
             # Format result - escape Rich markup to prevent MarkupError
             result_display = escape(tc.result) if tc.result else ""
 
-            table.add_row(
-                tc.name,
-                args_str,
-                status_display,
-                result_display
-            )
-
-        # Use more muted colors for panels and syntax themes
+            table.add_row(tc.name, args_str, status_display, result_display)
 
         return table
 
@@ -176,18 +169,17 @@ class ToolStatusDisplay:
         """Create the complete display with tables and communications"""
         from rich.console import Group
 
-        # We'll render communications first so they appear "on top" of the running cost
-        # panel in the combined live view. This ensures messages like the user banner
-        # are visible above the cost panel instead of being pushed outside the live
-        # view area.
+        # Render tables first, then any rich communications (like diffs).
+        # In interactive mode, placing diffs *above* the tool table makes the UI feel
+        # like it "replaces" the tool output. Keeping the tool table at the top lets
+        # it "pick back up" after a diff is shown.
+        table_renderables = []
         comm_renderables = []
-        other_renderables = []
 
         for item in self.display_sequence:
             if item["type"] == "table":
-                # Only render table if it has tool calls
                 if item["tool_calls"]:
-                    other_renderables.append(self._create_table(item["tool_calls"]))
+                    table_renderables.append(self._create_table(item["tool_calls"]))
             else:  # communication
                 if "renderable" in item:
                     comm_renderables.append(item["renderable"])
@@ -195,23 +187,25 @@ class ToolStatusDisplay:
                     comm_renderables.append(
                         Panel(
                             item["message"],
-                            title="💭 Agent Communication",
+                            title="Agent Communication",
                             border_style="grey37",
-                            padding=(1, 2)
+                            padding=(1, 2),
                         )
                     )
 
         renderables = []
 
-        # Add communications first so they appear above the cost line/panels
-        renderables.extend(comm_renderables)
+        # Tool table(s) first
+        renderables.extend(table_renderables)
 
-        # Add cost line after communications
+        # Cost line (rarely used now, but keep ordering consistent)
         if self._cost_line:
-            renderables.append(Panel(self._cost_line, title="💰 Running Cost", border_style="grey37", padding=(0, 1)))
+            renderables.append(
+                Panel(self._cost_line, title="Running Cost", border_style="grey37", padding=(0, 1))
+            )
 
-        # Then add the rest (tables, etc.)
-        renderables.extend(other_renderables)
+        # Then diffs / communications
+        renderables.extend(comm_renderables)
 
         return Group(*renderables)
 
@@ -242,7 +236,7 @@ class ToolStatusDisplay:
         """
         # Create a Syntax renderable for nice diff coloring
         syntax = Syntax(diff_text or "", "diff", theme="native", line_numbers=False)
-        panel = Panel(syntax, title=f"🧾 {filename} — Diff", border_style="grey37", padding=(1, 2))
+        panel = Panel(syntax, title=f"{filename} — Diff", border_style="grey37", padding=(1, 2))
 
         comm = {"type": "communication", "renderable": panel}
         self.display_sequence.append(comm)

@@ -1,5 +1,7 @@
 from typing import Set, List
+
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
+
 from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
@@ -12,14 +14,14 @@ def extract_result_preview(content: str, max_lines: int = 3, max_line_length: in
     lines = content.split("\n")
     preview_lines = []
 
-    for line in lines[:max_lines * 3]:  # Look through more lines to find non-empty ones
+    for line in lines[: max_lines * 3]:  # Look through more lines to find non-empty ones
         stripped = line.strip()
         if stripped:
             # Remove control characters
             cleaned = "".join(char for char in stripped if char.isprintable())
             # Truncate each line individually
             if len(cleaned) > max_line_length:
-                cleaned = cleaned[:max_line_length - 3] + "..."
+                cleaned = cleaned[: max_line_length - 3] + "..."
             preview_lines.append(cleaned)
 
         if len(preview_lines) >= max_lines:
@@ -29,7 +31,12 @@ def extract_result_preview(content: str, max_lines: int = 3, max_line_length: in
     return "\n".join(preview_lines)
 
 
-def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str], display, communicate_calls: Set[str]):
+def process_agent_chunk(
+    messages: List[BaseMessage],
+    tool_call_ids_seen: Set[str],
+    display,
+    communicate_calls: Set[str],
+):
     """Process messages from the agent node"""
     for msg in messages:
         # Handle tool calls in AIMessage
@@ -97,7 +104,7 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
     token_usage = None
     try:
         # attempt to get token usage cache from state if present
-        token_usage = getattr(state, 'token_usage', None)
+        token_usage = getattr(state, "token_usage", None)
     except Exception:
         token_usage = None
 
@@ -113,33 +120,16 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
             messages = chunk["model"].get("messages", [])
             final_messages.extend(messages)
             process_agent_chunk(messages, tool_call_ids_seen, display, communicate_calls)
-            # Update running cost if token_usage is available on the state
-            if token_usage is not None:
-                try:
-                    # First try incremental ingestion if available
-                    if hasattr(token_usage, 'ingest_messages_incremental'):
-                        token_usage.ingest_messages_incremental(messages)
-                    else:
-                        token_usage.ingest_from_messages(messages)
 
-                    display.update_cost(token_usage)
-                except Exception:
-                    # Don't let cost reporting break execution
-                    pass
+            # IMPORTANT UX: do not show the running-cost panel at the *top*.
+            # The bottom cost panel printed by main.py is the canonical summary.
 
         elif "tools" in chunk:
             messages = chunk["tools"].get("messages", [])
             final_messages.extend(messages)
             process_tools_chunk(messages, display, communicate_calls)
-            if token_usage is not None:
-                try:
-                    if hasattr(token_usage, 'ingest_messages_incremental'):
-                        token_usage.ingest_messages_incremental(messages)
-                    else:
-                        token_usage.ingest_from_messages(messages)
-                    display.update_cost(token_usage)
-                except Exception:
-                    pass
+
+            # Keep suppressing top cost updates for the same reason.
 
     display.finalize()
 
