@@ -176,7 +176,7 @@ class TestProcessToolsChunk(unittest.TestCase):
 
         self.display.display_sequence = [
             {
-                "type": "table",
+                "type": "tools",
                 "tool_calls": {
                     "call_1": pending_tool
                 }

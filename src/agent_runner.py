@@ -72,7 +72,7 @@ def process_tools_chunk(messages: List[BaseMessage], display, communicate_calls:
     """Process messages from the tools node"""
     # Mark pending tools as running (check all tables in sequence)
     for item in display.display_sequence:
-        if item["type"] == "table":
+        if item["type"] == "tools":
             for tool_id, tool_call in item["tool_calls"].items():
                 if tool_call.status == ToolStatus.PENDING:
                     display.update_status(tool_id, ToolStatus.RUNNING)

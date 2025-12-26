@@ -258,11 +258,10 @@ def write_file(path: str, contents: str):
     except Exception as e:
         return f"Error writing to file: {e}"
 
-    # If a live display is active, add a rich diff panel for this write
+    # Include a unified diff in the tool result so the UI can render it inline.
     try:
-        display = get_tool_status_display()
-        # compute unified diff
         import difflib
+
         old_lines = prev_content.splitlines(keepends=True)
         new_lines = contents.splitlines(keepends=True)
         diff = difflib.unified_diff(
@@ -270,14 +269,14 @@ def write_file(path: str, contents: str):
             new_lines,
             fromfile=f"{os.path.basename(path)} (before)",
             tofile=f"{os.path.basename(path)} (after)",
-            lineterm=''
+            lineterm="",
         )
-        diff_output = ''.join(diff)
-        if diff_output:
-            display.add_diff(os.path.basename(path), diff_output)
+        diff_output = "".join(diff)
     except Exception:
-        # Don't let display code break the tool
-        pass
+        diff_output = ""
+
+    if diff_output:
+        return f"Success\n\nDiff:\n{diff_output}"
 
     return "Success"
 
@@ -338,14 +337,6 @@ def search_replace(path: str, old_text: str, new_text: str):
             f.write(new_content)
     except IOError as e:
         return f"Error writing to file: {e}"
-
-    # Also push a rich diff into the live display if available
-    try:
-        display = get_tool_status_display()
-        if diff_output:
-            display.add_diff(os.path.basename(file_path), diff_output)
-    except Exception:
-        pass
 
     return f"Successfully replaced {occurrences} occurrence(s)\n\nDiff:\n{diff_output}"
 
