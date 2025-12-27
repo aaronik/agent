@@ -41,6 +41,81 @@ def _session_path(session_id: str) -> Path:
     return _sessions_dir() / f"{session_id}.json"
 
 
+def list_session_ids() -> list[str]:
+    """List saved session ids (most recent first)."""
+
+    _ensure_dirs()
+    sessions_dir = _sessions_dir()
+    if not sessions_dir.exists():
+        return []
+
+    ids: list[str] = []
+    for p in sessions_dir.glob("*.json"):
+        ids.append(p.stem)
+
+    # Session ids are sortable timestamps; keep newest first.
+    ids.sort(reverse=True)
+    return ids
+
+
+def _first_human_message_preview(session_path: Path, *, max_len: int = 80) -> str | None:
+    """Best-effort extraction of the first human message content from a session file."""
+
+    try:
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        return None
+
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if m.get("type") != "human":
+            continue
+        data = m.get("data")
+        if not isinstance(data, dict):
+            continue
+        content = data.get("content")
+        if isinstance(content, str):
+            preview = " ".join(content.split())
+            if len(preview) > max_len:
+                preview = preview[: max_len - 1] + "…"
+            return preview
+
+    return None
+
+
+def list_session_labels(*, max_preview_len: int = 80) -> list[str]:
+    """List sessions as labels suitable for UI completion.
+
+    Format:
+        <session_id>\t<first human message preview>
+
+    The tab keeps the id easy to parse while still showing context.
+    """
+
+    _ensure_dirs()
+    sessions_dir = _sessions_dir()
+    if not sessions_dir.exists():
+        return []
+
+    labels: list[str] = []
+    for p in sessions_dir.glob("*.json"):
+        sid = p.stem
+        preview = _first_human_message_preview(p, max_len=max_preview_len)
+        if preview:
+            labels.append(f"{sid}\t{preview}")
+        else:
+            labels.append(sid)
+
+    # Sort by id desc (timestamp-based).
+    labels.sort(key=lambda s: s.split("\t", 1)[0], reverse=True)
+    return labels
+
+
 def save_messages(session_id: str, messages: Iterable[BaseMessage]) -> None:
     """Persist messages to disk and update the global latest pointer."""
 

@@ -373,6 +373,67 @@ def main(argv: list[str] | None = None) -> int:
     def _complete_models(prefix: str) -> list[str]:
         return filter_prefix(available_models, prefix=prefix)
 
+    def _cmd_resume(args_text: str) -> bool:
+        """Resume a prior conversation/session in-place."""
+
+        nonlocal state, session_id, autosaver
+
+        from src.session_store import SessionAutosaver, load_messages
+
+        arg = args_text.strip()
+
+        # Allow completions like "<session_id>	<preview>"; only the id is meaningful.
+        arg_id = arg.split("	", 1)[0].strip()
+
+        resume_id = None
+        if arg_id and arg_id != "latest":
+            resume_id = arg_id
+
+        try:
+            new_session_id, loaded_messages = load_messages(resume_id)
+        except Exception as e:
+            print(f"Could not resume session: {e}")
+            return True
+
+        session_id = new_session_id
+        state = AgentState(messages=loaded_messages, token_usage=token_usage)
+
+        # Reset prompt history to just the resumed conversation.
+        _reset_prompt_history(session)
+        _prefill_history_from_messages(session, state.messages)
+
+        # Rebuild tool status panels from history first, so resume feels like a
+        # continuous session.
+        try:
+            from src.resume_tool_history import replay_tool_history
+
+            replay_tool_history(state.messages, display)
+        except Exception:
+            pass
+
+        # Replay prior assistant outputs so scrollback matches a continuous session.
+        from src.normalize_messages import normalize_for_token_count
+
+        for msg in normalize_for_token_count(state.messages):
+            _render_new_output_message(msg, pt_print=session.app.renderer.print)
+
+        if autosaver is not None:
+            autosaver.close()
+        autosaver = None
+        if not args.single:
+            autosaver = SessionAutosaver(session_id=session_id)
+            _autosave()
+
+        return True
+
+    def _complete_resume(prefix: str) -> list[str]:
+        from src.session_store import list_session_labels
+
+        # Also offer a friendly alias for the latest pointer.
+        candidates = ["latest", *list_session_labels()]
+        return filter_prefix(candidates, prefix=prefix)
+
+
     commands_registry: list[CommandSpec] = [
         CommandSpec(
             name="/clear",
@@ -392,6 +453,13 @@ def main(argv: list[str] | None = None) -> int:
             help="List models or switch the active model.",
             run=_cmd_models,
             complete_args=_complete_models,
+        ),
+        CommandSpec(
+            name="/resume",
+            usage="/resume [latest|<session_id>]",
+            help="Resume a saved conversation/session.",
+            run=_cmd_resume,
+            complete_args=_complete_resume,
         ),
     ]
 

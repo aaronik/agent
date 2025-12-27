@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -40,3 +39,29 @@ def test_load_latest_pointer(tmp_home: Path) -> None:
     loaded_id, loaded = load_messages(None)
     assert loaded_id == "s2"
     assert loaded[0].content == "b"
+
+
+def test_list_session_ids_sorted_desc(tmp_home: Path) -> None:
+    from src.session_store import list_session_ids, save_messages
+
+    save_messages("20240101-000000", [SystemMessage(content="a")])
+    save_messages("20240102-000000", [SystemMessage(content="b")])
+
+    assert list_session_ids()[:2] == ["20240102-000000", "20240101-000000"]
+
+
+def test_list_session_labels_includes_preview(tmp_home: Path) -> None:
+    from src.session_store import list_session_labels, save_messages
+
+    save_messages(
+        "20240102-000000",
+        [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hello\nworld"),
+            AIMessage(content="ok"),
+        ],
+    )
+
+    labels = list_session_labels(max_preview_len=80)
+    assert any(l.startswith("20240102-000000\t") for l in labels)
+    assert any("hello world" in l for l in labels)
