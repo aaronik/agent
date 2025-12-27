@@ -27,3 +27,28 @@ def test_read_file_panel_renders_syntax_highlighted(monkeypatch):
 
         assert "def add" in out
         assert "return a + b" in out
+
+
+def test_read_file_panel_uses_filename_for_lexer_detection(monkeypatch):
+    """Regression: don't hardcode a tiny extension->lexer map (e.g. support .lua)."""
+
+    monkeypatch.setenv("AGENT_NO_LIVE", "1")
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "example.lua")
+        lua_src = "local x = 1\nfunction add(a, b)\n  return a + b\nend\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(lua_src)
+
+        display = ToolStatusDisplay()
+        display.console = Console(record=True, force_terminal=True, width=80)
+
+        tc_id = "1"
+        display.register_calls([
+            {"id": tc_id, "name": "read_file", "args": {"path": path}}
+        ])
+        display.update_status(tc_id, ToolStatus.DONE, f"[FILE]: {path}\n" + lua_src)
+
+        # Ensure we produced ANSI escapes (i.e. Syntax highlighting ran)
+        out_ansi = display.console.export_text(styles=True)
+        assert "\x1b[" in out_ansi

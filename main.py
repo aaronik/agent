@@ -21,7 +21,7 @@ MODEL = "gpt-5.2"
 MAX_CONTEXT_TOKENS = 150000
 
 
-def _render_new_output_message(message: BaseMessage | None) -> None:
+def _render_new_output_message(message: BaseMessage | None, *, pt_print=None) -> None:
     if message is None:
         print(ANSWER_HEADER, None)
         return
@@ -31,8 +31,11 @@ def _render_new_output_message(message: BaseMessage | None) -> None:
         # Render similar to the prompt but as part of transcript replay.
         bold_open = "\033[1m"
         bold_close = "\033[0m"
-        print(f"\n{bold_open}{message.content}{bold_close}")
-        print()
+        text = f"\n{bold_open}{message.content}{bold_close}\n"
+        if pt_print is not None:
+            pt_print(text, end="")
+        else:
+            print(text, end="")
         return
 
     # Tool chatter should never be printed into the main transcript (including resume replay).
@@ -49,8 +52,12 @@ def _render_new_output_message(message: BaseMessage | None) -> None:
                 return
 
         # Render assistant output as Markdown (bullets, bold, code fences, etc.)
-        print(ANSWER_HEADER, end="")
-        print_markdown(str(message.content))
+        if pt_print is not None:
+            pt_print(ANSWER_HEADER, end="")
+            pt_print(str(message.content))
+        else:
+            print(ANSWER_HEADER, end="")
+            print_markdown(str(message.content))
 
 
 class SimpleTokenCounter:
@@ -218,7 +225,12 @@ def _prompt_boxed(session, *, completer=None) -> str:
         ]
     )
 
-    text = session.prompt(
+    # Prevent other threads (tool panel updates, etc.) from writing to stdout
+    # while we're editing input.
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    with patch_stdout(raw=True):
+        text = session.prompt(
         prompt,
         style=style,
         completer=completer,
@@ -333,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
             from src.session_store import SessionAutosaver, new_session_id
 
             session_id = new_session_id()
+            autosaver = None
+        if not args.single:
             autosaver = SessionAutosaver(session_id=session_id)
             _autosave()
 
@@ -515,14 +529,26 @@ def main(argv: list[str] | None = None) -> int:
             return
         autosaver.request_save(state.messages)
 
-    if args.resume is not None and not args.single:
+    if args.resume is not None:
         from src.session_store import SessionAutosaver, load_messages
 
         resume_id = None if args.resume == "__LATEST__" else args.resume
         session_id, loaded_messages = load_messages(resume_id)
         state = AgentState(messages=loaded_messages, token_usage=token_usage)
         _prefill_history_from_messages(session, state.messages)
-        autosaver = SessionAutosaver(session_id=session_id)
+        autosaver = None
+        if not args.single:
+            autosaver = SessionAutosaver(session_id=session_id)
+
+        # Rebuild tool status panels from history first, so resume feels like a
+        # continuous session.
+        try:
+            from src.resume_tool_history import replay_tool_history
+
+            replay_tool_history(state.messages, display)
+        except Exception:
+            # Resume should never crash the CLI.
+            pass
 
         # Replay prior assistant outputs so the scrollback matches a continuous session.
         from src.normalize_messages import normalize_for_token_count
@@ -586,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
             from src.session_store import SessionAutosaver, new_session_id
 
             session_id = new_session_id()
+            autosaver = None
+        if not args.single:
             autosaver = SessionAutosaver(session_id=session_id)
             _autosave()
 
@@ -649,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
             break
 
         try:
-            user_input = _prompt_boxed(session)
+            user_input = _prompt_boxed(session, completer=completer)
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 

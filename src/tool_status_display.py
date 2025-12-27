@@ -92,35 +92,12 @@ def _extract_file_marker(text: str) -> tuple[str | None, str]:
 
 
 def _guess_lexer_from_path(path: str) -> str:
-    """Best-effort lexer name based on file extension."""
+    """Best-effort lexer name based on file extension.
 
-    _, ext = os.path.splitext(path.lower())
+    Prefer filename-based auto-detection rather than a hardcoded allowlist.
+    """
 
-    # Common cases we hit in this repo.
-    if ext in {".py"}:
-        return "python"
-    if ext in {".md", ".markdown"}:
-        return "markdown"
-    if ext in {".js"}:
-        return "javascript"
-    if ext in {".ts"}:
-        return "typescript"
-    if ext in {".json"}:
-        return "json"
-    if ext in {".yml", ".yaml"}:
-        return "yaml"
-    if ext in {".toml"}:
-        return "toml"
-    if ext in {".sh", ".bash", ".zsh"}:
-        return "bash"
-    if ext in {".html", ".htm"}:
-        return "html"
-    if ext in {".css"}:
-        return "css"
-    if ext in {".diff", ".patch"}:
-        return "diff"
-
-    return "text"
+    return ""
 
 
 class ToolStatusDisplay:
@@ -308,10 +285,12 @@ class ToolStatusDisplay:
             file_path = file_path_marker or tc.args.get("path")
             if isinstance(file_path, str) and file_path:
                 lexer_name = _guess_lexer_from_path(file_path)
+                # Let Rich/Pygments choose the lexer from the filename.
+                # We keep "text" as a safe default in case detection fails.
                 body_parts.append(
-                    Syntax(
-                        result_text,
-                        lexer_name,
+                    Syntax.from_path(
+                        file_path,
+                        encoding="utf-8",
                         theme="native",
                         line_numbers=False,
                         word_wrap=False,
