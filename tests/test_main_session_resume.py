@@ -134,6 +134,21 @@ def test_main_resume_loads_history_and_does_not_crash(tmp_home: Path, monkeypatc
     assert "second" in saved
 
 
+def test_prefill_history_populates_session_history() -> None:
+    import main as main_mod
+
+    session = main_mod._build_prompt_session()
+    messages = [
+        SystemMessage(content="sys"),
+        HumanMessage(content="first"),
+        AIMessage(content="ok"),
+        HumanMessage(content="second"),
+    ]
+
+    main_mod._prefill_history_from_messages(session, messages)
+    assert list(session.history.get_strings()) == ["first", "second"]
+
+
 def test_single_mode_does_not_save(tmp_home: Path, monkeypatch: pytest.MonkeyPatch):
     main_mod = _patch_main_dependencies(
         monkeypatch,

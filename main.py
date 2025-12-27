@@ -136,12 +136,43 @@ def _print_available_models() -> None:
 
 
 def _build_prompt_session():
-
     # Local import to avoid prompt_toolkit import cost unless we actually run the CLI.
     from prompt_toolkit import PromptSession
     from prompt_toolkit.enums import EditingMode
+    from prompt_toolkit.history import FileHistory
 
-    return PromptSession(editing_mode=EditingMode.VI)
+    # Persist interactive input history across CLI runs.
+    # This is separate from the agent's saved sessions; it's just for prompt "Up".
+    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
+
+    return PromptSession(editing_mode=EditingMode.VI, history=FileHistory(history_path))
+
+
+def _append_string_to_history(session, text: str | None) -> None:
+    if not text:
+        return
+    history = getattr(session, "history", None)
+    append_string = getattr(history, "append_string", None)
+    if callable(append_string):
+        append_string(text)
+
+
+def _prefill_history_from_messages(session, messages: List[BaseMessage]) -> None:
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            _append_string_to_history(session, msg.content)
+
+
+def _reset_prompt_history(session) -> None:
+    history = getattr(session, "history", None)
+    if history is None:
+        return
+    try:
+        from prompt_toolkit.history import FileHistory
+    except ImportError:
+        return
+    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
+    session.history = FileHistory(history_path)
 
 
 def _prompt_boxed(session, *, completer=None) -> str:
@@ -268,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
             display.clear()
         except Exception:
             pass
+
+        _reset_prompt_history(session)
 
         state = AgentState(
             messages=[
@@ -476,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
         resume_id = None if args.resume == "__LATEST__" else args.resume
         session_id, loaded_messages = load_messages(resume_id)
         state = AgentState(messages=loaded_messages, token_usage=token_usage)
+        _prefill_history_from_messages(session, state.messages)
         autosaver = SessionAutosaver(session_id=session_id)
 
         # Replay prior assistant outputs so the scrollback matches a continuous session.
@@ -485,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         # Now collect the next user input.
         if initial_user_input is not None:
             user_input = initial_user_input
+            _append_string_to_history(session, user_input)
         else:
             try:
                 user_input = _prompt_boxed(session, completer=completer)
@@ -504,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         # Initial user input from command line or prompt
         if initial_user_input is not None:
             user_input = initial_user_input
+            _append_string_to_history(session, user_input)
         else:
             try:
                 user_input = _prompt_boxed(session, completer=completer)
