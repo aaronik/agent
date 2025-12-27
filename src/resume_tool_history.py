@@ -38,39 +38,47 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
     - AIMessage.tool_calls (call metadata)
     - ToolMessage(tool_call_id=...) (results)
 
-    Assumptions:
-    - If we see a result without a registered call, we register a placeholder.
-    - All resumed calls are treated as DONE unless tool output indicates error.
+    Important:
+    ToolStatusDisplay removes calls from its active set after DONE/ERROR.
+    If we pre-register *all* calls first, then apply results, only the last
+    printed panel may appear (earlier ones get popped before printing).
+
+    So during resume we must replay strictly in appearance order:
+    - register calls as we encounter them
+    - update them as we encounter results
     """
 
+    # Cache call metadata so we can fill placeholders if a ToolMessage appears
+    # without its corresponding AIMessage tool_calls envelope.
     id_to_call: dict[str, dict] = {}
-
-    # 1) Collect calls in order.
     for m in messages:
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
             for tc in m.tool_calls:
                 if not isinstance(tc, dict):
                     continue
                 tc_id = tc.get("id")
-                if not isinstance(tc_id, str) or not tc_id:
-                    continue
-                id_to_call.setdefault(tc_id, tc)
+                if isinstance(tc_id, str) and tc_id:
+                    id_to_call.setdefault(tc_id, tc)
 
-    # 2) Register them so we can update statuses.
-    if id_to_call:
-        display.register_calls(
-            [
-                {
-                    "id": tc_id,
-                    "name": str(tc.get("name") or "tool"),
-                    "args": _coerce_args(tc),
-                }
-                for tc_id, tc in id_to_call.items()
-            ]
-        )
-
-    # 3) Apply results in order of appearance.
     for m in messages:
+        # Register tool calls as they appear.
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            tool_calls = [tc for tc in m.tool_calls if isinstance(tc, dict)]
+            if tool_calls:
+                display.register_calls(
+                    [
+                        {
+                            "id": tc_id,
+                            "name": str(tc.get("name") or "tool"),
+                            "args": _coerce_args(tc),
+                        }
+                        for tc in tool_calls
+                        if isinstance((tc_id := tc.get("id")), str) and tc_id
+                    ]
+                )
+            continue
+
+        # Apply results as they appear.
         if not isinstance(m, ToolMessage):
             continue
 
@@ -78,14 +86,14 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
         if not isinstance(tc_id, str) or not tc_id:
             continue
 
-        # Register placeholder if we never saw the call.
         if display.get_tool_call(tc_id) is None:
+            tc = id_to_call.get(tc_id) or {}
             display.register_calls(
                 [
                     {
                         "id": tc_id,
-                        "name": str(getattr(m, "name", None) or "tool"),
-                        "args": {},
+                        "name": str(tc.get("name") or getattr(m, "name", None) or "tool"),
+                        "args": _coerce_args(tc),
                     }
                 ]
             )
@@ -96,6 +104,7 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
         else:
             preview = extract_result_preview(m.content)
 
+        # Detect non-zero exit codes for run_shell_command.
         if isinstance(m.content, str) and "(exit code:" in m.content:
             try:
                 code_str = m.content.split("(exit code:", 1)[1].split(")", 1)[0].strip()
@@ -105,7 +114,6 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
 
             if code is not None and code != 0:
                 display.update_status(tc_id, ToolStatus.ERROR, m.content)
-            else:
-                display.update_status(tc_id, ToolStatus.DONE, preview)
-        else:
-            display.update_status(tc_id, ToolStatus.DONE, preview)
+                continue
+
+        display.update_status(tc_id, ToolStatus.DONE, preview)
