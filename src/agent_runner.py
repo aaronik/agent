@@ -132,7 +132,10 @@ def process_tools_chunk(messages: List[BaseMessage], display):
                 display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
 
 
-def run_agent_with_display(agent, state, recursion_limit: int = 200):
+from src.cancel import CancelToken, AgentCancelled
+
+
+def run_agent_with_display(agent, state, recursion_limit: int = 200, cancel_token: CancelToken | None = None):
     """Run the agent with live status display"""
     display = get_tool_status_display()
     display.clear()
@@ -147,16 +150,24 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200):
     else:
         agent_input = {"messages": state.messages}
 
-    for chunk in agent.stream(agent_input, {"recursion_limit": recursion_limit}):
-        if "model" in chunk:
-            messages = chunk["model"].get("messages", [])
-            final_messages.extend(messages)
-            process_agent_chunk(messages, tool_call_ids_seen, display)
+    try:
+        for chunk in agent.stream(agent_input, {"recursion_limit": recursion_limit}):
+            if cancel_token is not None:
+                cancel_token.check()
 
-        elif "tools" in chunk:
-            messages = chunk["tools"].get("messages", [])
-            final_messages.extend(messages)
-            process_tools_chunk(messages, display)
+            if "model" in chunk:
+                messages = chunk["model"].get("messages", [])
+                final_messages.extend(messages)
+                process_agent_chunk(messages, tool_call_ids_seen, display)
+
+            elif "tools" in chunk:
+                messages = chunk["tools"].get("messages", [])
+                final_messages.extend(messages)
+                process_tools_chunk(messages, display)
+    except AgentCancelled:
+        # Best-effort clean UI state; return to prompt without exiting the app.
+        display.finalize()
+        return []
 
     display.finalize()
 

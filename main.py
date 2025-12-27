@@ -152,8 +152,14 @@ def _build_display():
     return get_tool_status_display()
 
 
-def _install_signal_handler(graceful_exit):
+def _install_signal_handler(graceful_exit, cancel_current_turn):
     def signal_handler(*_):
+        # Dual behavior:
+        # - If a turn is running, SIGINT cancels that turn *and* interrupts any
+        #   in-flight blocking work (model call / tool) by raising KeyboardInterrupt.
+        # - If we're idle at the prompt, SIGINT exits the app.
+        if cancel_current_turn():
+            raise KeyboardInterrupt
         graceful_exit()
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -206,7 +212,21 @@ def main(argv: list[str] | None = None) -> int:
         print("Goodbye!")
         raise SystemExit(0)
 
-    _install_signal_handler(graceful_exit)
+    from src.cancel import CancelToken
+
+    turn_in_progress = False
+    cancel_token: CancelToken | None = None
+    sigint_during_turn = False
+
+    def cancel_current_turn() -> bool:
+        nonlocal cancel_token, sigint_during_turn
+        if turn_in_progress and cancel_token is not None:
+            cancel_token.cancel("SIGINT")
+            sigint_during_turn = True
+            return True
+        return False
+
+    _install_signal_handler(graceful_exit, cancel_current_turn)
 
     # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + model_name)
@@ -309,7 +329,26 @@ def main(argv: list[str] | None = None) -> int:
 
         trimmed_state = AgentState(messages=trimmed_messages, token_usage=token_usage)
 
-        new_messages = run_agent_with_display(agent, trimmed_state)
+        cancel_token = CancelToken()
+        turn_in_progress = True
+        sigint_during_turn = False
+        try:
+            try:
+                try:
+                    new_messages = run_agent_with_display(agent, trimmed_state, cancel_token=cancel_token)
+                except TypeError:
+                    # Backwards-compatible for tests/mocks that haven't been updated.
+                    new_messages = run_agent_with_display(agent, trimmed_state)
+            except KeyboardInterrupt:
+                # If SIGINT happened during a turn, treat it as a cancellation and
+                # return to the prompt (don't exit the app).
+                if sigint_during_turn:
+                    new_messages = []
+                else:
+                    raise
+        finally:
+            turn_in_progress = False
+            cancel_token = None
 
         state = AgentState(messages=state.messages + new_messages, token_usage=token_usage)
         _autosave()
