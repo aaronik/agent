@@ -415,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         from src.normalize_messages import normalize_for_token_count
 
         for msg in normalize_for_token_count(state.messages):
-            _render_new_output_message(msg, pt_print=session.app.renderer.print)
+            _render_new_output_message(msg)
 
         if autosaver is not None:
             autosaver.close()
