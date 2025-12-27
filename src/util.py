@@ -82,6 +82,7 @@ def _get_litellm_cost_map_sync() -> dict[str, Any]:
 
 class TokenUsage(BaseModel):
     model: str
+    provider: str = "openai"
     prompt_tokens: int = 0
     completion_tokens: int = 0
     _cost_map: dict | None = None
@@ -95,6 +96,12 @@ class TokenUsage(BaseModel):
             object.__setattr__(self, "_seen_message_ids", set())
 
     def _ensure_cost_map(self) -> dict[str, Any]:
+        # For local providers (e.g. Ollama), we intentionally skip LiteLLM pricing.
+        # We still display $0.0000, but avoid noisy warnings and unnecessary imports.
+        if self.provider == "ollama":
+            object.__setattr__(self, "_cost_map", {})
+            return self._cost_map
+
         # Prefer the shared module-level cache.
         if not self._cost_map:
             try:
@@ -114,7 +121,9 @@ class TokenUsage(BaseModel):
         try:
             cost_map = self._ensure_cost_map()
             if self.model not in cost_map:
-                if not self.model.startswith("ollama:"):
+                # Unknown model in LiteLLM pricing table.
+                # For local providers, we intentionally stay quiet and report $0.
+                if self.provider != "ollama":
                     print(f"Warning: Model '{self.model}' not found in LiteLLM cost map")
                 return 0.0
 
@@ -133,7 +142,9 @@ class TokenUsage(BaseModel):
         try:
             cost_map = self._ensure_cost_map()
             if self.model not in cost_map:
-                if not self.model.startswith("ollama:"):
+                # Unknown model in LiteLLM pricing table.
+                # For local providers, we intentionally stay quiet and report $0.
+                if self.provider != "ollama":
                     print(f"Warning: Model '{self.model}' not found in LiteLLM cost map")
                 return 0.0
 

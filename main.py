@@ -79,6 +79,7 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
         ollama_base_url = ollama_url.rstrip("/") + "/v1"
         model = ChatOpenAI(model=model_name, base_url=ollama_base_url, api_key="dummy")
         token_counter = SimpleTokenCounter()
+        pm = None  # type: ignore[assignment]
     else:
         from src.provider_registry import parse_model_id
 
@@ -115,7 +116,9 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
 
     agent = create_agent(model, tools=tool_list)
 
-    token_usage = TokenUsage(model=model.model_name)
+    # Provider-aware token usage: local providers (Ollama) intentionally skip LiteLLM pricing.
+    provider = "ollama" if (ollama_url and ollama_model) else (pm.provider if pm is not None else "openai")
+    token_usage = TokenUsage(model=model.model_name, provider=provider)
 
     return agent, token_counter, token_usage, model_name
 

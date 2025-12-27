@@ -130,6 +130,15 @@ class TestTokenUsage(unittest.TestCase):
 
     @patch('litellm.get_model_cost_map')
     @patch('builtins.print')
+    def test_ollama_provider_skips_pricing_and_warnings(self, mock_print, mock_get_cost_map):
+        mock_get_cost_map.return_value = self.mock_cost_map
+        usage = TokenUsage(model="nemotron-3-nano:30b", provider="ollama", prompt_tokens=100)
+        self.assertEqual(usage.prompt_cost(), 0.0)
+        mock_get_cost_map.assert_not_called()
+        mock_print.assert_not_called()
+
+    @patch('litellm.get_model_cost_map')
+    @patch('builtins.print')
     def test_print_panel(self, mock_print, mock_get_cost_map):
         """Test that print_panel creates a Rich panel with cost information"""
         mock_get_cost_map.return_value = self.mock_cost_map
