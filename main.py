@@ -311,6 +311,48 @@ def main(argv: list[str] | None = None) -> int:
 
     _install_signal_handler(graceful_exit, cancel_current_turn)
 
+    def _maybe_handle_clear_command(text: str) -> bool:
+        """Handle `/clear`.
+
+        Resets the current conversation and starts a new session (autosave).
+        """
+
+        nonlocal state, autosaver, session_id
+
+        if text.strip() != "/clear":
+            return False
+
+        try:
+            display.clear()
+        except Exception:
+            pass
+
+        # Reset state to a fresh conversation.
+        state = AgentState(
+            messages=[
+                SystemMessage(content=system_string),
+                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
+                *(
+                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    if (git_ls := sys_git_ls())
+                    else []
+                ),
+            ],
+            token_usage=token_usage,
+        )
+
+        # New autosave session unless we're in single-shot mode.
+        if not args.single:
+            from src.session_store import SessionAutosaver, new_session_id
+
+            session_id = new_session_id()
+            autosaver = SessionAutosaver(session_id=session_id)
+            _autosave()
+
+        print("\n𜱜\n𜱟 " + model_name)
+        return True
+
     def _maybe_handle_models_command(text: str) -> bool:
         # Debugging / test determinism: ensure command is processed before agent.
         """Handle `/models` commands.
@@ -398,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
-        while _maybe_handle_models_command(user_input):
+        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
             # Stay in the same session; do not append to history.
             try:
                 user_input = _prompt_boxed(session, completer=completer)
@@ -417,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
-        while _maybe_handle_models_command(user_input):
+        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
             try:
                 user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
@@ -502,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
-        while _maybe_handle_models_command(user_input):
+        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
             # Stay in the same session; do not append to history.
             try:
                 user_input = _prompt_boxed(session, completer=completer)
