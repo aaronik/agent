@@ -8,6 +8,7 @@ from typing import List
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, trim_messages
 
 from src.constants import system_string
+from src.markdown_render import print_markdown
 from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_ls, sys_pwd, sys_uname
 
 HUMAN = ""
@@ -34,7 +35,9 @@ def _render_new_output_message(message: BaseMessage | None) -> None:
         return
 
     if isinstance(message, AIMessage):
-        print(ANSWER_HEADER, message.content)
+        # Render assistant output as Markdown (bullets, bold, code fences, etc.)
+        print(ANSWER_HEADER, end="")
+        print_markdown(str(message.content))
 
 
 class SimpleTokenCounter:
