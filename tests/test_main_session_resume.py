@@ -44,7 +44,7 @@ def _patch_main_dependencies(monkeypatch: pytest.MonkeyPatch, *, user_inputs: li
 
     inputs = user_inputs.copy()
 
-    def _fake_prompt(_session):
+    def _fake_prompt(_session, *, completer=None):
         if not inputs:
             raise KeyboardInterrupt()
         return inputs.pop(0)

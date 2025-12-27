@@ -33,7 +33,7 @@ def test_models_command_lists_models(monkeypatch: pytest.MonkeyPatch, capsys):
 
     inputs = ["/models", "hi"]
 
-    def _fake_prompt(_session):
+    def _fake_prompt(_session, *, completer=None):
         if not inputs:
             raise KeyboardInterrupt()
         return inputs.pop(0)
@@ -79,7 +79,7 @@ def test_models_command_switches_model(monkeypatch: pytest.MonkeyPatch, capsys):
 
     inputs = ["/models openai:gpt-4.1", "hi"]
 
-    def _fake_prompt(_session):
+    def _fake_prompt(_session, *, completer=None):
         if not inputs:
             raise KeyboardInterrupt()
         return inputs.pop(0)

@@ -121,42 +121,10 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
 
 
 def _print_available_models() -> None:
-    """Print available models (one per line).
+    from src.models import get_available_models
 
-    Used by both `--list-models` and the in-REPL `/models` command.
-    """
-
-    # OpenAI models
-    from openai import OpenAI
-
-    openai_client = OpenAI()
-    openai_models = openai_client.models.list()
-    openai_ids = [m.id for m in openai_models.data]
-
-    from src.model_registry import list_openai_chat_models
-
-    openai_chat_models = list_openai_chat_models(openai_ids)
-
-    # Ollama models (best-effort).
-    ollama_models: list[str] = []
-    ollama_url = os.getenv("OLLAMA_URL") or "http://localhost:11434"  # default Ollama
-    import requests
-
-    try:
-        resp = requests.get(ollama_url.rstrip("/") + "/api/tags", timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        for m in (data.get("models") or []):
-            name = m.get("name")
-            if name:
-                ollama_models.append(str(name))
-    except Exception:
-        ollama_models = []
-
-    for mi in openai_chat_models:
-        print(f"openai:{mi.id}")
-    for mid in sorted(set(ollama_models)):
-        print(f"ollama:{mid}")
+    for mid in get_available_models():
+        print(mid)
 
 
 def _build_prompt_session():
@@ -168,7 +136,7 @@ def _build_prompt_session():
     return PromptSession(editing_mode=EditingMode.VI)
 
 
-def _prompt_boxed(session) -> str:
+def _prompt_boxed(session, *, completer=None) -> str:
     # Add vertical breathing room so the prompt isn't flush against prior panels.
     # Kept small and theme-independent (just blank lines).
     """Prompt for input using prompt_toolkit with a simple ASCII "box" prefix.
@@ -199,7 +167,7 @@ def _prompt_boxed(session) -> str:
         ]
     )
 
-    text = session.prompt(prompt, style=style)
+    text = session.prompt(prompt, style=style, completer=completer)
     # Small bottom margin so the next rendered output doesn't collide visually.
     print()
     return text
@@ -263,6 +231,47 @@ def main(argv: list[str] | None = None) -> int:
     )
     display = _build_display()
     session = _build_prompt_session()
+
+    # One-time model list for `/models` autocomplete.
+    try:
+        from src.models import get_available_models
+
+        available_models = get_available_models()
+    except Exception:
+        available_models = []
+
+    # Local import: prompt_toolkit is only used when running the CLI.
+    from prompt_toolkit.completion import Completer, Completion
+
+    class _ModelsCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+
+            if not text:
+                return
+
+            if text.startswith("/models"):
+                # Complete the command itself.
+                if text == "/m" or text == "/mo" or text == "/mod" or text == "/mode" or text == "/model":
+                    yield Completion("/models", start_position=-len(text))
+                    return
+
+                # Complete model ids after `/models `.
+                if text == "/models":
+                    yield Completion("/models ", start_position=0)
+                    return
+
+                if text.startswith("/models "):
+                    prefix = text[len("/models ") :]
+                    for mid in available_models:
+                        if mid.startswith(prefix):
+                            yield Completion(mid, start_position=-len(prefix))
+                    return
+
+            # Otherwise: no completions.
+            return
+
+    completer = _ModelsCompleter()
 
     # Preload LiteLLM's pricing table in the background while the user is typing.
     preload_litellm_cost_map()
@@ -385,14 +394,14 @@ def main(argv: list[str] | None = None) -> int:
             user_input = initial_user_input
         else:
             try:
-                user_input = _prompt_boxed(session)
+                user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _maybe_handle_models_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session)
+                user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -404,13 +413,13 @@ def main(argv: list[str] | None = None) -> int:
             user_input = initial_user_input
         else:
             try:
-                user_input = _prompt_boxed(session)
+                user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _maybe_handle_models_command(user_input):
             try:
-                user_input = _prompt_boxed(session)
+                user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -496,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         while _maybe_handle_models_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session)
+                user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
