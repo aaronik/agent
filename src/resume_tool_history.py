@@ -46,6 +46,11 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
     So during resume we must replay strictly in appearance order:
     - register calls as we encounter them
     - update them as we encounter results
+
+    Also important:
+    Rich Live auto-refresh will keep repainting the terminal region. After a
+    resume replay we should ensure Live is finalized so the user's input prompt
+    doesn't flicker.
     """
 
     # Cache call metadata so we can fill placeholders if a ToolMessage appears
@@ -117,3 +122,6 @@ def replay_tool_history(messages: Iterable[BaseMessage], display: ToolStatusDisp
                 continue
 
         display.update_status(tc_id, ToolStatus.DONE, preview)
+
+    # Don't leave a Live region auto-refreshing after resume replay.
+    display.finalize()
