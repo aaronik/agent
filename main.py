@@ -67,40 +67,7 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
 
     # Optional: list models and exit early.
     if list_models:
-        # OpenAI models
-        from openai import OpenAI
-
-        openai_client = OpenAI()
-        openai_models = openai_client.models.list()
-        openai_ids = [m.id for m in openai_models.data]
-
-        from src.model_registry import list_openai_chat_models
-
-        openai_chat_models = list_openai_chat_models(openai_ids)
-
-        # Ollama models (best-effort). We support the native Ollama endpoint.
-        ollama_models: list[str] = []
-        ollama_url = os.getenv("OLLAMA_URL") or "http://localhost:11434"  # default Ollama
-        if ollama_url:
-            import requests
-
-            try:
-                resp = requests.get(ollama_url.rstrip("/") + "/api/tags", timeout=5)
-                resp.raise_for_status()
-                data = resp.json()
-                for m in (data.get("models") or []):
-                    name = m.get("name")
-                    if name:
-                        ollama_models.append(str(name))
-            except Exception:
-                ollama_models = []
-
-        # Print one model id per line for easy piping.
-        for mi in openai_chat_models:
-            print(f"openai:{mi.id}")
-        for mid in sorted(set(ollama_models)):
-            print(f"ollama:{mid}")
-
+        _print_available_models()
         raise SystemExit(0)
 
     # If the user set Ollama configuration, prefer that local model.
@@ -120,6 +87,7 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
         if pm.provider == "openai":
             model_name = pm.model
             model = ChatOpenAI(model=model_name)
+            token_counter = model
         else:
             # For now, non-OpenAI providers are supported via an OpenAI-compatible
             # base_url + model name. Ollama is the primary example.
@@ -152,7 +120,47 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
     return agent, token_counter, token_usage, model_name
 
 
+def _print_available_models() -> None:
+    """Print available models (one per line).
+
+    Used by both `--list-models` and the in-REPL `/models` command.
+    """
+
+    # OpenAI models
+    from openai import OpenAI
+
+    openai_client = OpenAI()
+    openai_models = openai_client.models.list()
+    openai_ids = [m.id for m in openai_models.data]
+
+    from src.model_registry import list_openai_chat_models
+
+    openai_chat_models = list_openai_chat_models(openai_ids)
+
+    # Ollama models (best-effort).
+    ollama_models: list[str] = []
+    ollama_url = os.getenv("OLLAMA_URL") or "http://localhost:11434"  # default Ollama
+    import requests
+
+    try:
+        resp = requests.get(ollama_url.rstrip("/") + "/api/tags", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        for m in (data.get("models") or []):
+            name = m.get("name")
+            if name:
+                ollama_models.append(str(name))
+    except Exception:
+        ollama_models = []
+
+    for mi in openai_chat_models:
+        print(f"openai:{mi.id}")
+    for mid in sorted(set(ollama_models)):
+        print(f"ollama:{mid}")
+
+
 def _build_prompt_session():
+
     # Local import to avoid prompt_toolkit import cost unless we actually run the CLI.
     from prompt_toolkit import PromptSession
     from prompt_toolkit.enums import EditingMode
@@ -294,6 +302,39 @@ def main(argv: list[str] | None = None) -> int:
 
     _install_signal_handler(graceful_exit, cancel_current_turn)
 
+    def _maybe_handle_models_command(text: str) -> bool:
+        # Debugging / test determinism: ensure command is processed before agent.
+        """Handle `/models` commands.
+
+        Returns True if handled (caller should not send to the agent).
+        """
+
+        nonlocal agent, token_counter, token_usage, model_name
+
+        if not text.startswith("/models"):
+            return False
+
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) == 1:
+            _print_available_models()
+            return True
+
+        model_id = parts[1].strip()
+        if not model_id:
+            _print_available_models()
+            return True
+
+        # Rebuild agent + deps using the new model, keep conversation history.
+        try:
+            agent, token_counter, token_usage, model_name = _build_agent_and_deps(model_override=model_id)
+        except Exception as e:
+            print(f"Could not switch model: {e}")
+            return True
+
+        # Make the switch visible to the user, but don't force it into the model context.
+        print("\n𜱜\n𜱟 " + model_name)
+        return True
+
     # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + model_name)
 
@@ -348,6 +389,13 @@ def main(argv: list[str] | None = None) -> int:
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
+        while _maybe_handle_models_command(user_input):
+            # Stay in the same session; do not append to history.
+            try:
+                user_input = _prompt_boxed(session)
+            except (KeyboardInterrupt, SystemExit):
+                graceful_exit()
+
         state.messages.append(HumanMessage(content=user_input))
         _autosave()
     else:
@@ -355,6 +403,12 @@ def main(argv: list[str] | None = None) -> int:
         if initial_user_input is not None:
             user_input = initial_user_input
         else:
+            try:
+                user_input = _prompt_boxed(session)
+            except (KeyboardInterrupt, SystemExit):
+                graceful_exit()
+
+        while _maybe_handle_models_command(user_input):
             try:
                 user_input = _prompt_boxed(session)
             except (KeyboardInterrupt, SystemExit):
@@ -438,6 +492,13 @@ def main(argv: list[str] | None = None) -> int:
             user_input = _prompt_boxed(session)
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
+
+        while _maybe_handle_models_command(user_input):
+            # Stay in the same session; do not append to history.
+            try:
+                user_input = _prompt_boxed(session)
+            except (KeyboardInterrupt, SystemExit):
+                graceful_exit()
 
         state.messages.append(HumanMessage(content=user_input))
         _autosave()
