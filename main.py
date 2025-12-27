@@ -54,7 +54,7 @@ class AgentState:
     token_usage: "TokenUsage | None" = None
 
 
-def _build_agent_and_deps():
+def _build_agent_and_deps(*, model_override: str | None = None, list_models: bool = False):
     """Create the model, tools, agent, token counter, and token usage.
 
     Important: this is intentionally done lazily (at runtime) so importing
@@ -65,8 +65,46 @@ def _build_agent_and_deps():
     from langchain.agents import create_agent
     from langchain_openai import ChatOpenAI
 
+    # Optional: list models and exit early.
+    if list_models:
+        # OpenAI models
+        from openai import OpenAI
+
+        openai_client = OpenAI()
+        openai_models = openai_client.models.list()
+        openai_ids = [m.id for m in openai_models.data]
+
+        from src.model_registry import list_openai_chat_models
+
+        openai_chat_models = list_openai_chat_models(openai_ids)
+
+        # Ollama models (best-effort). We support the native Ollama endpoint.
+        ollama_models: list[str] = []
+        ollama_url = os.getenv("OLLAMA_URL") or "http://localhost:11434"  # default Ollama
+        if ollama_url:
+            import requests
+
+            try:
+                resp = requests.get(ollama_url.rstrip("/") + "/api/tags", timeout=5)
+                resp.raise_for_status()
+                data = resp.json()
+                for m in (data.get("models") or []):
+                    name = m.get("name")
+                    if name:
+                        ollama_models.append(str(name))
+            except Exception:
+                ollama_models = []
+
+        # Print one model id per line for easy piping.
+        for mi in openai_chat_models:
+            print(f"openai:{mi.id}")
+        for mid in sorted(set(ollama_models)):
+            print(f"ollama:{mid}")
+
+        raise SystemExit(0)
+
     # If the user set Ollama configuration, prefer that local model.
-    ollama_url = os.getenv("OLLAMA_URL")
+    ollama_url = os.getenv("OLLAMA_URL") or "http://localhost:11434"
     ollama_model = os.getenv("OLLAMA_MODEL")
 
     if ollama_url and ollama_model:
@@ -75,9 +113,23 @@ def _build_agent_and_deps():
         model = ChatOpenAI(model=model_name, base_url=ollama_base_url, api_key="dummy")
         token_counter = SimpleTokenCounter()
     else:
-        model_name = MODEL
-        model = ChatOpenAI(model=model_name)
-        token_counter = model
+        from src.provider_registry import parse_model_id
+
+        raw_model = model_override or os.getenv("AGENT_MODEL") or os.getenv("OPENAI_MODEL") or MODEL
+        pm = parse_model_id(raw_model)
+        if pm.provider == "openai":
+            model_name = pm.model
+            model = ChatOpenAI(model=model_name)
+        else:
+            # For now, non-OpenAI providers are supported via an OpenAI-compatible
+            # base_url + model name. Ollama is the primary example.
+            if pm.provider == "ollama":
+                model_name = pm.model
+                ollama_base_url = ollama_url.rstrip("/") + "/v1"
+                model = ChatOpenAI(model=model_name, base_url=ollama_base_url, api_key="dummy")
+                token_counter = SimpleTokenCounter()
+            else:
+                raise ValueError(f"Unknown provider '{pm.provider}'. Use --list-models to see options.")
 
     # Local import: tools module pulls in prompt_toolkit / openai deps.
     import src.tools as tools_module
@@ -169,6 +221,17 @@ def main(argv: list[str] | None = None) -> int:
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Personal Command Line Agent")
     parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help="Model id to use. Supports 'openai:<id>' or 'ollama:<id>'. Without a prefix defaults to OpenAI.",
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="List available models (OpenAI + any configured local providers) and exit.",
+    )
+    parser.add_argument(
         "--single",
         "-s",
         action="store_true",
@@ -186,7 +249,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    agent, token_counter, token_usage, model_name = _build_agent_and_deps()
+    agent, token_counter, token_usage, model_name = _build_agent_and_deps(
+        model_override=args.model,
+        list_models=args.list_models,
+    )
     display = _build_display()
     session = _build_prompt_session()
 

@@ -58,7 +58,7 @@ def _patch_main_dependencies(monkeypatch: pytest.MonkeyPatch, *, user_inputs: li
     monkeypatch.setattr(
         main_mod,
         "_build_agent_and_deps",
-        lambda: (object(), main_mod.SimpleTokenCounter(), _DummyTokenUsage(), "dummy-model"),
+        lambda **_kwargs: (object(), main_mod.SimpleTokenCounter(), _DummyTokenUsage(), "dummy-model"),
     )
 
     # Stub agent runner: just emit one AI message each turn.
