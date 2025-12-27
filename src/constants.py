@@ -32,6 +32,7 @@ system_string = (
     "\n"
     "[TOOL USAGE GUIDELINES]\n"
     "- Execute commands directly using bash_execute when you need to run terminal commands\n"
+    "- If a `[SYSTEM INFO] git ls-files:` section is present, treat it as authoritative for the tracked repo file list; avoid running `ls` just to rediscover the project structure. Only use `ls`/`find` when you specifically need untracked files or runtime filesystem state.\n"
     "- Read files before editing them to understand context\n"
     "- Use specialized search tools (grep, glob) to explore codebases efficiently\n"
     "- Prefer high-level operations over multiple small steps\n"

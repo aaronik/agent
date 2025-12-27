@@ -251,19 +251,26 @@ def sys_uname():
     return subprocess.run("uname -a", shell=True, capture_output=True, text=True).stdout
 
 
-def sys_ls():
-    return subprocess.run("ls -l", shell=True, capture_output=True, text=True).stdout
-
-
 def sys_pwd():
     return subprocess.run("pwd", shell=True, capture_output=True, text=True).stdout
 
 
-def sys_git_ls():
-    return (
-        subprocess.run("git ls-files", shell=True, capture_output=True, text=True).stdout
-        or "fatal: not a git repository"
+def sys_git_ls() -> str:
+    """Return `git ls-files` output if we're inside a git worktree.
+
+    Returns an empty string when not in a git repository.
+    """
+
+    in_repo = subprocess.run(
+        "git rev-parse --is-inside-work-tree",
+        shell=True,
+        capture_output=True,
+        text=True,
     )
+    if in_repo.returncode != 0:
+        return ""
+
+    return subprocess.run("git ls-files", shell=True, capture_output=True, text=True).stdout
 
 
 # Simple one to get the uname info of the running machine

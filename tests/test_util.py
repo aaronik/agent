@@ -6,7 +6,7 @@ import aisuite as ai
 
 from src.util import (
     extract_text, sys_uname, sanitize_path, TokenUsage,
-    sys_ls, sys_pwd, sys_git_ls, get_current_filetree,
+    sys_pwd, sys_git_ls, get_current_filetree,
     message_from_choice, message_from_user_input,
     format_subproc_result, refuse_if_duplicate
 )
@@ -144,21 +144,16 @@ class TestTokenUsage(unittest.TestCase):
 
 
 class TestSystemUtilityFunctions(unittest.TestCase):
-    def test_sys_ls(self):
-        result = sys_ls()
-        self.assertIsInstance(result, str)
-        self.assertGreater(len(result), 0)
-
     def test_sys_pwd(self):
         result = sys_pwd()
         self.assertIsInstance(result, str)
         self.assertIn("/", result)
 
-    def test_sys_git_ls_in_repo(self):
+    def test_sys_git_ls_in_repo_or_empty(self):
         result = sys_git_ls()
         self.assertIsInstance(result, str)
-        # In a git repo, should list files
-        if "fatal: not a git repository" not in result:
+        # In a git repo, should list files; outside, should be empty.
+        if result != "":
             self.assertGreater(len(result), 0)
 
     def test_get_current_filetree(self):

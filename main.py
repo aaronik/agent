@@ -9,7 +9,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AI
 
 from src.constants import system_string
 from src.markdown_render import print_markdown
-from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_ls, sys_pwd, sys_uname
+from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_pwd, sys_uname
 
 HUMAN = ""
 ANSWER_HEADER = "\n"
@@ -299,8 +299,11 @@ def main(argv: list[str] | None = None) -> int:
                 SystemMessage(content=system_string),
                 SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
-                SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
-                SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
+                *(
+                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    if (git_ls := sys_git_ls())
+                    else []
+                ),
                 HumanMessage(content=user_input),
             ],
             token_usage=token_usage,
