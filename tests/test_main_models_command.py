@@ -43,6 +43,7 @@ def test_models_command_lists_models(monkeypatch: pytest.MonkeyPatch, capsys):
 
     # Make `/models` deterministic.
     monkeypatch.setattr(main_mod, "_print_available_models", lambda: print("openai:gpt-4.1"))
+    monkeypatch.setattr(main_mod, "get_available_models", lambda: ["openai:gpt-4.1"], raising=False)
 
     # Avoid creating a real agent/model.
     monkeypatch.setattr(

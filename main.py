@@ -167,7 +167,12 @@ def _prompt_boxed(session, *, completer=None) -> str:
         ]
     )
 
-    text = session.prompt(prompt, style=style, completer=completer)
+    text = session.prompt(
+        prompt,
+        style=style,
+        completer=completer,
+        complete_while_typing=True,
+    )
     # Small bottom margin so the next rendered output doesn't collide visually.
     print()
     return text
@@ -232,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     display = _build_display()
     session = _build_prompt_session()
 
-    # One-time model list for `/models` autocomplete.
+    # One-time model list for `/models` (used by the command + autocomplete).
     try:
         from src.models import get_available_models
 
@@ -240,38 +245,149 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         available_models = []
 
-    # Local import: prompt_toolkit is only used when running the CLI.
+    from src.commands import CommandSpec, filter_prefix, format_help, split_command
+
+    # ---- Command registry -------------------------------------------------
+
+    def _cmd_help(_args: str) -> bool:
+        print(format_help(commands_registry))
+        return True
+
+    def _cmd_clear(_args: str) -> bool:
+        nonlocal state, autosaver, session_id
+
+        try:
+            display.clear()
+        except Exception:
+            pass
+
+        state = AgentState(
+            messages=[
+                SystemMessage(content=system_string),
+                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
+                *(
+                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    if (git_ls := sys_git_ls())
+                    else []
+                ),
+            ],
+            token_usage=token_usage,
+        )
+
+        if not args.single:
+            from src.session_store import SessionAutosaver, new_session_id
+
+            session_id = new_session_id()
+            autosaver = SessionAutosaver(session_id=session_id)
+            _autosave()
+
+        print("\n𜱜\n𜱟 " + model_name)
+        return True
+
+    def _cmd_models(args_text: str) -> bool:
+        nonlocal agent, token_counter, token_usage, model_name
+
+        model_id = args_text.strip()
+        if not model_id:
+            _print_available_models()
+            return True
+
+        try:
+            agent, token_counter, token_usage, model_name = _build_agent_and_deps(model_override=model_id)
+        except Exception as e:
+            print(f"Could not switch model: {e}")
+            return True
+
+        print("\n𜱜\n𜱟 " + model_name)
+        return True
+
+    def _complete_models(prefix: str) -> list[str]:
+        return filter_prefix(available_models, prefix=prefix)
+
+    commands_registry: list[CommandSpec] = [
+        CommandSpec(
+            name="/clear",
+            usage="/clear",
+            help="Clear the UI and start a new conversation/session.",
+            run=_cmd_clear,
+        ),
+        CommandSpec(
+            name="/help",
+            usage="/help",
+            help="Show this help.",
+            run=_cmd_help,
+        ),
+        CommandSpec(
+            name="/models",
+            usage="/models [<model_id>]",
+            help="List models or switch the active model.",
+            run=_cmd_models,
+            complete_args=_complete_models,
+        ),
+    ]
+
+    def _run_slash_command(text: str) -> bool:
+        split = split_command(text)
+        if split is None:
+            return False
+
+        cmd, rest = split
+        for spec in commands_registry:
+            if spec.name == cmd:
+                return spec.run(rest)
+
+        print(f"Unknown command: {cmd}. Try /help")
+        return True
+
+    # ---- Autocomplete (registry-driven) ----------------------------------
+
     from prompt_toolkit.completion import Completer, Completion
 
-    class _ModelsCompleter(Completer):
+    class _SlashCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
+            split = split_command(text)
 
-            if not text:
+            # Suggest slash commands when starting with '/'.
+            if text.startswith("/"):
+                # If the user is typing just the command token (no spaces yet),
+                # offer command-name completions.
+                # If the user hasn't typed a space yet, we're completing the command name.
+                if " " not in text:
+                    cmd_token = text.strip()
+                    for c in filter_prefix((s.name for s in commands_registry), prefix=cmd_token):
+                        yield Completion(c, start_position=-len(cmd_token))
+                    return
+
+            if split is None:
                 return
 
-            if text.startswith("/models"):
-                # Complete the command itself.
-                if text == "/m" or text == "/mo" or text == "/mod" or text == "/mode" or text == "/model":
-                    yield Completion("/models", start_position=-len(text))
+            cmd, rest = split
+
+            # Complete args.
+            for spec in commands_registry:
+                if spec.name != cmd:
+                    continue
+
+                # If we're still typing the command token, complete the command name.
+                # If no space has been typed yet, complete the command name.
+                if " " not in text:
+                    for c in filter_prefix((s.name for s in commands_registry), prefix=cmd):
+                        yield Completion(c, start_position=-len(cmd))
                     return
 
-                # Complete model ids after `/models `.
-                if text == "/models":
-                    yield Completion("/models ", start_position=0)
-                    return
+                # Otherwise, complete args (if any).
+                if spec.complete_args is not None:
+                    # If the user just typed the space, show all candidates.
+                    prefix = rest
+                    for suggestion in spec.complete_args(prefix):
+                        yield Completion(suggestion, start_position=-len(prefix))
+                return
 
-                if text.startswith("/models "):
-                    prefix = text[len("/models ") :]
-                    for mid in available_models:
-                        if mid.startswith(prefix):
-                            yield Completion(mid, start_position=-len(prefix))
-                    return
-
-            # Otherwise: no completions.
             return
 
-    completer = _ModelsCompleter()
+    completer = _SlashCompleter()
 
     # Preload LiteLLM's pricing table in the background while the user is typing.
     preload_litellm_cost_map()
@@ -311,80 +427,6 @@ def main(argv: list[str] | None = None) -> int:
 
     _install_signal_handler(graceful_exit, cancel_current_turn)
 
-    def _maybe_handle_clear_command(text: str) -> bool:
-        """Handle `/clear`.
-
-        Resets the current conversation and starts a new session (autosave).
-        """
-
-        nonlocal state, autosaver, session_id
-
-        if text.strip() != "/clear":
-            return False
-
-        try:
-            display.clear()
-        except Exception:
-            pass
-
-        # Reset state to a fresh conversation.
-        state = AgentState(
-            messages=[
-                SystemMessage(content=system_string),
-                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
-                SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
-                *(
-                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
-                    if (git_ls := sys_git_ls())
-                    else []
-                ),
-            ],
-            token_usage=token_usage,
-        )
-
-        # New autosave session unless we're in single-shot mode.
-        if not args.single:
-            from src.session_store import SessionAutosaver, new_session_id
-
-            session_id = new_session_id()
-            autosaver = SessionAutosaver(session_id=session_id)
-            _autosave()
-
-        print("\n𜱜\n𜱟 " + model_name)
-        return True
-
-    def _maybe_handle_models_command(text: str) -> bool:
-        # Debugging / test determinism: ensure command is processed before agent.
-        """Handle `/models` commands.
-
-        Returns True if handled (caller should not send to the agent).
-        """
-
-        nonlocal agent, token_counter, token_usage, model_name
-
-        if not text.startswith("/models"):
-            return False
-
-        parts = text.strip().split(maxsplit=1)
-        if len(parts) == 1:
-            _print_available_models()
-            return True
-
-        model_id = parts[1].strip()
-        if not model_id:
-            _print_available_models()
-            return True
-
-        # Rebuild agent + deps using the new model, keep conversation history.
-        try:
-            agent, token_counter, token_usage, model_name = _build_agent_and_deps(model_override=model_id)
-        except Exception as e:
-            print(f"Could not switch model: {e}")
-            return True
-
-        # Make the switch visible to the user, but don't force it into the model context.
-        print("\n𜱜\n𜱟 " + model_name)
-        return True
 
     # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + model_name)
@@ -440,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
-        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
+        while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
                 user_input = _prompt_boxed(session, completer=completer)
@@ -459,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
-        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
+        while _run_slash_command(user_input):
             try:
                 user_input = _prompt_boxed(session, completer=completer)
             except (KeyboardInterrupt, SystemExit):
@@ -544,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
-        while _maybe_handle_clear_command(user_input) or _maybe_handle_models_command(user_input):
+        while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
                 user_input = _prompt_boxed(session, completer=completer)
