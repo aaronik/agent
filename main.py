@@ -525,7 +525,9 @@ def main(argv: list[str] | None = None) -> int:
         autosaver = SessionAutosaver(session_id=session_id)
 
         # Replay prior assistant outputs so the scrollback matches a continuous session.
-        for msg in state.messages:
+        from src.normalize_messages import normalize_for_token_count
+
+        for msg in normalize_for_token_count(state.messages):
             _render_new_output_message(msg)
 
         # Now collect the next user input.
