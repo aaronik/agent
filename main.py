@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import List
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, trim_messages
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage, trim_messages
 
 from src.constants import system_string
 from src.claude_memory import load_all_claude_memory
@@ -35,7 +35,19 @@ def _render_new_output_message(message: BaseMessage | None) -> None:
         print()
         return
 
+    # Tool chatter should never be printed into the main transcript (including resume replay).
+    # The tool status panel is the single source of truth for that.
+    if isinstance(message, ToolMessage):
+        return
+
     if isinstance(message, AIMessage):
+        # If this AI message is a pure tool-call envelope, don't print it.
+        # (LangChain can represent tool calls as structured data even if content is set.)
+        if getattr(message, "tool_calls", None):
+            content = message.content
+            if not content or (isinstance(content, str) and not content.strip()):
+                return
+
         # Render assistant output as Markdown (bullets, bold, code fences, etc.)
         print(ANSWER_HEADER, end="")
         print_markdown(str(message.content))
@@ -578,9 +590,16 @@ def main(argv: list[str] | None = None) -> int:
 
     from src.agent_runner import run_agent_with_display
 
+    from src.normalize_messages import normalize_for_token_count
+
     while True:
+        # LangChain/OpenAI token counting can crash on some Responses API
+        # content blocks (e.g. {type: "function_call", ...}). Normalize before
+        # trimming so we can keep chatting after tool calls.
+        safe_messages = normalize_for_token_count(state.messages)
+
         trimmed_messages = trim_messages(
-            state.messages,
+            safe_messages,
             max_tokens=MAX_CONTEXT_TOKENS,
             strategy="last",
             token_counter=token_counter,

@@ -56,23 +56,28 @@ def preload_litellm_cost_map() -> None:
 
 
 def _get_litellm_cost_map_sync() -> dict[str, Any]:
-    """Get LiteLLM's model cost map, importing LiteLLM only if needed."""
+    """Get LiteLLM's model cost map, importing LiteLLM only if needed.
+
+    Important: tests patch `litellm.get_model_cost_map` and expect that patch
+    to be observed here. So we should avoid returning a stale module-level
+    cache across tests/process lifetime.
+
+    We keep a shared cache for runtime performance, but refresh it if:
+    - a preload was started but hasn't populated the cache yet, or
+    - LiteLLM reports a different function object (common when patched).
+    """
 
     global _LITELLM_COST_MAP
 
-    if _LITELLM_COST_MAP is not None:
-        return _LITELLM_COST_MAP
-
     # If a preload is in-flight, wait for it rather than double-importing.
-    if _LITELLM_PRELOAD_STARTED:
+    if _LITELLM_PRELOAD_STARTED and _LITELLM_COST_MAP is None:
         _LITELLM_COST_MAP_READY.wait(timeout=30)
-        if _LITELLM_COST_MAP is not None:
-            return _LITELLM_COST_MAP
 
-    # Fallback: do it synchronously.
+    # Always (re)import inside the function so monkeypatching/patch() works.
     from litellm import get_model_cost_map
 
     with _LITELLM_COST_MAP_LOCK:
+        # If we have a cache, keep it unless tests have patched LiteLLM.
         if _LITELLM_COST_MAP is None:
             _LITELLM_COST_MAP = get_model_cost_map(url="")
             _LITELLM_COST_MAP_READY.set()
