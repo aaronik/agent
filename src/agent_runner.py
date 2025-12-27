@@ -23,10 +23,10 @@ def extract_result_preview(content: str, max_lines: int = 30, max_line_length: i
     scanned = 0
     for line in lines[: max_lines * 3]:  # Look through more lines to find non-empty ones
         scanned += 1
-        stripped = line.strip()
-        if stripped:
-            # Remove control characters
-            cleaned = "".join(char for char in stripped if char.isprintable())
+        line_has_content = line != ""
+        if line_has_content:
+            # Preserve indentation; only drop non-printing control chars.
+            cleaned = "".join(char for char in line if (char.isprintable() or char in {"\t"}))
             # Truncate each line individually
             if len(cleaned) > max_line_length:
                 cleaned = cleaned[: max_line_length - 3] + "..."
@@ -40,7 +40,7 @@ def extract_result_preview(content: str, max_lines: int = 30, max_line_length: i
 
     # Add a visual truncation indicator if there was more content beyond what
     # we included in the preview.
-    remaining_has_content = any(l.strip() for l in lines[scanned:])
+    remaining_has_content = any(l != "" for l in lines[scanned:])
     if remaining_has_content:
         if preview and not preview.endswith("\n"):
             preview += "\n"

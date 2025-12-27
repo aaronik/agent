@@ -49,10 +49,10 @@ class TestExtractResultPreview(unittest.TestCase):
         self.assertNotIn("\x00", result)
         self.assertNotIn("\x01", result)
 
-    def test_extract_strips_whitespace(self):
-        content = "  Line 1  \n  Line 2  \n  Line 3  "
+    def test_extract_preserves_whitespace(self):
+        content = "  Line 1  \n\tLine 2\t\n  Line 3  "
         result = extract_result_preview(content, max_lines=3)
-        self.assertEqual(result, "Line 1\nLine 2\nLine 3")
+        self.assertEqual(result, "  Line 1  \n\tLine 2\t\n  Line 3  ")
 
     def test_extract_with_mixed_empty_and_content_lines(self):
         content = "\n\nLine 1\nLine 2\n\n\nLine 3\n\n\n"
