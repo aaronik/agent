@@ -231,7 +231,7 @@ class ToolStatusDisplay:
             self._update_live()
 
     def add_communication(self, message: str) -> None:
-        panel = Panel(message, title="Agent Communication", border_style="grey37", padding=(1, 2))
+        panel = Panel(message, title="Agent Communication", title_align="left", border_style="grey37", padding=(1, 2))
 
         if self._live_enabled() and self.live:
             self._clear_live_region()
@@ -335,6 +335,7 @@ class ToolStatusDisplay:
         return Panel(
             Group(*body_parts),
             title=header,
+            title_align="left",
             border_style="grey37",
             padding=(1, 2),
         )
@@ -347,7 +348,7 @@ class ToolStatusDisplay:
             renderables.append(self._tool_panel(tc))
 
         if self._cost_line and renderables:
-            renderables.append(Panel(self._cost_line, title="Running Cost", border_style="grey37", padding=(0, 1)))
+            renderables.append(Panel(self._cost_line, title="Running Cost", title_align="left", border_style="grey37", padding=(0, 1)))
 
         return Group(*renderables)
 
@@ -362,7 +363,7 @@ class ToolStatusDisplay:
 
     def add_diff(self, filename: str, diff_text: str):
         syntax = Syntax(diff_text or "", "diff", theme="native", line_numbers=False)
-        panel = Panel(syntax, title=f"{filename} — Diff", border_style="grey37", padding=(1, 2))
+        panel = Panel(syntax, title=f"{filename} — Diff", title_align="left", border_style="grey37", padding=(1, 2))
 
         if self._live_enabled() and self.live:
             self._clear_live_region()
