@@ -2,6 +2,20 @@
 
 Agent is a highly autonomous AI command line agent.
 
+## Running the CLI in this environment
+
+When the user says “run `agent ...`” in this repo/environment, run the CLI via:
+
+```sh
+python main.py ...
+```
+
+If `python` isn’t found, activate the virtualenv first:
+
+```sh
+source venv/bin/activate
+```
+
 ## Testing Requirements
 
 **CRITICAL: No job is finished until all new functionality is tested and ALL tests are passing.**

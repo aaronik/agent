@@ -176,14 +176,36 @@ class TokenUsage(BaseModel):
         self.completion_tokens = 0
 
         for message in messages:
+            # LangChain may attach usage to either `usage_metadata` (preferred)
+            # or `response_metadata["token_usage"]` depending on provider/API.
+            usage = getattr(message, "usage_metadata", None)
+            if usage is not None:
+                # usage_metadata is often a plain dict in LangChain.
+                if isinstance(usage, dict):
+                    c = usage.get("output_tokens")
+                    p = usage.get("input_tokens")
+                else:
+                    c = getattr(usage, "output_tokens", None)
+                    p = getattr(usage, "input_tokens", None)
+                if c is not None and p is not None:
+                    self.completion_tokens += int(c)
+                    self.prompt_tokens += int(p)
+                    continue
+
             if not message.response_metadata:
                 continue
 
-            c = message.response_metadata["token_usage"]["completion_tokens"]
-            p = message.response_metadata["token_usage"]["prompt_tokens"]
+            token_usage = message.response_metadata.get("token_usage")
+            if not token_usage:
+                continue
 
-            self.completion_tokens += c
-            self.prompt_tokens += p
+            c = token_usage.get("completion_tokens")
+            p = token_usage.get("prompt_tokens")
+            if c is None or p is None:
+                continue
+
+            self.completion_tokens += int(c)
+            self.prompt_tokens += int(p)
 
     def ingest_messages_incremental(self, messages: list[BaseMessage]):
         """Ingest token usage incrementally, avoiding double-counting."""

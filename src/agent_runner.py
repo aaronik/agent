@@ -135,6 +135,29 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200, cancel_toke
 
             if "model" in chunk:
                 messages = chunk["model"].get("messages", [])
+                # Responses API can emit intermediate AIMessage objects whose
+                # content is a list of content-block dicts (reasoning/text/etc).
+                # We only want the final text rendered in the main transcript.
+                if messages:
+                    last = messages[-1]
+                    if isinstance(last, AIMessage) and isinstance(last.content, list):
+                        text_parts: list[str] = []
+                        for block in last.content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                t = block.get("text")
+                                if isinstance(t, str) and t:
+                                    text_parts.append(t)
+                        if text_parts:
+                            # Preserve usage_metadata so cost tracking works.
+                            messages = [
+                                *messages[:-1],
+                                AIMessage(
+                                    content="\n".join(text_parts),
+                                    response_metadata=last.response_metadata,
+                                    additional_kwargs=last.additional_kwargs,
+                                    usage_metadata=getattr(last, "usage_metadata", None),
+                                ),
+                            ]
                 final_messages.extend(messages)
                 process_agent_chunk(messages, tool_call_ids_seen, display)
 

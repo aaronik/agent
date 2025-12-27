@@ -8,6 +8,7 @@ from typing import List
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, trim_messages
 
 from src.constants import system_string
+from src.claude_memory import load_all_claude_memory
 from src.markdown_render import print_markdown
 from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_pwd, sys_uname
 
@@ -87,7 +88,11 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
         pm = parse_model_id(raw_model)
         if pm.provider == "openai":
             model_name = pm.model
-            model = ChatOpenAI(model=model_name)
+            # Codex models (e.g. gpt-5.1-codex-mini) are Responses-only.
+            # To avoid hard failures like:
+            #   "This model is only supported in v1/responses and not in v1/chat/completions."
+            # we opt into Responses API routing.
+            model = ChatOpenAI(model=model_name, use_responses_api=True, stream_usage=True)
             token_counter = model
         else:
             # For now, non-OpenAI providers are supported via an OpenAI-compatible
@@ -267,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         state = AgentState(
             messages=[
                 SystemMessage(content=system_string),
+                SystemMessage(content=load_all_claude_memory()),
                 SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
@@ -513,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         state = AgentState(
             messages=[
                 SystemMessage(content=system_string),
+                SystemMessage(content=load_all_claude_memory()),
                 SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
