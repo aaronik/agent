@@ -39,8 +39,11 @@ def run_shell_command(cmd: str, timeout: int = 30):
 
     """
 
-    # Long running commands will hose the agent, so let's prevent that:
-    cmd = f"timeout {timeout} {cmd}"
+    # Long running commands will hose the agent, so let's prevent that.
+    # IMPORTANT: For interactive/TTY-bound programs, `timeout` may not terminate
+    # the full process tree unless we force a kill after a grace period.
+    # Use `-k` so we always send SIGKILL if SIGTERM doesn't stop it.
+    cmd = f"timeout -k 1 {timeout} {cmd}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     output = format_subproc_result(result)
