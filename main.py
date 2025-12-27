@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import List
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, trim_messages
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, trim_messages
 
 from src.constants import system_string
 from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_ls, sys_pwd, sys_uname
@@ -13,9 +13,28 @@ from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_ls, s
 HUMAN = ""
 ANSWER_HEADER = "\n"
 
+
 # Default model
 MODEL = "gpt-5.2"
 MAX_CONTEXT_TOKENS = 150000
+
+
+def _render_new_output_message(message: BaseMessage | None) -> None:
+    if message is None:
+        print(ANSWER_HEADER, None)
+        return
+
+    # Match existing UX: we print dialogue (user + assistant) but skip system/tool chatter.
+    if isinstance(message, HumanMessage):
+        # Render similar to the prompt but as part of transcript replay.
+        bold_open = "\033[1m"
+        bold_close = "\033[0m"
+        print(f"\n{bold_open}{message.content}{bold_close}")
+        print()
+        return
+
+    if isinstance(message, AIMessage):
+        print(ANSWER_HEADER, message.content)
 
 
 class SimpleTokenCounter:
@@ -104,7 +123,8 @@ def _prompt_boxed(session) -> str:
     style = Style.from_dict(
         {
             # Subtle grey for the prompt prefix.
-            "prompt.box": "fg:ansibrightblack",
+            "prompt.box": "fg:ansibrightblack bold",
+            "": "bold",
         }
     )
 
@@ -145,6 +165,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run single invocation without prompting for more input",
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="__LATEST__",
+        default=None,
+        metavar="ID",
+        help="Resume a saved session by id. If no id is provided, resumes the latest session.",
+    )
     parser.add_argument("query", nargs="*", help="Query to process")
 
     args = parser.parse_args(argv)
@@ -155,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Preload LiteLLM's pricing table in the background while the user is typing.
     preload_litellm_cost_map()
+
+    autosaver = None
 
     def graceful_exit() -> None:
         """Clean up UI and print token usage before exiting."""
@@ -168,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
                 get_tool_status_display().clear()
             except Exception:
                 pass
+        if autosaver is not None:
+            autosaver.close()
         print("Goodbye!")
         raise SystemExit(0)
 
@@ -192,27 +224,72 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("\nNo CLAUDE.md memory files found")
 
-    # Initial user input from command line or prompt
-    if args.query:
-        user_input = " ".join(args.query)
-    else:
-        try:
-            user_input = _prompt_boxed(session)
-        except (KeyboardInterrupt, SystemExit):
-            graceful_exit()
+    # If resuming, load and replay the session *before* collecting new input.
+    # This makes the CLI feel continuous (history appears immediately).
 
-    # Initialize state with typed messages
-    state = AgentState(
-        messages=[
-            SystemMessage(content=system_string),
-            SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
-            SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
-            SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
-            SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
-            HumanMessage(content=user_input),
-        ],
-        token_usage=token_usage,
-    )
+    initial_user_input = " ".join(args.query) if args.query else None
+
+    # Initialize or resume state
+
+    session_id = None
+
+    def _autosave() -> None:
+        if autosaver is None:
+            return
+        autosaver.request_save(state.messages)
+
+    if args.resume is not None and not args.single:
+        from src.session_store import SessionAutosaver, load_messages
+
+        resume_id = None if args.resume == "__LATEST__" else args.resume
+        session_id, loaded_messages = load_messages(resume_id)
+        state = AgentState(messages=loaded_messages, token_usage=token_usage)
+        autosaver = SessionAutosaver(session_id=session_id)
+
+        # Replay prior assistant outputs so the scrollback matches a continuous session.
+        for msg in state.messages:
+            _render_new_output_message(msg)
+
+        # Now collect the next user input.
+        if initial_user_input is not None:
+            user_input = initial_user_input
+        else:
+            try:
+                user_input = _prompt_boxed(session)
+            except (KeyboardInterrupt, SystemExit):
+                graceful_exit()
+
+        state.messages.append(HumanMessage(content=user_input))
+        _autosave()
+    else:
+        # Initial user input from command line or prompt
+        if initial_user_input is not None:
+            user_input = initial_user_input
+        else:
+            try:
+                user_input = _prompt_boxed(session)
+            except (KeyboardInterrupt, SystemExit):
+                graceful_exit()
+
+        state = AgentState(
+            messages=[
+                SystemMessage(content=system_string),
+                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
+                SystemMessage(content=f"[SYSTEM INFO] ls -l: {sys_ls()}"),
+                SystemMessage(content=f"[SYSTEM INFO] git ls-files: {sys_git_ls()}"),
+                HumanMessage(content=user_input),
+            ],
+            token_usage=token_usage,
+        )
+
+        if not args.single:
+            from src.session_store import SessionAutosaver, new_session_id
+
+            session_id = new_session_id()
+            autosaver = SessionAutosaver(session_id=session_id)
+            _autosave()
+
 
     from src.agent_runner import run_agent_with_display
 
@@ -232,10 +309,11 @@ def main(argv: list[str] | None = None) -> int:
         new_messages = run_agent_with_display(agent, trimmed_state)
 
         state = AgentState(messages=state.messages + new_messages, token_usage=token_usage)
+        _autosave()
 
         output = state.messages[-1] if state.messages else None
 
-        print(ANSWER_HEADER, output.content if output else None)
+        _render_new_output_message(output)
 
         # Token usage: the bottom box is the single source of truth.
         token_usage.ingest_from_messages(state.messages)
@@ -251,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             graceful_exit()
 
         state.messages.append(HumanMessage(content=user_input))
+        _autosave()
 
     return 0
 
