@@ -1,6 +1,7 @@
 from typing import Dict, Optional, Any
 from enum import Enum
 from dataclasses import dataclass
+import os
 
 from rich.console import Console
 from rich.live import Live
@@ -52,7 +53,6 @@ def _extract_unified_diff(text: str) -> str | None:
     if marker in text:
         return text.split(marker, 1)[1].strip("\n") or None
 
-    # If the result itself is already a diff, detect common headers.
     stripped = text.lstrip()
     if stripped.startswith("--- ") and "\n+++ " in stripped:
         return stripped.strip("\n")
@@ -73,78 +73,121 @@ def _remove_diff_from_result(text: str) -> str:
 class ToolStatusDisplay:
     def __init__(self):
         self.console = Console()
-        # Sequence of tool batches and communications.
-        # Keeping it as a sequence preserves ordering across streaming.
-        self.display_sequence: list[dict] = []
+
+        # Calls currently shown in the live updating area.
+        self._active_tool_calls: dict[str, ToolCall] = {}
+
         self.live: Optional[Live] = None
         self._cost_line: Optional[str] = None
 
-    def start_live(self):
-        """Start the live display"""
-        if not self.live:
-            # NOTE: Rich Live uses an alternate screen by default. When the
-            # renderable exceeds the available terminal height, Rich shows an
-            # overflow indicator (often "…" / red dots) and the output stops
-            # scrolling until Live is stopped.
-            #
-            # We want normal terminal scrollback behavior so users can keep
-            # scrolling while many tool panels are emitted.
+    def _live_enabled(self) -> bool:
+        """Return True if Rich Live updates should be used.
+
+        Disable via env var to make output append-only.
+
+        Set AGENT_NO_LIVE=1 to disable.
+        """
+
+        return os.getenv("AGENT_NO_LIVE", "").strip().lower() not in {"1", "true", "yes", "on"}
+
+    def start_live(self) -> None:
+        if not self._live_enabled():
+            return
+
+        if self.live is None:
+            # Keep Live running in normal screen mode.
             self.live = Live(
                 self._create_display(),
                 console=self.console,
                 refresh_per_second=10,
                 transient=False,
-                # Keep normal scrollback (no alternate screen), and don't show
-                # the overflow ellipsis indicator when the renderable exceeds
-                # terminal height.
                 screen=False,
                 vertical_overflow="visible",
                 auto_refresh=True,
             )
             self.live.start()
 
-    def register_calls(self, tool_calls: list):
-        """Register tool calls from an AIMessage"""
-        # Find or create current tool batch
-        if not self.display_sequence or self.display_sequence[-1]["type"] != "tools":
-            self.display_sequence.append({"type": "tools", "tool_calls": {}})
+    def _update_live(self) -> None:
+        if self.live:
+            self.live.update(self._create_display())
 
-        current = self.display_sequence[-1]
+    def _clear_live_region(self) -> None:
+        """Clear the current live region so it doesn't remain in scrollback."""
+        if self.live:
+            # Render an empty string into the live region, then refresh.
+            self.live.update(Text(""))
+            try:
+                self.live.refresh()
+            except Exception:
+                pass
+
+    def register_calls(self, tool_calls: list) -> None:
         for call in tool_calls:
-            current["tool_calls"][call["id"]] = ToolCall(
+            tc = ToolCall(
                 id=call["id"],
                 name=call["name"],
                 args=call["args"],
                 status=ToolStatus.PENDING,
                 result=None,
             )
+            self._active_tool_calls[tc.id] = tc
+
+        if self._live_enabled():
+            self.start_live()
+            self._update_live()
+        else:
+            for tc in self._active_tool_calls.values():
+                self.console.print(self._tool_panel(tc))
+
+    def update_status(self, tool_call_id: str, status: ToolStatus, result: Optional[str] = None) -> None:
+        tc = self._active_tool_calls.get(tool_call_id)
+        if tc is None:
+            return
+
+        tc.status = status
+        if result is not None and result != "":
+            tc.result = result
+
+        if not self._live_enabled():
+            self.console.print(self._tool_panel(tc))
+            return
 
         self.start_live()
-        if self.live:
-            self.live.update(self._create_display())
 
-    def update_status(self, tool_call_id: str, status: ToolStatus, result: Optional[str] = None):
-        """Update the status of a tool call"""
-        for item in self.display_sequence:
-            if item.get("type") == "tools" and tool_call_id in item.get("tool_calls", {}):
-                tc: ToolCall = item["tool_calls"][tool_call_id]
-                tc.status = status
-                if result is not None and result != "":
-                    tc.result = result
+        if status in {ToolStatus.DONE, ToolStatus.ERROR}:
+            # 1) Show final state in the live region briefly.
+            self._update_live()
+            if self.live:
+                try:
+                    self.live.refresh()
+                except Exception:
+                    pass
 
-                if self.live:
-                    self.live.update(self._create_display())
-                break
+            # 2) Remove from live set and clear the live region so the running
+            #    panel doesn't get "left behind" in scrollback.
+            self._active_tool_calls.pop(tool_call_id, None)
+            self._update_live()
+            self._clear_live_region()
 
-    def add_communication(self, message: str):
-        """Add a communication message to the display"""
-        self.display_sequence.append({"type": "communication", "message": message})
+            # 3) Print the final panel exactly once (append-only scrollback).
+            self.console.print(self._tool_panel(tc))
 
-        if self.live:
-            self.live.update(self._create_display())
+            # 4) Continue live display if there are other active tools.
+            self._update_live()
+        else:
+            self._update_live()
 
-    def update_cost(self, token_usage):
-        """Update the running cost line shown in the display."""
+    def add_communication(self, message: str) -> None:
+        panel = Panel(message, title="Agent Communication", border_style="grey37", padding=(1, 2))
+
+        if self._live_enabled() and self.live:
+            self._clear_live_region()
+            self.console.print(panel)
+            self._update_live()
+        else:
+            self.console.print(panel)
+
+    def update_cost(self, token_usage) -> None:
         try:
             input_cost = token_usage.prompt_cost()
             output_cost = token_usage.completion_cost()
@@ -153,30 +196,19 @@ class ToolStatusDisplay:
         except Exception:
             self._cost_line = None
 
-        if self.live:
-            self.live.update(self._create_display())
+        self._update_live()
 
-    def clear(self):
-        """Clear the display and reset state"""
+    def clear(self) -> None:
         if self.live:
             self.live.stop()
             self.live = None
 
-        self.display_sequence = []
+        self._active_tool_calls = {}
         self._cost_line = None
 
     def _tool_panel(self, tc: ToolCall):
-        """Render a single tool call.
-
-        Most tools are panels. The `communicate` tool is rendered as unboxed,
-        muted text so it reads like an aside but still maintains correct
-        ordering in the tool stream.
-        """
-        # Special-case: communicate is basically a UI note. Render it inline.
         if tc.name == "communicate":
             msg = (tc.result or "").strip("\n")
-            # No prefix: the styling is the differentiator.
-            # Italic support varies by terminal, but Rich will degrade gracefully.
             return Text(escape(msg), style="italic dim")
 
         icon, color = tc.status.value
@@ -184,11 +216,7 @@ class ToolStatusDisplay:
         header.append(tc.name, style="cyan")
         header.append("  ")
 
-        # If the tool output includes a captured exit code marker from
-        # run_shell_command, surface it in the title for quick scanning.
         exit_code: int | None = None
-        # Parse exit code from the raw tool output if present.
-        # run_shell_command appends a marker: "(exit code: X)".
         raw_result = tc.result or ""
         if "(exit code:" in raw_result:
             try:
@@ -197,9 +225,6 @@ class ToolStatusDisplay:
             except Exception:
                 exit_code = None
 
-        # Don't show the exit-code marker in the panel body.
-        # NOTE: We must not mutate tc.result here, because we still want the
-        # raw marker available to other consumers (and to preserve state).
         result_text = raw_result
         if "(exit code:" in result_text:
             result_text = result_text.split("(exit code:", 1)[0].rstrip()
@@ -228,7 +253,6 @@ class ToolStatusDisplay:
             body_parts.append(Text(escape(result_text), style="white"))
 
         if diff_text:
-            # Diff should feel like part of the tool output, not a separate event.
             body_parts.append(Syntax(diff_text, "diff", theme="native", line_numbers=False))
 
         if not body_parts:
@@ -244,71 +268,40 @@ class ToolStatusDisplay:
         )
 
     def _create_display(self):
-        """Create the complete display."""
         from rich.console import Group
 
-        tool_renderables: list[Any] = []
-        comm_renderables: list[Any] = []
-
-        for item in self.display_sequence:
-            if item.get("type") == "tools":
-                for tc in item.get("tool_calls", {}).values():
-                    tool_renderables.append(self._tool_panel(tc))
-            else:  # communication
-                if "renderable" in item:
-                    comm_renderables.append(item["renderable"])
-                else:
-                    comm_renderables.append(
-                        Panel(
-                            item["message"],
-                            title="Agent Communication",
-                            border_style="grey37",
-                            padding=(1, 2),
-                        )
-                    )
-
         renderables: list[Any] = []
-        renderables.extend(tool_renderables)
+        for tc in self._active_tool_calls.values():
+            renderables.append(self._tool_panel(tc))
 
-        if self._cost_line:
+        if self._cost_line and renderables:
             renderables.append(Panel(self._cost_line, title="Running Cost", border_style="grey37", padding=(0, 1)))
-
-        renderables.extend(comm_renderables)
 
         return Group(*renderables)
 
-    def finalize(self):
-        """Finalize the display (no more updates)"""
+    def finalize(self) -> None:
         if self.live:
+            self._clear_live_region()
             self.live.stop()
             self.live = None
 
-        if self.display_sequence:
-            self.console.print()
-
     def get_tool_call(self, tool_call_id: str):
-        """Return the ToolCall object for the given id or None"""
-        for item in self.display_sequence:
-            if item.get("type") == "tools":
-                if tool_call_id in item.get("tool_calls", {}):
-                    return item["tool_calls"][tool_call_id]
-        return None
+        return self._active_tool_calls.get(tool_call_id)
 
     def add_diff(self, filename: str, diff_text: str):
-        """Add a rich diff panel to the display.
-
-        Deprecated directionally: prefer embedding diffs in the tool panel.
-        Kept for backwards compatibility with tool implementations.
-        """
         syntax = Syntax(diff_text or "", "diff", theme="native", line_numbers=False)
         panel = Panel(syntax, title=f"{filename} — Diff", border_style="grey37", padding=(1, 2))
-        self.display_sequence.append({"type": "communication", "renderable": panel})
+
+        if self._live_enabled() and self.live:
+            self._clear_live_region()
+            self.console.print(panel)
+            self._update_live()
+        else:
+            self.console.print(panel)
 
 
-# Global instance
 _display = ToolStatusDisplay()
 
 
 def get_tool_status_display() -> ToolStatusDisplay:
-    """Get the global tool status display instance"""
     return _display

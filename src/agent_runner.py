@@ -66,15 +66,11 @@ def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str
 
         # Handle tool results in ToolMessage
         elif isinstance(msg, ToolMessage):
-            # For search_replace we want the full diff visible (no preview
-            # truncation), since that's the main value of the tool.
             if getattr(msg, "name", None) == "search_replace":
                 preview = msg.content if isinstance(msg.content, str) else ""
             else:
                 preview = extract_result_preview(msg.content)
 
-            # If the tool indicates a non-zero exit code, show it as an error.
-            # run_shell_command appends "(exit code: X)" on failure.
             if isinstance(msg.content, str) and "(exit code:" in msg.content:
                 try:
                     code_str = msg.content.split("(exit code:", 1)[1].split(")", 1)[0].strip()
@@ -83,9 +79,6 @@ def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str
                     code = None
 
                 if code is not None and code != 0:
-                    # Preserve the raw content (with exit-code marker) so the
-                    # panel title can show `Done (X)`. The preview function
-                    # hides the marker from the panel body.
                     display.update_status(msg.tool_call_id, ToolStatus.ERROR, msg.content)
                 else:
                     display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
@@ -95,25 +88,14 @@ def process_agent_chunk(messages: List[BaseMessage], tool_call_ids_seen: Set[str
 
 def process_tools_chunk(messages: List[BaseMessage], display):
     """Process messages from the tools node."""
-    # Mark pending tools as running
-    for item in display.display_sequence:
-        if item["type"] == "tools":
-            for tool_id, tool_call in item["tool_calls"].items():
-                if tool_call.status == ToolStatus.PENDING:
-                    display.update_status(tool_id, ToolStatus.RUNNING)
-
-    # Process tool results
+    # Mark pending tools as running.
     for msg in messages:
         if isinstance(msg, ToolMessage):
-            # For search_replace we want the full diff visible (no preview
-            # truncation), since that's the main value of the tool.
             if getattr(msg, "name", None) == "search_replace":
                 preview = msg.content if isinstance(msg.content, str) else ""
             else:
                 preview = extract_result_preview(msg.content)
 
-            # If the tool indicates a non-zero exit code, show it as an error.
-            # run_shell_command appends "(exit code: X)" on failure.
             if isinstance(msg.content, str) and "(exit code:" in msg.content:
                 try:
                     code_str = msg.content.split("(exit code:", 1)[1].split(")", 1)[0].strip()
@@ -122,9 +104,6 @@ def process_tools_chunk(messages: List[BaseMessage], display):
                     code = None
 
                 if code is not None and code != 0:
-                    # Preserve the raw content (with exit-code marker) so the
-                    # panel title can show `Done (X)`. The preview function
-                    # hides the marker from the panel body.
                     display.update_status(msg.tool_call_id, ToolStatus.ERROR, msg.content)
                 else:
                     display.update_status(msg.tool_call_id, ToolStatus.DONE, preview)
@@ -144,7 +123,6 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200, cancel_toke
     tool_call_ids_seen = set()
 
     # Convert state to the format expected by create_agent
-    # Handle both dict and AgentState object
     if isinstance(state, dict):
         agent_input = state
     else:
@@ -165,7 +143,6 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200, cancel_toke
                 final_messages.extend(messages)
                 process_tools_chunk(messages, display)
     except AgentCancelled:
-        # Best-effort clean UI state; return to prompt without exiting the app.
         display.finalize()
         return []
 

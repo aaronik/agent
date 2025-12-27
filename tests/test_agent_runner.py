@@ -111,21 +111,10 @@ class TestProcessToolsChunk(unittest.TestCase):
         self.display = Mock()
 
     def test_marks_pending_tools_as_running(self):
-        pending_tool = Mock()
-        pending_tool.status = ToolStatus.PENDING
-
-        self.display.display_sequence = [
-            {
-                "type": "tools",
-                "tool_calls": {
-                    "call_1": pending_tool,
-                },
-            }
-        ]
-
+        # Pending->running transition is now handled in process_agent_chunk when
+        # tool calls are registered. process_tools_chunk only applies tool results.
         process_tools_chunk([], self.display)
-
-        self.display.update_status.assert_called_once_with("call_1", ToolStatus.RUNNING)
+        self.display.update_status.assert_not_called()
 
     def test_processes_tool_results(self):
         msg = ToolMessage(content="Result content\nSecond line", tool_call_id="call_1")
