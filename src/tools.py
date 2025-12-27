@@ -221,13 +221,22 @@ def read_file(path: str):
     Args:
         path - relative path, ex. ./file.ext, or absolute path.
             Must contain folder, even if just ./
+
+    Notes:
+        We prefix the content with a machine-parsable marker including the
+        file path so the CLI renderer can apply syntax highlighting based on
+        the extension.
+
+        We also do not strip newlines; the display layer should preserve the
+        content as-is.
     """
 
     path = sanitize_path(path)
 
     try:
-        with open(path, 'r', encoding='utf-8') as file:
-            return file.read()
+        with open(path, "r", encoding="utf-8") as file:
+            content = file.read()
+        return f"[FILE]: {path}\n" + content
     except FileNotFoundError:
         return f"file not found: {path}"
     except IOError as e:

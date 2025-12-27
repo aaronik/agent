@@ -53,7 +53,7 @@ class TestFileOperations(unittest.TestCase):
         with open(self.test_file, 'w') as f:
             f.write("Test content")
         result = read_file(self.test_file)
-        self.assertEqual(result, "Test content")
+        self.assertEqual(result, f"[FILE]: {self.test_file}\nTest content")
 
     def test_read_file_not_found(self):
         result = read_file(os.path.join(self.test_dir, "nonexistent.txt"))
@@ -64,7 +64,7 @@ class TestFileOperations(unittest.TestCase):
         write_result = write_file(self.test_file, content)
         self.assertTrue(write_result.startswith("Success"), write_result)
         read_result = read_file(self.test_file)
-        self.assertEqual(read_result, content)
+        self.assertEqual(read_result, f"[FILE]: {self.test_file}\n" + content)
 
 
 class TestRunShellCommand(unittest.TestCase):

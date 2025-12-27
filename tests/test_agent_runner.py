@@ -24,7 +24,8 @@ class TestExtractResultPreview(unittest.TestCase):
     def test_extract_with_empty_lines(self):
         content = "\nLine 1\n\nLine 2\n\nLine 3\n"
         result = extract_result_preview(content, max_lines=3)
-        self.assertEqual(result, "Line 1\nLine 2\nLine 3")
+        # Preserve blank lines between content for accurate terminal-like output.
+        self.assertEqual(result, "Line 1\n\nLine 2\n\nLine 3")
 
     def test_extract_long_line_truncation(self):
         long_line = "x" * 100
@@ -57,6 +58,7 @@ class TestExtractResultPreview(unittest.TestCase):
     def test_extract_with_mixed_empty_and_content_lines(self):
         content = "\n\nLine 1\nLine 2\n\n\nLine 3\n\n\n"
         result = extract_result_preview(content, max_lines=2)
+        # No trailing blank line right before truncation marker.
         self.assertEqual(result, "Line 1\nLine 2\n…")
 
 

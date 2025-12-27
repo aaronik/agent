@@ -6,43 +6,67 @@ from src.tool_status_display import get_tool_status_display, ToolStatus
 
 
 def extract_result_preview(content: str, max_lines: int = 30, max_line_length: int = 120) -> str:
-    """Extract a preview from tool result content with multiline support."""
+    """Extract a preview from tool result content with multiline support.
+
+    This is used for *tool panel* previews in the CLI.
+
+    Goals:
+    - Preserve blank lines between content (so file output / logs look right).
+    - Drop leading/trailing blank lines (keeps panels compact).
+    - Cap by max_lines of non-empty lines.
+    """
     if not isinstance(content, str):
         return ""
 
     # Hide the internal exit-code marker from the visible preview.
-    # The display title will still surface it.
-    content = content.replace("(exit code:", "(exit code:")
     if "(exit code:" in content:
         content = content.split("(exit code:", 1)[0].rstrip()
 
-    # Get first N non-empty lines
-    lines = content.split("\n")
-    preview_lines: list[str] = []
+    raw_lines = content.split("\n")
 
-    scanned = 0
-    for line in lines[: max_lines * 3]:  # Look through more lines to find non-empty ones
-        scanned += 1
-        line_has_content = line != ""
-        if line_has_content:
-            # Preserve indentation; only drop non-printing control chars.
-            cleaned = "".join(char for char in line if (char.isprintable() or char in {"\t"}))
-            # Truncate each line individually
-            if len(cleaned) > max_line_length:
-                cleaned = cleaned[: max_line_length - 3] + "..."
-            preview_lines.append(cleaned)
-
-        if len(preview_lines) >= max_lines:
+    # Find first/last non-empty line to drop leading/trailing blank lines.
+    first_non_empty = None
+    last_non_empty = None
+    for i, line in enumerate(raw_lines):
+        if line != "":
+            first_non_empty = i
+            break
+    for i in range(len(raw_lines) - 1, -1, -1):
+        if raw_lines[i] != "":
+            last_non_empty = i
             break
 
-    # Join with actual newlines for multiline display
+    if first_non_empty is None or last_non_empty is None:
+        return ""
+
+    lines = raw_lines[first_non_empty : last_non_empty + 1]
+
+    preview_lines: list[str] = []
+    non_empty_count = 0
+
+    for line in lines:
+        # If we've already collected max_lines non-empty lines, stop *before*
+        # adding any further lines (including blank lines) so we don't end up
+        # with a stray blank line right before the truncation marker.
+        if non_empty_count >= max_lines:
+            break
+
+        if line != "":
+            non_empty_count += 1
+
+        cleaned = "".join(char for char in line if (char.isprintable() or char in {"\t"}))
+        if len(cleaned) > max_line_length:
+            cleaned = cleaned[: max_line_length - 3] + "..."
+        preview_lines.append(cleaned)
+
+    # Determine truncation: any remaining non-empty content after we stopped.
+    truncated = any(l != "" for l in lines[len(preview_lines) :])
+
     preview = "\n".join(preview_lines)
 
-    # Add a visual truncation indicator if there was more content beyond what
-    # we included in the preview.
-    remaining_has_content = any(l != "" for l in lines[scanned:])
-    if remaining_has_content:
-        if preview and not preview.endswith("\n"):
+    if truncated:
+        preview = preview.rstrip("\n")
+        if preview:
             preview += "\n"
         preview += "…"
 

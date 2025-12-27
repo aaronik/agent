@@ -70,6 +70,59 @@ def _remove_diff_from_result(text: str) -> str:
     return text
 
 
+def _extract_file_marker(text: str) -> tuple[str | None, str]:
+    """Extract a [FILE]: <path> marker from tool output.
+
+    Returns:
+        (path, remainder_text)
+    """
+
+    if not text:
+        return None, ""
+
+    marker = "[FILE]: "
+    if text.startswith(marker):
+        rest = text[len(marker):]
+        if "\n" in rest:
+            path, remainder = rest.split("\n", 1)
+            return path.strip(), remainder
+        return rest.strip(), ""
+
+    return None, text
+
+
+def _guess_lexer_from_path(path: str) -> str:
+    """Best-effort lexer name based on file extension."""
+
+    _, ext = os.path.splitext(path.lower())
+
+    # Common cases we hit in this repo.
+    if ext in {".py"}:
+        return "python"
+    if ext in {".md", ".markdown"}:
+        return "markdown"
+    if ext in {".js"}:
+        return "javascript"
+    if ext in {".ts"}:
+        return "typescript"
+    if ext in {".json"}:
+        return "json"
+    if ext in {".yml", ".yaml"}:
+        return "yaml"
+    if ext in {".toml"}:
+        return "toml"
+    if ext in {".sh", ".bash", ".zsh"}:
+        return "bash"
+    if ext in {".html", ".htm"}:
+        return "html"
+    if ext in {".css"}:
+        return "css"
+    if ext in {".diff", ".patch"}:
+        return "diff"
+
+    return "text"
+
+
 class ToolStatusDisplay:
     def __init__(self):
         self.console = Console()
@@ -249,7 +302,26 @@ class ToolStatusDisplay:
         if diff_text:
             result_text = _remove_diff_from_result(result_text)
 
-        if result_text.strip():
+        file_path_marker, result_text = _extract_file_marker(result_text)
+
+        if tc.name == "read_file":
+            file_path = file_path_marker or tc.args.get("path")
+            if isinstance(file_path, str) and file_path:
+                lexer_name = _guess_lexer_from_path(file_path)
+                body_parts.append(
+                    Syntax(
+                        result_text,
+                        lexer_name,
+                        theme="native",
+                        line_numbers=False,
+                        word_wrap=False,
+                        code_width=None,
+                        tab_size=4,
+                    )
+                )
+            elif result_text:
+                body_parts.append(Text(escape(result_text), style="white"))
+        elif result_text:
             body_parts.append(Text(escape(result_text), style="white"))
 
         if diff_text:
