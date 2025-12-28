@@ -194,15 +194,37 @@ def _reset_prompt_history(session) -> None:
     session.history = FileHistory(history_path)
 
 
-def _prompt_boxed(session, *, completer=None) -> str:
-    # Add vertical breathing room so the prompt isn't flush against prior panels.
-    # Kept small and theme-independent (just blank lines).
+def _format_cost_and_context_line(*, state: AgentState, token_counter, max_context_tokens: int) -> str:
+    # Running cost from state.token_usage (kept up-to-date after each turn).
+    tu = state.token_usage
+    total_cost = 0.0
+    if tu is not None:
+        total = getattr(tu, "total_cost", None)
+        if callable(total):
+            try:
+                total_cost = float(total())
+            except Exception:
+                total_cost = 0.0
+
+    # Remaining context based on *current* message list.
+    try:
+        used = int(token_counter.get_num_tokens_from_messages(state.messages))
+    except Exception:
+        used = 0
+
+    remaining = max(0, int(max_context_tokens) - used)
+    pct = 0
+    if max_context_tokens > 0:
+        pct = max(0, min(100, int(round(remaining / max_context_tokens * 100))))
+
+    return f"Cost: ${total_cost:.4f}   Context remaining: {pct}% ({remaining:,} tokens)"
+
+
+def _prompt_boxed(session, *, completer=None, state: AgentState | None = None, token_counter=None, **_ignored) -> str:
     """Prompt for input using prompt_toolkit with a simple ASCII "box" prefix.
 
-    We intentionally avoid background-color tricks here because they can become
-    invisible depending on terminal theme. This stays readable everywhere.
-
     Visual:
+        Cost: $0.0123   Context remaining: 87% (130,000 tokens)
         [ > your input…
     """
 
@@ -213,30 +235,43 @@ def _prompt_boxed(session, *, completer=None) -> str:
         {
             # Subtle grey for the prompt prefix.
             "prompt.box": "fg:ansibrightblack bold",
+            # Muted grey for the status line above the prompt.
+            "prompt.meta": "fg:ansibrightblack",
             "": "bold",
         }
     )
 
-    # Leading newlines act like a top margin for the input area.
-    prompt = FormattedText(
-        [
-            ("", "\n"),
-            ("class:prompt.box", "[ > "),
-        ]
-    )
+    meta_line = ""
+    if state is not None and token_counter is not None:
+        meta_line = _format_cost_and_context_line(
+            state=state,
+            token_counter=token_counter,
+            max_context_tokens=MAX_CONTEXT_TOKENS,
+        )
 
-    # Prevent other threads (tool panel updates, etc.) from writing to stdout
-    # while we're editing input.
+    # Leading newlines act like a top margin for the input area.
+    prompt_parts: list[tuple[str, str]] = [("", "\n")]
+    if meta_line:
+        prompt_parts.extend(
+            [
+                ("class:prompt.meta", meta_line),
+                ("", "\n"),
+            ]
+        )
+    prompt_parts.append(("class:prompt.box", "[ > "))
+
+    prompt = FormattedText(prompt_parts)
+
     from prompt_toolkit.patch_stdout import patch_stdout
 
     with patch_stdout(raw=True):
         text = session.prompt(
-        prompt,
-        style=style,
-        completer=completer,
-        complete_while_typing=True,
-    )
-    # Small bottom margin so the next rendered output doesn't collide visually.
+            prompt,
+            style=style,
+            completer=completer,
+            complete_while_typing=True,
+        )
+
     print()
     return text
 
@@ -326,6 +361,23 @@ def main(argv: list[str] | None = None) -> int:
 
         _reset_prompt_history(session)
 
+        # Reset both message history (for context) and running usage (for cost).
+        # Also reset incremental token ingestion bookkeeping so we don't "stick"
+        # to a previous session after /clear.
+        token_usage.prompt_tokens = 0
+        token_usage.completion_tokens = 0
+        token_usage._seen_message_ids = set()  # type: ignore[attr-defined]
+
+        # Some TokenUsage implementations (tests/mocks, or future incremental
+        # ingesters) may also keep their own cached state. Clear it best-effort.
+        # This keeps the rendered prompt meta line (Cost: $...) correct.
+        for attr in ("_cached_total_cost", "_cached_cost", "_cost_cache"):
+            if hasattr(token_usage, attr):
+                try:
+                    setattr(token_usage, attr, None)
+                except Exception:
+                    pass
+
         state = AgentState(
             messages=[
                 SystemMessage(content=system_string),
@@ -382,8 +434,8 @@ def main(argv: list[str] | None = None) -> int:
 
         arg = args_text.strip()
 
-        # Allow completions like "<session_id>	<preview>"; only the id is meaningful.
-        arg_id = arg.split("	", 1)[0].strip()
+        # Allow completions like "<session_id>\t<preview>"; only the id is meaningful.
+        arg_id = arg.split("\t", 1)[0].strip()
 
         resume_id = None
         if arg_id and arg_id != "latest":
@@ -397,6 +449,13 @@ def main(argv: list[str] | None = None) -> int:
 
         session_id = new_session_id
         state = AgentState(messages=loaded_messages, token_usage=token_usage)
+
+        # Recompute running usage from the resumed transcript so the prompt meta
+        # (cost line) is correct before the next prompt.
+        try:
+            token_usage.ingest_from_messages(state.messages)
+        except Exception:
+            pass
 
         # Reset prompt history to just the resumed conversation.
         _reset_prompt_history(session)
@@ -603,6 +662,13 @@ def main(argv: list[str] | None = None) -> int:
         resume_id = None if args.resume == "__LATEST__" else args.resume
         session_id, loaded_messages = load_messages(resume_id)
         state = AgentState(messages=loaded_messages, token_usage=token_usage)
+
+        # Recompute running usage from the resumed transcript so the prompt meta
+        # (cost line) is correct before the next prompt.
+        try:
+            token_usage.ingest_from_messages(state.messages)
+        except Exception:
+            pass
         _prefill_history_from_messages(session, state.messages)
         autosaver = None
         if not args.single:
@@ -624,20 +690,31 @@ def main(argv: list[str] | None = None) -> int:
         for msg in normalize_for_token_count(state.messages):
             _render_new_output_message(msg)
 
+        # Ensure meta line has up-to-date running cost after resume.
+        try:
+            token_usage.ingest_from_messages(state.messages)
+        except Exception:
+            pass
+
+        # If the resumed session ended with tool messages only (or otherwise no
+        # assistant "content" message), the prior loop state could have been
+        # trimmed. Ensure we recompute prompt meta against the *resumed* messages.
+        # (The meta line is rendered only when we call _prompt_boxed.)
+
         # Now collect the next user input.
         if initial_user_input is not None:
             user_input = initial_user_input
             _append_string_to_history(session, user_input)
         else:
             try:
-                user_input = _prompt_boxed(session, completer=completer)
+                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session, completer=completer)
+                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -649,14 +726,17 @@ def main(argv: list[str] | None = None) -> int:
             user_input = initial_user_input
             _append_string_to_history(session, user_input)
         else:
+            # Dummy state for first prompt line (no cost yet).
+            dummy_state = AgentState(messages=[], token_usage=token_usage)
             try:
-                user_input = _prompt_boxed(session, completer=completer)
+                user_input = _prompt_boxed(session, completer=completer, state=dummy_state, token_counter=token_counter)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _run_slash_command(user_input):
             try:
-                user_input = _prompt_boxed(session, completer=completer)
+                dummy_state = AgentState(messages=[], token_usage=token_usage)
+                user_input = _prompt_boxed(session, completer=completer, state=dummy_state, token_counter=token_counter)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -736,23 +816,21 @@ def main(argv: list[str] | None = None) -> int:
 
         _render_new_output_message(output)
 
-        # Token usage: the bottom box is the single source of truth.
+        # Keep token usage up to date for the prompt meta line.
         token_usage.ingest_from_messages(state.messages)
-        print()
-        token_usage.print_panel()
 
         if args.single:
             break
 
         try:
-            user_input = _prompt_boxed(session, completer=completer)
+            user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
         while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session, completer=completer)
+                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
