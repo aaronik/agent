@@ -29,6 +29,8 @@ def _allow_prompt_boxed_extra_kwargs(monkeypatch: pytest.MonkeyPatch):
                 def _wrapper(*w_args, **w_kwargs):
                     w_kwargs.pop("state", None)
                     w_kwargs.pop("token_counter", None)
+                    w_kwargs.pop("model_name", None)
+                    w_kwargs.pop("max_context_tokens", None)
                     return value(*w_args, **w_kwargs)
 
                 return orig_setattr(obj, name, _wrapper, *args, **kwargs)

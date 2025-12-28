@@ -3,6 +3,7 @@ from typing import Set, List
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 
 from src.tool_status_display import get_tool_status_display, ToolStatus
+from src.model_context_cache import get_model_context_cache
 
 
 def extract_result_preview(content: str, max_lines: int = 30, max_line_length: int = 120) -> str:
@@ -183,6 +184,28 @@ def run_agent_with_display(agent, state, recursion_limit: int = 200, cancel_toke
                                 ),
                             ]
                 final_messages.extend(messages)
+
+                # Opportunistically learn model context window from response metadata.
+                # (Some providers may include max_context_tokens / context_window / etc.)
+                try:
+                    cache = get_model_context_cache()
+                    for m in messages:
+                        if not isinstance(m, AIMessage):
+                            continue
+                        md = getattr(m, "response_metadata", None) or {}
+                        if not isinstance(md, dict):
+                            continue
+                        for k in ("max_context_tokens", "context_window", "context_length", "max_tokens"):
+                            v = md.get(k)
+                            if isinstance(v, int) and v > 0:
+                                provider = "openai"
+                                model_name = md.get("model_name") or md.get("model") or ""
+                                if isinstance(model_name, str) and model_name:
+                                    cache.set(provider=provider, model=model_name, max_context_tokens=v)
+                                break
+                except Exception:
+                    pass
+
                 process_agent_chunk(messages, tool_call_ids_seen, display)
 
             elif "tools" in chunk:

@@ -18,7 +18,9 @@ ANSWER_HEADER = "\n"
 
 # Default model
 MODEL = "gpt-5.2"
-MAX_CONTEXT_TOKENS = 150000
+DEFAULT_MAX_CONTEXT_TOKENS = 16_384
+# Backwards-compatible constant used by older tests/callers.
+MAX_CONTEXT_TOKENS = DEFAULT_MAX_CONTEXT_TOKENS
 
 
 def _render_new_output_message(message: BaseMessage | None, *, pt_print=None) -> None:
@@ -194,7 +196,13 @@ def _reset_prompt_history(session) -> None:
     session.history = FileHistory(history_path)
 
 
-def _format_cost_and_context_line(*, state: AgentState, token_counter, max_context_tokens: int) -> str:
+def _format_cost_and_context_line(
+    *,
+    state: AgentState,
+    token_counter,
+    max_context_tokens: int,
+    model_name: str = "",
+) -> str:
     # Running cost from state.token_usage (kept up-to-date after each turn).
     tu = state.token_usage
     total_cost = 0.0
@@ -217,14 +225,26 @@ def _format_cost_and_context_line(*, state: AgentState, token_counter, max_conte
     if max_context_tokens > 0:
         pct = max(0, min(100, int(round(remaining / max_context_tokens * 100))))
 
-    return f"Cost: ${total_cost:.4f}   Context remaining: {pct}% ({remaining:,} tokens)"
+    return (
+        f"Cost: ${total_cost:.4f}   Context {pct}% ({remaining:,}/{max_context_tokens:,} tokens)"
+        f"   Model: {model_name}"
+    )
 
 
-def _prompt_boxed(session, *, completer=None, state: AgentState | None = None, token_counter=None, **_ignored) -> str:
+def _prompt_boxed(
+    session,
+    *,
+    completer=None,
+    state: AgentState | None = None,
+    token_counter=None,
+    model_name: str | None = None,
+    max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
+    **_ignored,
+) -> str:
     """Prompt for input using prompt_toolkit with a simple ASCII "box" prefix.
 
     Visual:
-        Cost: $0.0123   Context remaining: 87% (130,000 tokens)
+        Cost: $0.0123   Context 87% (113,100/130,000 tokens)   Model: gpt-5.2
         [ > your input…
     """
 
@@ -242,11 +262,14 @@ def _prompt_boxed(session, *, completer=None, state: AgentState | None = None, t
     )
 
     meta_line = ""
-    if state is not None and token_counter is not None:
+    if state is not None and token_counter is not None and model_name:
+        # Use a default context window if we don't know the real one yet
+        effective_max_context = max_context_tokens if max_context_tokens is not None else DEFAULT_MAX_CONTEXT_TOKENS
         meta_line = _format_cost_and_context_line(
             state=state,
             token_counter=token_counter,
-            max_context_tokens=MAX_CONTEXT_TOKENS,
+            max_context_tokens=effective_max_context,
+            model_name=model_name,
         )
 
     # Leading newlines act like a top margin for the input area.
@@ -332,6 +355,12 @@ def main(argv: list[str] | None = None) -> int:
         model_override=args.model,
         list_models=args.list_models,
     )
+
+    from src.model_context import get_model_context_info
+
+    provider = getattr(token_usage, "provider", "openai")
+    ctx_info = get_model_context_info(provider=provider, model=model_name)
+    max_context_tokens = ctx_info.max_context_tokens
     display = _build_display()
     session = _build_prompt_session()
 
@@ -406,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         return True
 
     def _cmd_models(args_text: str) -> bool:
-        nonlocal agent, token_counter, token_usage, model_name
+        nonlocal agent, token_counter, token_usage, model_name, max_context_tokens
 
         model_id = args_text.strip()
         if not model_id:
@@ -415,6 +444,9 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             agent, token_counter, token_usage, model_name = _build_agent_and_deps(model_override=model_id)
+            provider = getattr(token_usage, "provider", "openai")
+            ctx_info = get_model_context_info(provider=provider, model=model_name)
+            max_context_tokens = ctx_info.max_context_tokens
         except Exception as e:
             print(f"Could not switch model: {e}")
             return True
@@ -707,14 +739,28 @@ def main(argv: list[str] | None = None) -> int:
             _append_string_to_history(session, user_input)
         else:
             try:
-                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
+                user_input = _prompt_boxed(
+                    session,
+                    completer=completer,
+                    state=state,
+                    token_counter=token_counter,
+                    model_name=model_name,
+                    max_context_tokens=max_context_tokens,
+                )
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
+                user_input = _prompt_boxed(
+                    session,
+                    completer=completer,
+                    state=state,
+                    token_counter=token_counter,
+                    model_name=model_name,
+                    max_context_tokens=max_context_tokens,
+                )
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -729,14 +775,28 @@ def main(argv: list[str] | None = None) -> int:
             # Dummy state for first prompt line (no cost yet).
             dummy_state = AgentState(messages=[], token_usage=token_usage)
             try:
-                user_input = _prompt_boxed(session, completer=completer, state=dummy_state, token_counter=token_counter)
+                user_input = _prompt_boxed(
+                    session,
+                    completer=completer,
+                    state=dummy_state,
+                    token_counter=token_counter,
+                    model_name=model_name,
+                    max_context_tokens=max_context_tokens,
+                )
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
         while _run_slash_command(user_input):
             try:
                 dummy_state = AgentState(messages=[], token_usage=token_usage)
-                user_input = _prompt_boxed(session, completer=completer, state=dummy_state, token_counter=token_counter)
+                user_input = _prompt_boxed(
+                    session,
+                    completer=completer,
+                    state=dummy_state,
+                    token_counter=token_counter,
+                    model_name=model_name,
+                    max_context_tokens=max_context_tokens,
+                )
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 
@@ -778,7 +838,7 @@ def main(argv: list[str] | None = None) -> int:
 
         trimmed_messages = trim_messages(
             safe_messages,
-            max_tokens=MAX_CONTEXT_TOKENS,
+            max_tokens=(max_context_tokens or DEFAULT_MAX_CONTEXT_TOKENS),
             strategy="last",
             token_counter=token_counter,
             include_system=True,
@@ -823,14 +883,28 @@ def main(argv: list[str] | None = None) -> int:
             break
 
         try:
-            user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
+            user_input = _prompt_boxed(
+                session,
+                completer=completer,
+                state=state,
+                token_counter=token_counter,
+                model_name=model_name,
+                max_context_tokens=max_context_tokens,
+                )
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
         while _run_slash_command(user_input):
             # Stay in the same session; do not append to history.
             try:
-                user_input = _prompt_boxed(session, completer=completer, state=state, token_counter=token_counter)
+                user_input = _prompt_boxed(
+                    session,
+                    completer=completer,
+                    state=state,
+                    token_counter=token_counter,
+                    model_name=model_name,
+                    max_context_tokens=max_context_tokens,
+                )
             except (KeyboardInterrupt, SystemExit):
                 graceful_exit()
 

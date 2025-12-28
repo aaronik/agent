@@ -110,10 +110,10 @@ def test_resume_rehydrates_cost_into_prompt_meta(tmp_home: Path, monkeypatch: py
 
 
 def _parse_remaining_tokens(meta_line: str) -> int:
-    # "Cost: $...   Context remaining: 87% (130,000 tokens)"
+    # "Cost: $...   Context 87% (113,100/130,000 tokens)   Model: gpt-5.2"
     import re
 
-    m = re.search(r"\(([-0-9,]+) tokens\)", meta_line)
+    m = re.search(r"\(([-0-9,]+)/([-0-9,]+) tokens\)", meta_line)
     assert m is not None, f"Could not parse remaining tokens from: {meta_line!r}"
     return int(m.group(1).replace(",", ""))
 

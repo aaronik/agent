@@ -287,17 +287,28 @@ class ToolStatusDisplay:
                 lexer_name = _guess_lexer_from_path(file_path)
                 # Let Rich/Pygments choose the lexer from the filename.
                 # We keep "text" as a safe default in case detection fails.
-                body_parts.append(
-                    Syntax.from_path(
-                        file_path,
-                        encoding="utf-8",
-                        theme="native",
-                        line_numbers=False,
-                        word_wrap=False,
-                        code_width=None,
-                        tab_size=4,
+                try:
+                    body_parts.append(
+                        Syntax.from_path(
+                            file_path,
+                            encoding="utf-8",
+                            theme="native",
+                            line_numbers=False,
+                            word_wrap=False,
+                            code_width=None,
+                            tab_size=4,
+                        )
                     )
-                )
+                except FileNotFoundError:
+                    if result_text:
+                        body_parts.append(Text(escape(result_text), style="white"))
+                    else:
+                        body_parts.append(Text(f"(file not found: {escape(str(file_path))})", style="dim"))
+                except Exception as e:
+                    if result_text:
+                        body_parts.append(Text(escape(result_text), style="white"))
+                    else:
+                        body_parts.append(Text(f"(could not render file: {escape(str(e))})", style="dim"))
             elif result_text:
                 body_parts.append(Text(escape(result_text), style="white"))
         elif result_text:
