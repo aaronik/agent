@@ -82,48 +82,45 @@ def read_claude_md(filepath, current_depth=0, seen_files=None):
     return "\n".join(memory_texts)
 
 
-def find_upwards_claude_md_files(start_dir=None):
-    # Find CLAUDE.md moving upward from start_dir to /, returns list of
-    # absolute paths
+def find_project_claude_md_file(start_dir=None):
+    """Return the CLAUDE.md path in the *current directory only*.
+
+    This intentionally does NOT search parent directories or recurse into
+    subdirectories.
+    """
+
     if start_dir is None:
         start_dir = os.getcwd()
 
-    current_dir = os.path.abspath(start_dir)
-    results = []
-    while True:
-        candidate = os.path.join(current_dir, "CLAUDE.md")
-        if os.path.isfile(candidate):
-            results.append(candidate)
-
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:
-            break
-        current_dir = parent
-    return results
+    candidate = os.path.join(os.path.abspath(start_dir), "CLAUDE.md")
+    return candidate if os.path.isfile(candidate) else None
 
 
-def find_nested_claude_md_files(start_dir=None):
-    # Recursively find CLAUDE.md files inside start_dir tree
-    if start_dir is None:
-        start_dir = os.getcwd()
-    matches = []
-    for root, dirs, files in os.walk(start_dir):
-        if "CLAUDE.md" in files:
-            matches.append(os.path.join(root, "CLAUDE.md"))
-    return matches
+def find_user_claude_md_file():
+    """Return the user-level CLAUDE.md path at $HOME/.claude/CLAUDE.md."""
+
+    candidate = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    return candidate if os.path.isfile(candidate) else None
 
 
 def find_all_claude_md_files(start_dir=None):
-    # Combine upward and nested subtree CLAUDE.md files
-    upwards = set(find_upwards_claude_md_files(start_dir))
-    nested = set(find_nested_claude_md_files(start_dir))
-    # Remove duplicates
-    return list(upwards.union(nested))
+    """Return memory files in priority order: project-local then user-level."""
+
+    files = []
+
+    project = find_project_claude_md_file(start_dir)
+    if project:
+        files.append(project)
+
+    user = find_user_claude_md_file()
+    if user:
+        files.append(user)
+
+    return files
 
 
 def load_all_claude_memory(start_dir=None):
     files = find_all_claude_md_files(start_dir)
-    # Read all found CLAUDE.md files and merge
     all_memory = []
     for f in files:
         all_memory.append(read_claude_md(f))

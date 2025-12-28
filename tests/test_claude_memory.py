@@ -52,56 +52,60 @@ class TestClaudeMemory(unittest.TestCase):
     def test_read_claude_md_max_depth(self):
         # Build chain longer than MAX_IMPORT_DEPTH to test cutoff
         with tempfile.TemporaryDirectory() as tmpdir:
-            prev = None
             files = []
             for i in range(claude_memory.MAX_IMPORT_DEPTH + 2):
                 f = os.path.join(tmpdir, f"file{i}.md")
                 files.append(f)
-            for i in range(len(files)-1):
+            for i in range(len(files) - 1):
                 with open(files[i], "w") as f:
-                    f.write(f"File {i}\n@{os.path.basename(files[i+1])}")
-            # Last file empty
+                    f.write(f"File {i}\n@{os.path.basename(files[i + 1])}")
             with open(files[-1], "w") as f:
-                f.write(f"File {len(files)-1}")
+                f.write(f"File {len(files) - 1}")
 
             result = claude_memory.read_claude_md(files[0])
             self.assertIn("File 0", result)
             self.assertNotIn(f"File {claude_memory.MAX_IMPORT_DEPTH + 1}", result)
 
-    def test_find_upwards_claude_md_files(self):
+    def test_find_project_claude_md_file_current_dir_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create nested directories
-            nested = os.path.join(tmpdir, "a/b/c")
+            nested = os.path.join(tmpdir, "a", "b")
             os.makedirs(nested)
 
-            # Place CLAUDE.md in tmpdir and in tmpdir/a
-            file1 = os.path.join(tmpdir, "CLAUDE.md")
-            file2 = os.path.join(tmpdir, "a", "CLAUDE.md")
-            with open(file1, "w") as f:
+            root_file = os.path.join(tmpdir, "CLAUDE.md")
+            nested_file = os.path.join(nested, "CLAUDE.md")
+
+            with open(root_file, "w") as f:
                 f.write("root")
-            with open(file2, "w") as f:
-                f.write("a")
 
-            found_files = claude_memory.find_upwards_claude_md_files(nested)
-            self.assertIn(os.path.abspath(file1), found_files)
-            self.assertIn(os.path.abspath(file2), found_files)
+            # From nested dir, should NOT find root_file
+            self.assertIsNone(claude_memory.find_project_claude_md_file(nested))
 
-    def test_load_all_claude_memory(self):
+            # If CLAUDE.md exists in the current dir, it should be found
+            with open(nested_file, "w") as f:
+                f.write("nested")
+
+            self.assertEqual(os.path.abspath(nested_file), claude_memory.find_project_claude_md_file(nested))
+
+    def test_find_user_claude_md_file_home_claude(self):
+        # Hard to test without touching real $HOME; just assert it's a well-formed path
+        # and returns None if it doesn't exist.
+        path = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+        if os.path.isfile(path):
+            self.assertEqual(path, claude_memory.find_user_claude_md_file())
+        else:
+            self.assertIsNone(claude_memory.find_user_claude_md_file())
+
+    def test_load_all_claude_memory_project_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             file1 = os.path.join(tmpdir, "CLAUDE.md")
-            file2 = os.path.join(tmpdir, "b", "CLAUDE.md")
-            os.makedirs(os.path.dirname(file2))
             with open(file1, "w") as f:
                 f.write("root content")
-            with open(file2, "w") as f:
-                f.write("nested content")
 
             files = claude_memory.find_all_claude_md_files(tmpdir)
-            print("DEBUG: Found CLAUDE.md files:", files)
+            self.assertIn(os.path.abspath(file1), files)
 
             combined = claude_memory.load_all_claude_memory(tmpdir)
             self.assertIn("root content", combined)
-            self.assertIn("nested content", combined)
 
 
 if __name__ == "__main__":
