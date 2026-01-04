@@ -21,10 +21,10 @@ def format_help(commands: Iterable[CommandSpec]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def filter_prefix(candidates: Iterable[str], *, prefix: str) -> list[str]:
+def filter_contains(candidates: Iterable[str], *, prefix: str) -> list[str]:
     if not prefix:
         return list(candidates)
-    return [c for c in candidates if c.startswith(prefix)]
+    return [c for c in candidates if prefix in c]
 
 
 def split_command(text: str) -> tuple[str, str] | None:

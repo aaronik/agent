@@ -99,13 +99,15 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
     if ollama_url and ollama_model:
         model_name = ollama_model
         ollama_base_url = ollama_url.rstrip("/") + "/v1"
-        model = ChatOpenAI(model=model_name, base_url=ollama_base_url, api_key="dummy")
+        model = ChatOpenAI(
+            model=model_name, base_url=ollama_base_url, api_key="dummy")
         token_counter = SimpleTokenCounter()
         pm = None  # type: ignore[assignment]
     else:
         from src.provider_registry import parse_model_id
 
-        raw_model = model_override or os.getenv("AGENT_MODEL") or os.getenv("OPENAI_MODEL") or MODEL
+        raw_model = model_override or os.getenv(
+            "AGENT_MODEL") or os.getenv("OPENAI_MODEL") or MODEL
         pm = parse_model_id(raw_model)
         if pm.provider == "openai":
             model_name = pm.model
@@ -113,7 +115,8 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
             # To avoid hard failures like:
             #   "This model is only supported in v1/responses and not in v1/chat/completions."
             # we opt into Responses API routing.
-            model = ChatOpenAI(model=model_name, use_responses_api=True, stream_usage=True)
+            model = ChatOpenAI(
+                model=model_name, use_responses_api=True, stream_usage=True)
             token_counter = model
         else:
             # For now, non-OpenAI providers are supported via an OpenAI-compatible
@@ -121,10 +124,12 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
             if pm.provider == "ollama":
                 model_name = pm.model
                 ollama_base_url = ollama_url.rstrip("/") + "/v1"
-                model = ChatOpenAI(model=model_name, base_url=ollama_base_url, api_key="dummy")
+                model = ChatOpenAI(
+                    model=model_name, base_url=ollama_base_url, api_key="dummy")
                 token_counter = SimpleTokenCounter()
             else:
-                raise ValueError(f"Unknown provider '{pm.provider}'. Use --list-models to see options.")
+                raise ValueError(f"Unknown provider '{
+                                 pm.provider}'. Use --list-models to see options.")
 
     # Local import: tools module pulls in prompt_toolkit / openai deps.
     import src.tools as tools_module
@@ -143,7 +148,8 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
     agent = create_agent(model, tools=tool_list)
 
     # Provider-aware token usage: local providers (Ollama) intentionally skip LiteLLM pricing.
-    provider = "ollama" if (ollama_url and ollama_model) else (pm.provider if pm is not None else "openai")
+    provider = "ollama" if (ollama_url and ollama_model) else (
+        pm.provider if pm is not None else "openai")
     token_usage = TokenUsage(model=model.model_name, provider=provider)
 
     return agent, token_counter, token_usage, model_name
@@ -164,7 +170,8 @@ def _build_prompt_session():
 
     # Persist interactive input history across CLI runs.
     # This is separate from the agent's saved sessions; it's just for prompt "Up".
-    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
+    history_path = os.path.join(
+        os.path.expanduser("~"), ".agent", "prompt_history")
 
     return PromptSession(editing_mode=EditingMode.VI, history=FileHistory(history_path))
 
@@ -192,7 +199,8 @@ def _reset_prompt_history(session) -> None:
         from prompt_toolkit.history import FileHistory
     except ImportError:
         return
-    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
+    history_path = os.path.join(
+        os.path.expanduser("~"), ".agent", "prompt_history")
     session.history = FileHistory(history_path)
 
 
@@ -226,7 +234,8 @@ def _format_cost_and_context_line(
         pct = max(0, min(100, int(round(remaining / max_context_tokens * 100))))
 
     return (
-        f"Cost: ${total_cost:.4f}   Context {pct}% ({remaining:,}/{max_context_tokens:,} tokens)"
+        f"Cost: ${total_cost:.4f}   Context {
+            pct}% ({remaining:,}/{max_context_tokens:,} tokens)"
         f"   Model: {model_name}"
     )
 
@@ -372,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         available_models = []
 
-    from src.commands import CommandSpec, filter_prefix, format_help, split_command
+    from src.commands import CommandSpec, filter_contains, format_help, split_command
 
     # ---- Command registry -------------------------------------------------
 
@@ -411,10 +420,12 @@ def main(argv: list[str] | None = None) -> int:
             messages=[
                 SystemMessage(content=system_string),
                 SystemMessage(content=load_all_claude_memory()),
-                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(
+                    content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
-                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    [SystemMessage(
+                        content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
                     if (git_ls := sys_git_ls())
                     else []
                 ),
@@ -443,9 +454,11 @@ def main(argv: list[str] | None = None) -> int:
             return True
 
         try:
-            agent, token_counter, token_usage, model_name = _build_agent_and_deps(model_override=model_id)
+            agent, token_counter, token_usage, model_name = _build_agent_and_deps(
+                model_override=model_id)
             provider = getattr(token_usage, "provider", "openai")
-            ctx_info = get_model_context_info(provider=provider, model=model_name)
+            ctx_info = get_model_context_info(
+                provider=provider, model=model_name)
             max_context_tokens = ctx_info.max_context_tokens
         except Exception as e:
             print(f"Could not switch model: {e}")
@@ -455,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         return True
 
     def _complete_models(prefix: str) -> list[str]:
-        return filter_prefix(available_models, prefix=prefix)
+        return filter_contains(available_models, prefix=prefix)
 
     def _cmd_resume(args_text: str) -> bool:
         """Resume a prior conversation/session in-place."""
@@ -522,8 +535,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Also offer a friendly alias for the latest pointer.
         candidates = ["latest", *list_session_labels()]
-        return filter_prefix(candidates, prefix=prefix)
-
+        return filter_contains(candidates, prefix=prefix)
 
     commands_registry: list[CommandSpec] = [
         CommandSpec(
@@ -583,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
                 # If the user hasn't typed a space yet, we're completing the command name.
                 if " " not in text:
                     cmd_token = text.strip()
-                    for c in filter_prefix((s.name for s in commands_registry), prefix=cmd_token):
+                    for c in filter_contains((s.name for s in commands_registry), prefix=cmd_token):
                         yield Completion(c, start_position=-len(cmd_token))
                     return
 
@@ -600,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
                 # If we're still typing the command token, complete the command name.
                 # If no space has been typed yet, complete the command name.
                 if " " not in text:
-                    for c in filter_prefix((s.name for s in commands_registry), prefix=cmd):
+                    for c in filter_contains((s.name for s in commands_registry), prefix=cmd):
                         yield Completion(c, start_position=-len(cmd))
                     return
 
@@ -653,7 +665,6 @@ def main(argv: list[str] | None = None) -> int:
         return False
 
     _install_signal_handler(graceful_exit, cancel_current_turn)
-
 
     # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + model_name)
@@ -804,10 +815,12 @@ def main(argv: list[str] | None = None) -> int:
             messages=[
                 SystemMessage(content=system_string),
                 SystemMessage(content=load_all_claude_memory()),
-                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(
+                    content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
-                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    [SystemMessage(
+                        content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
                     if (git_ls := sys_git_ls())
                     else []
                 ),
@@ -824,7 +837,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.single:
             autosaver = SessionAutosaver(session_id=session_id)
             _autosave()
-
 
     from src.agent_runner import run_agent_with_display
 
@@ -846,7 +858,8 @@ def main(argv: list[str] | None = None) -> int:
             allow_partial=False,
         )
 
-        trimmed_state = AgentState(messages=trimmed_messages, token_usage=token_usage)
+        trimmed_state = AgentState(
+            messages=trimmed_messages, token_usage=token_usage)
 
         cancel_token = CancelToken()
         turn_in_progress = True
@@ -854,7 +867,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             try:
                 try:
-                    new_messages = run_agent_with_display(agent, trimmed_state, cancel_token=cancel_token)
+                    new_messages = run_agent_with_display(
+                        agent, trimmed_state, cancel_token=cancel_token)
                 except TypeError:
                     # Backwards-compatible for tests/mocks that haven't been updated.
                     new_messages = run_agent_with_display(agent, trimmed_state)
@@ -869,7 +883,8 @@ def main(argv: list[str] | None = None) -> int:
             turn_in_progress = False
             cancel_token = None
 
-        state = AgentState(messages=state.messages + new_messages, token_usage=token_usage)
+        state = AgentState(messages=state.messages +
+                           new_messages, token_usage=token_usage)
         _autosave()
 
         output = state.messages[-1] if state.messages else None
@@ -890,7 +905,7 @@ def main(argv: list[str] | None = None) -> int:
                 token_counter=token_counter,
                 model_name=model_name,
                 max_context_tokens=max_context_tokens,
-                )
+            )
         except (KeyboardInterrupt, SystemExit):
             graceful_exit()
 
