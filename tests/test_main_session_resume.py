@@ -29,7 +29,13 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _patch_main_dependencies(monkeypatch: pytest.MonkeyPatch, *, user_inputs: list[str], agent_reply: str):
+def _patch_main_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    user_inputs: list[str],
+    agent_reply: str,
+    seen_human_transcripts: list[list[str]] | None = None,
+):
     """Patch main module to avoid network, prompt_toolkit, and expensive imports."""
 
     import main as main_mod
@@ -58,7 +64,12 @@ def _patch_main_dependencies(monkeypatch: pytest.MonkeyPatch, *, user_inputs: li
     monkeypatch.setattr(
         main_mod,
         "_build_agent_and_deps",
-        lambda **_kwargs: (object(), main_mod.SimpleTokenCounter(), _DummyTokenUsage(), "dummy-model"),
+        lambda **_kwargs: (
+            object(),
+            main_mod.SimpleTokenCounter(),
+            _DummyTokenUsage(),
+            "dummy-model",
+        ),
     )
 
     # Stub agent runner: just emit one AI message each turn.
@@ -66,15 +77,24 @@ def _patch_main_dependencies(monkeypatch: pytest.MonkeyPatch, *, user_inputs: li
 
     def _fake_run_agent_with_display(_agent, state):
         # Make sure the agent sees history.
-        assert any(isinstance(m, HumanMessage) for m in state.messages)
+        human_messages = [
+            str(m.content) for m in state.messages if isinstance(m, HumanMessage)
+        ]
+        assert human_messages
+        if seen_human_transcripts is not None:
+            seen_human_transcripts.append(human_messages)
         return [AIMessage(content=agent_reply)]
 
-    monkeypatch.setattr(agent_runner, "run_agent_with_display", _fake_run_agent_with_display)
+    monkeypatch.setattr(
+        agent_runner, "run_agent_with_display", _fake_run_agent_with_display
+    )
 
     return main_mod
 
 
-def test_main_creates_session_and_autosaves(tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+def test_main_creates_session_and_autosaves(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
     main_mod = _patch_main_dependencies(
         monkeypatch,
         user_inputs=["hello", "bye"],
@@ -88,7 +108,9 @@ def test_main_creates_session_and_autosaves(tmp_home: Path, monkeypatch: pytest.
     out = capsys.readouterr().out
     assert "world" in out
 
-    latest = (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    latest = (
+        (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    )
     session_path = tmp_home / ".agent" / "sessions" / f"{latest}.json"
     assert session_path.exists()
 
@@ -97,7 +119,9 @@ def test_main_creates_session_and_autosaves(tmp_home: Path, monkeypatch: pytest.
     assert "hello" in saved
 
 
-def test_main_resume_loads_history_and_does_not_crash(tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+def test_main_resume_loads_history_and_does_not_crash(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
     # First run creates a session.
     main_mod = _patch_main_dependencies(
         monkeypatch,
@@ -107,7 +131,9 @@ def test_main_resume_loads_history_and_does_not_crash(tmp_home: Path, monkeypatc
     with pytest.raises(SystemExit):
         main_mod.main([])
 
-    latest = (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    latest = (
+        (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    )
 
     # Reload main module to clear any cached state and reapply patches.
     importlib.reload(main_mod)
@@ -132,6 +158,87 @@ def test_main_resume_loads_history_and_does_not_crash(tmp_home: Path, monkeypatc
     saved = session_path.read_text(encoding="utf-8")
     assert "first" in saved
     assert "second" in saved
+
+
+def test_main_auto_resumes_latest_session_by_default(
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+):
+    first_run_humans: list[list[str]] = []
+    main_mod = _patch_main_dependencies(
+        monkeypatch,
+        user_inputs=["first"],
+        agent_reply="r1",
+        seen_human_transcripts=first_run_humans,
+    )
+    with pytest.raises(SystemExit):
+        main_mod.main([])
+
+    latest = (
+        (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    )
+    assert first_run_humans == [["first"]]
+
+    importlib.reload(main_mod)
+
+    second_run_humans: list[list[str]] = []
+    main_mod = _patch_main_dependencies(
+        monkeypatch,
+        user_inputs=["second"],
+        agent_reply="r2",
+        seen_human_transcripts=second_run_humans,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod.main([])
+
+    out = capsys.readouterr().out
+    assert "r1" in out
+    assert "r2" in out
+    assert "first" in out
+    assert second_run_humans == [["first", "second"]]
+
+    session_path = tmp_home / ".agent" / "sessions" / f"{latest}.json"
+    saved = session_path.read_text(encoding="utf-8")
+    assert "first" in saved
+    assert "second" in saved
+
+
+def test_new_flag_starts_fresh_session_even_when_latest_exists(
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    main_mod = _patch_main_dependencies(
+        monkeypatch,
+        user_inputs=["first"],
+        agent_reply="r1",
+    )
+    with pytest.raises(SystemExit):
+        main_mod.main([])
+
+    original_latest = (
+        (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    )
+
+    importlib.reload(main_mod)
+
+    fresh_run_humans: list[list[str]] = []
+    main_mod = _patch_main_dependencies(
+        monkeypatch,
+        user_inputs=["second"],
+        agent_reply="r2",
+        seen_human_transcripts=fresh_run_humans,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod.main(["--new"])
+
+    new_latest = (
+        (tmp_home / ".agent" / "latest_session").read_text(encoding="utf-8").strip()
+    )
+    assert new_latest != original_latest
+    assert fresh_run_humans == [["second"]]
 
 
 def test_prefill_history_populates_session_history() -> None:

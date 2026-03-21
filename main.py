@@ -5,12 +5,25 @@ import sys
 from dataclasses import dataclass, field
 from typing import List
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage, trim_messages
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    AIMessage,
+    ToolMessage,
+    trim_messages,
+)
 
 from src.constants import system_string
 from src.claude_memory import load_all_claude_memory
 from src.markdown_render import print_markdown
-from src.util import TokenUsage, preload_litellm_cost_map, sys_git_ls, sys_pwd, sys_uname
+from src.util import (
+    TokenUsage,
+    preload_litellm_cost_map,
+    sys_git_ls,
+    sys_pwd,
+    sys_uname,
+)
 
 HUMAN = ""
 ANSWER_HEADER = "\n"
@@ -76,7 +89,9 @@ class AgentState:
     token_usage: "TokenUsage | None" = None
 
 
-def _build_agent_and_deps(*, model_override: str | None = None, list_models: bool = False):
+def _build_agent_and_deps(
+    *, model_override: str | None = None, list_models: bool = False
+):
     """Create the model, tools, agent, token counter, and token usage.
 
     Important: this is intentionally done lazily (at runtime) so importing
@@ -100,14 +115,21 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
         model_name = ollama_model
         ollama_base_url = ollama_url.rstrip("/") + "/v1"
         model = ChatOpenAI(
-            model=model_name, base_url=ollama_base_url, api_key="dummy")
+            model=model_name,
+            base_url=ollama_base_url,
+            api_key=lambda: "dummy",
+        )
         token_counter = SimpleTokenCounter()
         pm = None  # type: ignore[assignment]
     else:
         from src.provider_registry import parse_model_id
 
-        raw_model = model_override or os.getenv(
-            "AGENT_MODEL") or os.getenv("OPENAI_MODEL") or MODEL
+        raw_model = (
+            model_override
+            or os.getenv("AGENT_MODEL")
+            or os.getenv("OPENAI_MODEL")
+            or MODEL
+        )
         pm = parse_model_id(raw_model)
         if pm.provider == "openai":
             model_name = pm.model
@@ -116,7 +138,8 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
             #   "This model is only supported in v1/responses and not in v1/chat/completions."
             # we opt into Responses API routing.
             model = ChatOpenAI(
-                model=model_name, use_responses_api=True, stream_usage=True)
+                model=model_name, use_responses_api=True, stream_usage=True
+            )
             token_counter = model
         else:
             # For now, non-OpenAI providers are supported via an OpenAI-compatible
@@ -125,11 +148,17 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
                 model_name = pm.model
                 ollama_base_url = ollama_url.rstrip("/") + "/v1"
                 model = ChatOpenAI(
-                    model=model_name, base_url=ollama_base_url, api_key="dummy")
+                    model=model_name,
+                    base_url=ollama_base_url,
+                    api_key=lambda: "dummy",
+                )
                 token_counter = SimpleTokenCounter()
             else:
-                raise ValueError(f"Unknown provider '{
-                                 pm.provider}'. Use --list-models to see options.")
+                raise ValueError(
+                    f"Unknown provider '{
+                        pm.provider
+                    }'. Use --list-models to see options."
+                )
 
     # Local import: tools module pulls in prompt_toolkit / openai deps.
     import src.tools as tools_module
@@ -148,8 +177,11 @@ def _build_agent_and_deps(*, model_override: str | None = None, list_models: boo
     agent = create_agent(model, tools=tool_list)
 
     # Provider-aware token usage: local providers (Ollama) intentionally skip LiteLLM pricing.
-    provider = "ollama" if (ollama_url and ollama_model) else (
-        pm.provider if pm is not None else "openai")
+    provider = (
+        "ollama"
+        if (ollama_url and ollama_model)
+        else (pm.provider if pm is not None else "openai")
+    )
     token_usage = TokenUsage(model=model.model_name, provider=provider)
 
     return agent, token_counter, token_usage, model_name
@@ -170,8 +202,7 @@ def _build_prompt_session():
 
     # Persist interactive input history across CLI runs.
     # This is separate from the agent's saved sessions; it's just for prompt "Up".
-    history_path = os.path.join(
-        os.path.expanduser("~"), ".agent", "prompt_history")
+    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
 
     return PromptSession(editing_mode=EditingMode.VI, history=FileHistory(history_path))
 
@@ -187,7 +218,7 @@ def _append_string_to_history(session, text: str | None) -> None:
 
 def _prefill_history_from_messages(session, messages: List[BaseMessage]) -> None:
     for msg in messages:
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
             _append_string_to_history(session, msg.content)
 
 
@@ -199,8 +230,7 @@ def _reset_prompt_history(session) -> None:
         from prompt_toolkit.history import FileHistory
     except ImportError:
         return
-    history_path = os.path.join(
-        os.path.expanduser("~"), ".agent", "prompt_history")
+    history_path = os.path.join(os.path.expanduser("~"), ".agent", "prompt_history")
     session.history = FileHistory(history_path)
 
 
@@ -218,7 +248,9 @@ def _format_cost_and_context_line(
         total = getattr(tu, "total_cost", None)
         if callable(total):
             try:
-                total_cost = float(total())
+                total_value = total()
+                if isinstance(total_value, int | float):
+                    total_cost = float(total_value)
             except Exception:
                 total_cost = 0.0
 
@@ -234,8 +266,8 @@ def _format_cost_and_context_line(
         pct = max(0, min(100, int(round(remaining / max_context_tokens * 100))))
 
     return (
-        f"Cost: ${total_cost:.4f}   Context {
-            pct}% ({remaining:,}/{max_context_tokens:,} tokens)"
+        f"Cost: ${total_cost:.4f}   Context {pct}% ({remaining:,}/{
+            max_context_tokens:,} tokens)"
         f"   Model: {model_name}"
     )
 
@@ -273,7 +305,11 @@ def _prompt_boxed(
     meta_line = ""
     if state is not None and token_counter is not None and model_name:
         # Use a default context window if we don't know the real one yet
-        effective_max_context = max_context_tokens if max_context_tokens is not None else DEFAULT_MAX_CONTEXT_TOKENS
+        effective_max_context = (
+            max_context_tokens
+            if max_context_tokens is not None
+            else DEFAULT_MAX_CONTEXT_TOKENS
+        )
         meta_line = _format_cost_and_context_line(
             state=state,
             token_counter=token_counter,
@@ -356,9 +392,17 @@ def main(argv: list[str] | None = None) -> int:
         metavar="ID",
         help="Resume a saved session by id. If no id is provided, resumes the latest session.",
     )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Start a fresh conversation instead of auto-resuming the latest saved session.",
+    )
     parser.add_argument("query", nargs="*", help="Query to process")
 
     args = parser.parse_args(argv)
+
+    if args.new and args.resume is not None:
+        parser.error("--new cannot be used with --resume")
 
     agent, token_counter, token_usage, model_name = _build_agent_and_deps(
         model_override=args.model,
@@ -366,12 +410,20 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     from src.model_context import get_model_context_info
+    from src.session_store import (
+        SessionAutosaver,
+        list_session_labels,
+        load_messages,
+        new_session_id,
+    )
 
     provider = getattr(token_usage, "provider", "openai")
     ctx_info = get_model_context_info(provider=provider, model=model_name)
-    max_context_tokens = ctx_info.max_context_tokens
+    max_context_tokens = ctx_info.max_context_tokens or DEFAULT_MAX_CONTEXT_TOKENS
     display = _build_display()
     session = _build_prompt_session()
+    state = AgentState(messages=[], token_usage=token_usage)
+    session_id: str | None = None
 
     # One-time model list for `/models` (used by the command + autocomplete).
     try:
@@ -420,12 +472,10 @@ def main(argv: list[str] | None = None) -> int:
             messages=[
                 SystemMessage(content=system_string),
                 SystemMessage(content=load_all_claude_memory()),
-                SystemMessage(
-                    content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
-                    [SystemMessage(
-                        content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
                     if (git_ls := sys_git_ls())
                     else []
                 ),
@@ -434,11 +484,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         if not args.single:
-            from src.session_store import SessionAutosaver, new_session_id
-
             session_id = new_session_id()
-            autosaver = None
-        if not args.single:
+            assert session_id is not None
             autosaver = SessionAutosaver(session_id=session_id)
             _autosave()
 
@@ -455,10 +502,10 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             agent, token_counter, token_usage, model_name = _build_agent_and_deps(
-                model_override=model_id)
+                model_override=model_id
+            )
             provider = getattr(token_usage, "provider", "openai")
-            ctx_info = get_model_context_info(
-                provider=provider, model=model_name)
+            ctx_info = get_model_context_info(provider=provider, model=model_name)
             max_context_tokens = ctx_info.max_context_tokens
         except Exception as e:
             print(f"Could not switch model: {e}")
@@ -595,7 +642,9 @@ def main(argv: list[str] | None = None) -> int:
                 # If the user hasn't typed a space yet, we're completing the command name.
                 if " " not in text:
                     cmd_token = text.strip()
-                    for c in filter_contains((s.name for s in commands_registry), prefix=cmd_token):
+                    for c in filter_contains(
+                        (s.name for s in commands_registry), prefix=cmd_token
+                    ):
                         yield Completion(c, start_position=-len(cmd_token))
                     return
 
@@ -612,7 +661,9 @@ def main(argv: list[str] | None = None) -> int:
                 # If we're still typing the command token, complete the command name.
                 # If no space has been typed yet, complete the command name.
                 if " " not in text:
-                    for c in filter_contains((s.name for s in commands_registry), prefix=cmd):
+                    for c in filter_contains(
+                        (s.name for s in commands_registry), prefix=cmd
+                    ):
                         yield Completion(c, start_position=-len(cmd))
                     return
 
@@ -693,52 +744,64 @@ def main(argv: list[str] | None = None) -> int:
     # Initialize or resume state
 
     session_id = None
+    user_input = ""
 
     def _autosave() -> None:
         if autosaver is None:
             return
         autosaver.request_save(state.messages)
 
-    if args.resume is not None:
+    resumed_on_startup = False
+    should_attempt_startup_resume = args.resume is not None or (
+        not args.single and not args.new
+    )
+
+    if should_attempt_startup_resume:
         from src.session_store import SessionAutosaver, load_messages
 
         resume_id = None if args.resume == "__LATEST__" else args.resume
-        session_id, loaded_messages = load_messages(resume_id)
-        state = AgentState(messages=loaded_messages, token_usage=token_usage)
-
-        # Recompute running usage from the resumed transcript so the prompt meta
-        # (cost line) is correct before the next prompt.
         try:
-            token_usage.ingest_from_messages(state.messages)
+            session_id, loaded_messages = load_messages(resume_id)
+            state = AgentState(messages=loaded_messages, token_usage=token_usage)
+            resumed_on_startup = True
+
+            # Recompute running usage from the resumed transcript so the prompt meta
+            # (cost line) is correct before the next prompt.
+            try:
+                token_usage.ingest_from_messages(state.messages)
+            except Exception:
+                pass
+            _prefill_history_from_messages(session, state.messages)
+            autosaver = None
+            if not args.single:
+                autosaver = SessionAutosaver(session_id=session_id)
+
+            # Rebuild tool status panels from history first, so resume feels like a
+            # continuous session.
+            try:
+                from src.resume_tool_history import replay_tool_history
+
+                replay_tool_history(state.messages, display)
+            except Exception:
+                # Resume should never crash the CLI.
+                pass
+
+            # Replay prior assistant outputs so the scrollback matches a continuous session.
+            from src.normalize_messages import normalize_for_token_count
+
+            for msg in normalize_for_token_count(state.messages):
+                _render_new_output_message(msg)
+
+            # Ensure meta line has up-to-date running cost after resume.
+            try:
+                token_usage.ingest_from_messages(state.messages)
+            except Exception:
+                pass
         except Exception:
-            pass
-        _prefill_history_from_messages(session, state.messages)
-        autosaver = None
-        if not args.single:
-            autosaver = SessionAutosaver(session_id=session_id)
+            if args.resume is not None:
+                raise
 
-        # Rebuild tool status panels from history first, so resume feels like a
-        # continuous session.
-        try:
-            from src.resume_tool_history import replay_tool_history
-
-            replay_tool_history(state.messages, display)
-        except Exception:
-            # Resume should never crash the CLI.
-            pass
-
-        # Replay prior assistant outputs so the scrollback matches a continuous session.
-        from src.normalize_messages import normalize_for_token_count
-
-        for msg in normalize_for_token_count(state.messages):
-            _render_new_output_message(msg)
-
-        # Ensure meta line has up-to-date running cost after resume.
-        try:
-            token_usage.ingest_from_messages(state.messages)
-        except Exception:
-            pass
-
+    if resumed_on_startup:
         # If the resumed session ended with tool messages only (or otherwise no
         # assistant "content" message), the prior loop state could have been
         # trimmed. Ensure we recompute prompt meta against the *resumed* messages.
@@ -815,12 +878,10 @@ def main(argv: list[str] | None = None) -> int:
             messages=[
                 SystemMessage(content=system_string),
                 SystemMessage(content=load_all_claude_memory()),
-                SystemMessage(
-                    content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
+                SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
-                    [SystemMessage(
-                        content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
+                    [SystemMessage(content=f"[SYSTEM INFO] git ls-files: {git_ls}")]
                     if (git_ls := sys_git_ls())
                     else []
                 ),
@@ -830,11 +891,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         if not args.single:
-            from src.session_store import SessionAutosaver, new_session_id
-
             session_id = new_session_id()
-            autosaver = None
-        if not args.single:
+            assert session_id is not None
             autosaver = SessionAutosaver(session_id=session_id)
             _autosave()
 
@@ -858,8 +916,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_partial=False,
         )
 
-        trimmed_state = AgentState(
-            messages=trimmed_messages, token_usage=token_usage)
+        trimmed_state = AgentState(messages=trimmed_messages, token_usage=token_usage)
 
         cancel_token = CancelToken()
         turn_in_progress = True
@@ -868,7 +925,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 try:
                     new_messages = run_agent_with_display(
-                        agent, trimmed_state, cancel_token=cancel_token)
+                        agent, trimmed_state, cancel_token=cancel_token
+                    )
                 except TypeError:
                     # Backwards-compatible for tests/mocks that haven't been updated.
                     new_messages = run_agent_with_display(agent, trimmed_state)
@@ -883,8 +941,9 @@ def main(argv: list[str] | None = None) -> int:
             turn_in_progress = False
             cancel_token = None
 
-        state = AgentState(messages=state.messages +
-                           new_messages, token_usage=token_usage)
+        state = AgentState(
+            messages=state.messages + new_messages, token_usage=token_usage
+        )
         _autosave()
 
         output = state.messages[-1] if state.messages else None

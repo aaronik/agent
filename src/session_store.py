@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -34,7 +35,7 @@ def _ensure_dirs() -> None:
 def new_session_id() -> str:
     """Return a simple, sortable, filesystem-safe session id."""
 
-    return time.strftime("%Y%m%d-%H%M%S")
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _session_path(session_id: str) -> Path:
@@ -58,7 +59,9 @@ def list_session_ids() -> list[str]:
     return ids
 
 
-def _first_human_message_preview(session_path: Path, *, max_len: int = 80) -> str | None:
+def _first_human_message_preview(
+    session_path: Path, *, max_len: int = 80
+) -> str | None:
     """Best-effort extraction of the first human message content from a session file."""
 
     try:

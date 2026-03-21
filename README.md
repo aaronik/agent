@@ -44,7 +44,10 @@ alias agent="/<path to the agent folder>/run.sh
 ```bash
 agent "Let's work on this code together" # <-- starts a loop (human in the loop)
 agent -s "Research such and such topic" # <-- single agent invocation (including tool uses)
+agent --new "Let's start a fresh conversation" # <-- ignore the latest saved session
 ```
+
+Interactive runs automatically resume the latest saved session unless you pass `--new`.
 
 ---
 
