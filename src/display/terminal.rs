@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 
 use crate::agent::{AgentMessage, ToolCall, ToolResult, ToolStatus};
@@ -15,10 +15,16 @@ const PANEL_MIN_WIDTH: usize = 42;
 const PANEL_MAX_WIDTH: usize = 120;
 const PANEL_PADDING: usize = 2;
 
+#[derive(Clone, Debug)]
+struct ActiveToolCall {
+    call: ToolCall,
+    rendered_line_count: Option<usize>,
+}
+
 #[derive(Debug)]
 pub struct TerminalDisplay {
     live_enabled: bool,
-    active_calls: Mutex<HashMap<String, ToolCall>>,
+    active_calls: Mutex<HashMap<String, ActiveToolCall>>,
 }
 
 impl Default for TerminalDisplay {
@@ -54,24 +60,37 @@ impl TerminalDisplay {
     }
 
     pub fn render_tool_result(&self, result: &ToolResult) {
-        let call = self
+        let active = self
             .active_calls
             .lock()
             .ok()
             .and_then(|mut calls| calls.remove(&result.tool_call_id));
-        print!(
-            "{}",
-            self.format_tool_result_with_call(result, call.as_ref())
-        );
+        let rendered =
+            self.format_tool_result_with_call(result, active.as_ref().map(|active| &active.call));
+        if self.live_enabled
+            && io::stdout().is_terminal()
+            && let Some(line_count) = active.and_then(|active| active.rendered_line_count)
+        {
+            print!("{}", clear_rendered_lines(line_count));
+        }
+        print!("{rendered}");
         flush_stdout();
     }
 
     pub fn render_tool_start(&self, call: &ToolCall) {
+        let rendered = self.live_enabled.then(|| self.format_tool_start(call));
+        let rendered_line_count = rendered.as_deref().map(rendered_line_count);
         if let Ok(mut calls) = self.active_calls.lock() {
-            calls.insert(call.id.clone(), call.clone());
+            calls.insert(
+                call.id.clone(),
+                ActiveToolCall {
+                    call: call.clone(),
+                    rendered_line_count,
+                },
+            );
         }
-        if self.live_enabled {
-            print!("{}", self.format_tool_start(call));
+        if let Some(rendered) = rendered {
+            print!("{rendered}");
             flush_stdout();
         }
     }
@@ -92,6 +111,19 @@ impl TerminalDisplay {
         call: Option<&ToolCall>,
     ) -> String {
         self.format_tool_result_with_call(result, call)
+    }
+
+    pub fn format_tool_result_replacing_start_for_call(
+        &self,
+        result: &ToolResult,
+        call: Option<&ToolCall>,
+        start_rendered_line_count: usize,
+    ) -> String {
+        format!(
+            "{}{}",
+            clear_rendered_lines(start_rendered_line_count),
+            self.format_tool_result_with_call(result, call)
+        )
     }
 
     fn format_tool_result_with_call(&self, result: &ToolResult, call: Option<&ToolCall>) -> String {
@@ -269,6 +301,14 @@ fn remove_exit_code_marker(content: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+fn rendered_line_count(rendered: &str) -> usize {
+    rendered.lines().count()
+}
+
+fn clear_rendered_lines(line_count: usize) -> String {
+    "\x1b[1A\x1b[2K\r".repeat(line_count)
 }
 
 fn visible_width(text: &str) -> usize {

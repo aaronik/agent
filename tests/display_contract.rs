@@ -87,6 +87,36 @@ fn diff_panels_render_with_diff_ansi() {
     assert!(rendered.contains("\x1b[32m+new\x1b[0m"));
 }
 
+#[test]
+fn live_tool_result_can_replace_running_panel_in_place() {
+    let display = TerminalDisplay::new();
+    let call = ToolCall {
+        id: "call_1".to_string(),
+        name: "run_shell_command".to_string(),
+        arguments: json!({"cmd": "echo hi"}),
+    };
+    let start = display.format_tool_start(&call);
+    let rendered = display.format_tool_result_replacing_start_for_call(
+        &ToolResult {
+            tool_call_id: "call_1".to_string(),
+            name: "run_shell_command".to_string(),
+            status: ToolStatus::Success,
+            content: "hi\n".to_string(),
+        },
+        Some(&call),
+        start.lines().count(),
+    );
+
+    assert!(rendered.starts_with("\x1b[1A\x1b[2K\r"));
+    assert_eq!(
+        rendered.matches("\x1b[1A\x1b[2K\r").count(),
+        start.lines().count()
+    );
+    assert!(rendered.contains("[OK Done]"));
+    assert!(rendered.contains("cmd=echo hi"));
+    assert!(rendered.contains("hi"));
+}
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<String>,
