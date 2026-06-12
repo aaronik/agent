@@ -4,16 +4,16 @@ Agent is a highly autonomous AI command line agent.
 
 ## Running the CLI in this environment
 
-When the user says “run `agent ...`” in this repo/environment, run the CLI via:
+When the user says “run `agent ...`” in this repo/environment, run the Rust CLI from the `rs/` folder via:
 
 ```sh
-python main.py ...
+cd rs && cargo run -- ...
 ```
 
-If `python` isn’t found, activate the virtualenv first:
+For example, `agent --model mock --single "run echo hi"` should be run as:
 
 ```sh
-source venv/bin/activate
+cd rs && cargo run -- --model mock --single "run echo hi"
 ```
 
 ## Testing Requirements
