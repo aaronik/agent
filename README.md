@@ -1,67 +1,40 @@
-# Agent
+# agent-rs
 
-A command-line tool to automate arbitrary requests autonomously using AI.
-This program gives the AI full control to runs arbitrary code, so don't use
-this with AIs you don't totally trust.
+Standalone Rust rewrite of the agent CLI.
 
-Usage: agent "Can we add a feature to this repository whereby such and such does such and such other thing? Include thorough tests, make sure they're all passing, and make sure pyright is giving no type errors."
+This crate must not run, embed, import, shell out to, or otherwise depend on Python code.
 
-Agent respects the AGENTS.md file, AGENTS.local.md, and the user level AGENTS files as well.
-This makes it easy to use in codebases without committing to doing extra work for this crazy little tool,
-that you wouldn't give to your real CLI agent.
+## Commands
 
-## Setup
-
-1. Create and activate a Python virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Usage
-
-You will need an OpenAI API key to use openai models. Set it as an environment variable:
-
-```bash
-export OPENAI_API_KEY=your_api_key_here
+```sh
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
 ```
 
-### Installing
+Run the mocked offline vertical slice:
 
-I just alias it:
-
-```bash
-# ~/.zshrc
-alias agent="/<path to the agent folder>/run.sh
+```sh
+cargo run -- --model mock --single "run echo hi"
 ```
 
-### Running the CLI
+Run with OpenAI:
 
-```bash
-agent "Let's work on this code together" # <-- starts a loop (human in the loop)
-agent -s "Research such and such topic" # <-- single agent invocation (including tool uses)
-agent --new "Let's start a fresh conversation" # <-- ignore the latest saved session
+```sh
+OPENAI_API_KEY=... cargo run -- --model openai:gpt-5.5
 ```
 
-Interactive runs automatically resume the latest saved session unless you pass `--new`.
+Run with Ollama:
 
----
-
-## Running Tests
-
-To run the tests, use your preferred test runner or execute the following command in the project root directory:
-
-```bash
-pytest tests
+```sh
+OLLAMA_URL=http://localhost:11434 cargo run -- --model ollama:llama3.1
 ```
 
----
+Refresh cached LiteLLM pricing data:
 
-## Notes
+```sh
+cargo run -- --update-pricing
+```
 
-* This is not meant for prime time - this is my personal little agent, something I'm hacking on on the side.
-I think a big part of becoming good with AI, is building your own AI assistant. Then you see how it's done, and you have full customizability of it. Have it build itself.
+Rust-native state is stored under `$HOME/.agent-rs`.
+Pricing data is cached under `$HOME/.agent-rs/pricing`.
