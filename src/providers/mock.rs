@@ -59,6 +59,7 @@ impl Provider for MockProvider {
                 id: "call_1".to_string(),
                 name: "run_shell_command".to_string(),
                 arguments: json!({
+                    "intent": "run the configured mock command",
                     "cmd": self.command,
                     "timeout": 30
                 }),

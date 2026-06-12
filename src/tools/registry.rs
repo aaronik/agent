@@ -1,6 +1,6 @@
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::agent::{ToolResult, ToolStatus};
 use crate::tools::browser::{BrowserControlArgs, browser_control};
@@ -84,6 +84,31 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, tool_call_id: String, name: &str, arguments: Value) -> ToolResult {
+        if !self
+            .definitions
+            .iter()
+            .any(|definition| definition.name == name)
+        {
+            return ToolResult {
+                tool_call_id,
+                name: name.to_string(),
+                status: ToolStatus::Error,
+                content: format!("unknown tool: {name}"),
+            };
+        }
+
+        let arguments = match validated_tool_arguments(arguments) {
+            Ok(arguments) => arguments,
+            Err(content) => {
+                return ToolResult {
+                    tool_call_id,
+                    name: name.to_string(),
+                    status: ToolStatus::Error,
+                    content,
+                };
+            }
+        };
+
         let content = match name {
             "run_shell_command" => match serde_json::from_value::<RunShellCommandArgs>(arguments) {
                 Ok(args) => run_shell_command(args).await,
@@ -147,8 +172,63 @@ where
 {
     ToolDefinition {
         name: name.to_string(),
-        description: description.to_string(),
-        parameters: serde_json::to_value(schema_for!(T))
-            .unwrap_or_else(|_| Value::Object(Default::default())),
+        description: format!(
+            "{description} Include an `intent` argument explaining why this tool is being called (80 characters or fewer)."
+        ),
+        parameters: with_intent_parameter(
+            serde_json::to_value(schema_for!(T))
+                .unwrap_or_else(|_| Value::Object(Default::default())),
+        ),
     }
+}
+
+fn with_intent_parameter(mut parameters: Value) -> Value {
+    let Value::Object(schema) = &mut parameters else {
+        return parameters;
+    };
+
+    let properties = schema
+        .entry("properties")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(properties) = properties {
+        properties.insert(
+            "intent".to_string(),
+            json!({
+                "type": "string",
+                "maxLength": 80,
+                "description": "why this tool is being called; state the intention in 80 characters or fewer."
+            }),
+        );
+    }
+
+    let required = schema
+        .entry("required")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(required) = required
+        && !required.iter().any(|field| field == "intent")
+    {
+        required.push(Value::String("intent".to_string()));
+    }
+
+    parameters
+}
+
+fn validated_tool_arguments(mut arguments: Value) -> Result<Value, String> {
+    let Value::Object(object) = &mut arguments else {
+        return Err(
+            "invalid tool arguments: expected JSON object with required intent".to_string(),
+        );
+    };
+
+    let Some(intent) = object.remove("intent") else {
+        return Err("invalid tool arguments: missing required intent".to_string());
+    };
+    let Some(intent) = intent.as_str() else {
+        return Err("invalid tool arguments: intent must be a string".to_string());
+    };
+    if intent.chars().count() > 80 {
+        return Err("invalid tool arguments: intent must be 80 characters or fewer".to_string());
+    }
+
+    Ok(arguments)
 }

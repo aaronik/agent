@@ -357,7 +357,7 @@ async fn agent_loop_errors_on_max_turn_exhaustion() {
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "communicate".to_string(),
-                    arguments: json!({"message": "still working"}),
+                    arguments: json!({"intent": "keep user updated", "message": "still working"}),
                 }],
                 usage: None,
                 metadata: Default::default(),

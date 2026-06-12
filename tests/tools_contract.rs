@@ -39,11 +39,34 @@ async fn registry_exposes_and_executes_active_tool_surface() {
         ]
     );
 
+    for definition in registry.definitions() {
+        let parameters = &definition.parameters;
+        let intent = parameters
+            .pointer("/properties/intent")
+            .expect("intent property exists");
+        assert_eq!(intent["type"], "string");
+        assert_eq!(intent["maxLength"], 80);
+        assert!(
+            intent["description"]
+                .as_str()
+                .expect("intent description")
+                .contains("why")
+        );
+        assert!(
+            parameters["required"]
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|field| field == "intent")
+        );
+        assert!(definition.description.contains("intent"));
+    }
+
     let result = registry
         .execute(
             "call_communicate".to_string(),
             "communicate",
-            json!({"message": "cutover progress"}),
+            json!({"intent": "share progress", "message": "cutover progress"}),
         )
         .await;
     assert_eq!(result.name, "communicate");
@@ -53,10 +76,32 @@ async fn registry_exposes_and_executes_active_tool_surface() {
         .execute(
             "call_bad".to_string(),
             "run_shell_command",
-            json!({"timeout": 30}),
+            json!({"intent": "run user command", "timeout": 30}),
         )
         .await;
     assert!(bad_args.content.contains("invalid tool arguments"));
+
+    let missing_intent = registry
+        .execute(
+            "call_missing_intent".to_string(),
+            "communicate",
+            json!({"message": "cutover progress"}),
+        )
+        .await;
+    assert!(missing_intent.content.contains("missing required intent"));
+
+    let long_intent = registry
+        .execute(
+            "call_long_intent".to_string(),
+            "communicate",
+            json!({"intent": "x".repeat(81), "message": "cutover progress"}),
+        )
+        .await;
+    assert!(
+        long_intent
+            .content
+            .contains("intent must be 80 characters or fewer")
+    );
 
     let unknown = registry
         .execute("call_unknown".to_string(), "unknown_tool", json!({}))
