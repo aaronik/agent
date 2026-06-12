@@ -1,0 +1,70 @@
+use async_trait::async_trait;
+use serde_json::json;
+
+use crate::agent::{AgentMessage, AssistantMessage, ToolCall};
+use crate::providers::{Provider, ProviderError};
+use crate::tools::ToolDefinition;
+
+#[derive(Clone, Debug)]
+pub struct MockProvider {
+    command: String,
+}
+
+impl Default for MockProvider {
+    fn default() -> Self {
+        Self {
+            command: "echo hi".to_string(),
+        }
+    }
+}
+
+impl MockProvider {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for MockProvider {
+    async fn complete(
+        &self,
+        messages: &[AgentMessage],
+        _tools: &[ToolDefinition],
+    ) -> Result<AssistantMessage, ProviderError> {
+        if messages
+            .iter()
+            .any(|message| matches!(message, AgentMessage::Tool(_)))
+        {
+            let output = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    AgentMessage::Tool(result) => Some(result.content.trim().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Ok(AssistantMessage {
+                content: format!("Tool completed: {output}"),
+                tool_calls: Vec::new(),
+                usage: None,
+                metadata: Default::default(),
+            });
+        }
+
+        Ok(AssistantMessage {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "run_shell_command".to_string(),
+                arguments: json!({
+                    "cmd": self.command,
+                    "timeout": 30
+                }),
+            }],
+            usage: None,
+            metadata: Default::default(),
+        })
+    }
+}

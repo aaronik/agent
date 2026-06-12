@@ -1,0 +1,35 @@
+[package]
+name = "agent-rs"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
+[dependencies]
+async-openai = { version = "0.41.0", features = ["byot", "responses", "chat-completion", "image", "model"] }
+async-trait = "0.1.89"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.53", features = ["derive", "env"] }
+crossterm = "0.29.0"
+dirs = "6.0.0"
+futures-util = "0.3.31"
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
+reedline = "0.48.0"
+schemars = { version = "1.2.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+similar = "3.1.1"
+syntect = "5.3.0"
+thiserror = "2.0.17"
+tiktoken-rs = "0.12.0"
+tokio = { version = "1.48.0", features = ["full"] }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.1.1"
+insta = { version = "1.44.1", features = ["json"] }
+predicates = "3.1.3"
+tempfile = "3.23.0"
+wiremock = "0.6.5"
