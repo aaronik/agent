@@ -4,26 +4,26 @@ use std::path::{Path, PathBuf};
 
 const MAX_IMPORT_DEPTH: usize = 5;
 
-pub fn load_all_claude_memory(start_dir: Option<&Path>) -> String {
-    find_all_claude_md_files(start_dir)
+pub fn load_all_agents_memory(start_dir: Option<&Path>) -> String {
+    find_all_agents_md_files(start_dir)
         .into_iter()
-        .filter_map(|path| read_claude_md(&path, 0, &mut HashSet::new()).ok())
+        .filter_map(|path| read_agents_md(&path, 0, &mut HashSet::new()).ok())
         .filter(|content| !content.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-pub fn find_all_claude_md_files(start_dir: Option<&Path>) -> Vec<PathBuf> {
+pub fn find_all_agents_md_files(start_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let start = start_dir
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let project = start.join("CLAUDE.md");
+    let project = start.join("AGENTS.md");
     if project.is_file() {
         files.push(project);
     }
     if let Some(home) = dirs::home_dir() {
-        let user = home.join(".claude").join("CLAUDE.md");
+        let user = home.join(".agents").join("AGENTS.md");
         if user.is_file() {
             files.push(user);
         }
@@ -31,7 +31,7 @@ pub fn find_all_claude_md_files(start_dir: Option<&Path>) -> Vec<PathBuf> {
     files
 }
 
-fn read_claude_md(
+fn read_agents_md(
     path: &Path,
     current_depth: usize,
     seen: &mut HashSet<PathBuf>,
@@ -51,7 +51,7 @@ fn read_claude_md(
     let mut parts = vec![content.clone()];
     for import_path in parse_import_paths(&content) {
         let resolved = resolve_import(base_dir, &import_path);
-        let imported = read_claude_md(&resolved, current_depth + 1, seen)?;
+        let imported = read_agents_md(&resolved, current_depth + 1, seen)?;
         if !imported.is_empty() {
             parts.push(imported);
         }

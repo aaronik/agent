@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
 use crate::display::TerminalDisplay;
-use crate::memory::load_all_claude_memory;
+use crate::memory::load_all_agents_memory;
 use crate::pricing::refresh_pricing_cache;
 use crate::providers::{
     Provider, build_provider, context_window_tokens, effective_model_name,
@@ -177,7 +177,7 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
     messages.push(AgentMessage::System {
         content: system_prompt(),
     });
-    let memory = load_all_claude_memory(None);
+    let memory = load_all_agents_memory(None);
     if !memory.is_empty() {
         messages.push(AgentMessage::System { content: memory });
     }

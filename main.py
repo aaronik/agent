@@ -15,7 +15,7 @@ from langchain_core.messages import (
 )
 
 from src.constants import system_string
-from src.claude_memory import load_all_claude_memory
+from src.agents_memory import load_all_agents_memory
 from src.markdown_render import print_markdown
 from src.util import (
     TokenUsage,
@@ -471,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         state = AgentState(
             messages=[
                 SystemMessage(content=system_string),
-                SystemMessage(content=load_all_claude_memory()),
+                SystemMessage(content=load_all_agents_memory()),
                 SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(
@@ -720,10 +720,10 @@ def main(argv: list[str] | None = None) -> int:
     # Print a tall robot and the model name
     print("\n𜱜\n𜱟 " + model_name)
 
-    # Discover CLAUDE.md memory files and print line counts for each
-    from src import claude_memory
+    # Discover AGENTS.md memory files and print line counts for each
+    from src import agents_memory
 
-    memory_files = claude_memory.find_all_claude_md_files()
+    memory_files = agents_memory.find_all_agents_md_files()
     if memory_files:
         print("\nMemory files found:")
         for mf in memory_files:
@@ -734,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 print(f"- {mf}: (could not read)")
     else:
-        print("\nNo CLAUDE.md memory files found")
+        print("\nNo AGENTS.md memory files found")
 
     # If resuming, load and replay the session *before* collecting new input.
     # This makes the CLI feel continuous (history appears immediately).
@@ -877,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
         state = AgentState(
             messages=[
                 SystemMessage(content=system_string),
-                SystemMessage(content=load_all_claude_memory()),
+                SystemMessage(content=load_all_agents_memory()),
                 SystemMessage(content=f"[SYSTEM INFO] uname -a: {sys_uname()}"),
                 SystemMessage(content=f"[SYSTEM INFO] pwd: {sys_pwd()}"),
                 *(

@@ -80,7 +80,7 @@ def _patch_main(monkeypatch: pytest.MonkeyPatch, *, prompt_inputs: list[str]):
     monkeypatch.setattr(agent_runner, "run_agent_with_display", lambda _a, _s, **_k: [AIMessage(content="ok")])
 
     # Avoid memory file scanning noise.
-    monkeypatch.setattr(main_mod, "load_all_claude_memory", lambda: "")
+    monkeypatch.setattr(main_mod, "load_all_agents_memory", lambda: "")
 
     return main_mod, tu, meta_lines
 

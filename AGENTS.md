@@ -20,10 +20,13 @@ cd rs && cargo run -- --model mock --single "run echo hi"
 
 **CRITICAL: No job is finished until all new functionality is tested and ALL tests are passing.**
 
-When adding or modifying functionality:
+When adding or modifying Rust functionality:
 1. Write tests FIRST (TDD approach preferred)
 2. Implement the functionality
-3. Ensure ALL tests pass (run `pytest tests/`)
+3. Ensure ALL tests pass:
+   ```sh
+   cd rs && cargo fmt --check && cargo clippy -- -D warnings && cargo test
+   ```
 4. Only then is the work considered complete
 
 Test guidelines:

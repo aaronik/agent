@@ -1,7 +1,7 @@
-from src.claude_memory import load_all_claude_memory
+from src.agents_memory import load_all_agents_memory
 
-# Let's piggy back off of claude's memory system
-claude_memory_text = load_all_claude_memory()
+# Let's piggy back off of agents's memory system
+agents_memory_text = load_all_agents_memory()
 
 system_string = (
     "[WHO YOU ARE]\n"
@@ -92,9 +92,9 @@ system_string = (
     "4. Prefer action over lengthy discussion\n"
     "\n"
     "[ADDITIONAL MEMORY CONTEXT]\n"
-    "The following context comes from CLAUDE.md files (user preferences and project-specific instructions). "
+    "The following context comes from AGENTS.md files (user preferences and project-specific instructions). "
     "These provide additional guidance and preferences. When they conflict with the above instructions, "
     "treat them as refinements or additions, not replacements:\n"
     "\n"
-    f"{claude_memory_text}\n"
+    f"{agents_memory_text}\n"
 )

@@ -1,3 +1,3 @@
-pub mod claude;
+pub mod agents;
 
-pub use claude::load_all_claude_memory;
+pub use agents::load_all_agents_memory;

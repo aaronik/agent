@@ -51,7 +51,7 @@ def resolve_path(base_dir, path):
         return os.path.normpath(os.path.join(base_dir, path))
 
 
-def read_claude_md(filepath, current_depth=0, seen_files=None):
+def read_agents_md(filepath, current_depth=0, seen_files=None):
     if seen_files is None:
         seen_files = set()
 
@@ -75,15 +75,15 @@ def read_claude_md(filepath, current_depth=0, seen_files=None):
 
     for import_path in import_paths:
         resolved = resolve_path(base_dir, import_path)
-        imported_text = read_claude_md(resolved, current_depth + 1, seen_files)
+        imported_text = read_agents_md(resolved, current_depth + 1, seen_files)
         if imported_text:
             memory_texts.append(imported_text)
 
     return "\n".join(memory_texts)
 
 
-def find_project_claude_md_file(start_dir=None):
-    """Return the CLAUDE.md path in the *current directory only*.
+def find_project_agents_md_file(start_dir=None):
+    """Return the AGENTS.md path in the *current directory only*.
 
     This intentionally does NOT search parent directories or recurse into
     subdirectories.
@@ -92,36 +92,36 @@ def find_project_claude_md_file(start_dir=None):
     if start_dir is None:
         start_dir = os.getcwd()
 
-    candidate = os.path.join(os.path.abspath(start_dir), "CLAUDE.md")
+    candidate = os.path.join(os.path.abspath(start_dir), "AGENTS.md")
     return candidate if os.path.isfile(candidate) else None
 
 
-def find_user_claude_md_file():
-    """Return the user-level CLAUDE.md path at $HOME/.claude/CLAUDE.md."""
+def find_user_agents_md_file():
+    """Return the user-level AGENTS.md path at $HOME/.agents/AGENTS.md."""
 
-    candidate = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    candidate = os.path.join(os.path.expanduser("~"), ".agents", "AGENTS.md")
     return candidate if os.path.isfile(candidate) else None
 
 
-def find_all_claude_md_files(start_dir=None):
+def find_all_agents_md_files(start_dir=None):
     """Return memory files in priority order: project-local then user-level."""
 
     files = []
 
-    project = find_project_claude_md_file(start_dir)
+    project = find_project_agents_md_file(start_dir)
     if project:
         files.append(project)
 
-    user = find_user_claude_md_file()
+    user = find_user_agents_md_file()
     if user:
         files.append(user)
 
     return files
 
 
-def load_all_claude_memory(start_dir=None):
-    files = find_all_claude_md_files(start_dir)
+def load_all_agents_memory(start_dir=None):
+    files = find_all_agents_md_files(start_dir)
     all_memory = []
     for f in files:
-        all_memory.append(read_claude_md(f))
+        all_memory.append(read_agents_md(f))
     return "\n\n".join(all_memory)

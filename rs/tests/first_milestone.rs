@@ -48,6 +48,49 @@ fn mock_single_turn_executes_tool_and_saves_session() {
 }
 
 #[test]
+fn new_session_loads_agents_md_memory_file() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "project agent instructions",
+    )
+    .expect("write agents memory");
+    std::fs::write(
+        project.path().join("CLAUDE.md"),
+        "stale claude instructions",
+    )
+    .expect("write claude memory");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.current_dir(project.path())
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    let sessions_dir = temp_home.path().join(".agent-rs").join("sessions");
+    let entries = std::fs::read_dir(&sessions_dir)
+        .expect("sessions dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("session entries");
+    let payload = std::fs::read_to_string(entries[0].path()).expect("session payload");
+    let value: serde_json::Value = serde_json::from_str(&payload).expect("session json");
+    let system_messages = value["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter_map(|message| {
+            (message["role"] == "system").then(|| message["content"].as_str().unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(system_messages.contains("project agent instructions"));
+    assert!(!system_messages.contains("stale claude instructions"));
+}
+
+#[test]
 fn help_does_not_require_provider_configuration() {
     let mut cmd = Command::cargo_bin("agent").expect("agent binary");
     cmd.env_remove("OPENAI_API_KEY")

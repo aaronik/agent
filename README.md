@@ -6,7 +6,7 @@ this with AIs you don't totally trust.
 
 Usage: agent "Can we add a feature to this repository whereby such and such does such and such other thing? Include thorough tests, make sure they're all passing, and make sure pyright is giving no type errors."
 
-Agent respects the CLAUDE.md file, CLAUDE.local.md, and the user level CLAUDE files as well.
+Agent respects the AGENTS.md file, AGENTS.local.md, and the user level AGENTS files as well.
 This makes it easy to use in codebases without committing to doing extra work for this crazy little tool,
 that you wouldn't give to your real CLI agent.
 
