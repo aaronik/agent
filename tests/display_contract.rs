@@ -23,6 +23,22 @@ fn tool_panels_render_without_raw_tool_call_json() {
 }
 
 #[test]
+fn shell_command_panel_shows_full_command_without_truncation() {
+    let display = TerminalDisplay::new();
+    let long_command = format!("printf '{}'", "0123456789".repeat(30));
+    let rendered = display.format_tool_start(&ToolCall {
+        id: "call_1".to_string(),
+        name: "run_shell_command".to_string(),
+        arguments: json!({"cmd": long_command, "timeout": 30}),
+    });
+
+    assert!(rendered.contains("cmd=printf"));
+    assert!(rendered.contains("7890123456789"));
+    assert!(!rendered.contains('…'));
+    assert!(!rendered.contains("..."));
+}
+
+#[test]
 fn communicate_renders_as_progress_text() {
     let display = TerminalDisplay::new();
     let rendered = display.format_tool_result(&ToolResult {

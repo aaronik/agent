@@ -48,6 +48,27 @@ fn mock_single_turn_executes_tool_and_saves_session() {
 }
 
 #[test]
+fn resume_replay_shows_tool_commands() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut initial = Command::cargo_bin("agent").expect("agent binary");
+    initial
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    let mut replay = Command::cargo_bin("agent").expect("agent binary");
+    replay
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "--resume"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("run_shell_command"))
+        .stdout(predicates::str::contains("cmd=echo hi"));
+}
+
+#[test]
 fn new_session_loads_agents_md_memory_file() {
     let temp_home = tempfile::tempdir().expect("temp home");
     let project = tempfile::tempdir().expect("project");

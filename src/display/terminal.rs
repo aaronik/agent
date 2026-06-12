@@ -86,6 +86,14 @@ impl TerminalDisplay {
         self.format_tool_result_with_call(result, None)
     }
 
+    pub fn format_tool_result_for_call(
+        &self,
+        result: &ToolResult,
+        call: Option<&ToolCall>,
+    ) -> String {
+        self.format_tool_result_with_call(result, call)
+    }
+
     fn format_tool_result_with_call(&self, result: &ToolResult, call: Option<&ToolCall>) -> String {
         if result.name == "communicate" {
             return format!("{DIM}{ITALIC}{}{RESET}\n", result.content.trim());
@@ -135,33 +143,35 @@ fn tool_title(name: &str, status: VisualToolStatus) -> String {
 }
 
 fn tool_call_body(call: &ToolCall) -> Vec<String> {
-    format_args_one_line(call)
+    format_args_lines(call)
         .into_iter()
         .map(|line| styled(DIM, &line))
         .collect()
 }
 
-fn format_args_one_line(call: &ToolCall) -> Option<String> {
-    let args = call.arguments.as_object()?;
+fn format_args_lines(call: &ToolCall) -> Vec<String> {
+    let Some(args) = call.arguments.as_object() else {
+        return Vec::new();
+    };
     if args.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let mut parts = Vec::new();
+    let mut lines = Vec::new();
     for (key, value) in args {
         let rendered = match value {
             serde_json::Value::String(value) => value.clone(),
             other => other.to_string(),
         };
-        parts.push(format!("{key}={rendered}"));
+        let mut rendered_lines = rendered.lines();
+        if let Some(first) = rendered_lines.next() {
+            lines.push(format!("{key}={first}"));
+            lines.extend(rendered_lines.map(str::to_string));
+        } else {
+            lines.push(format!("{key}="));
+        }
     }
-
-    let mut line = parts.join(", ");
-    if line.chars().count() > 120 {
-        line = line.chars().take(117).collect::<String>();
-        line.push_str("...");
-    }
-    Some(line)
+    lines
 }
 
 fn format_tool_content(name: &str, content: &str) -> String {
@@ -206,14 +216,15 @@ fn format_panel(title: &str, body: &[String]) -> String {
         body.to_vec()
     };
     for line in body_lines {
-        let line = truncate_visible(&line, content_width);
-        let padding = content_width.saturating_sub(visible_width(&line));
-        out.push_str(&format!(
-            "{GREY}│{RESET}{}{line}{}{}{GREY}│{RESET}\n",
-            " ".repeat(PANEL_PADDING),
-            " ".repeat(padding),
-            " ".repeat(PANEL_PADDING)
-        ));
+        for line in wrap_visible(&line, content_width) {
+            let padding = content_width.saturating_sub(visible_width(&line));
+            out.push_str(&format!(
+                "{GREY}│{RESET}{}{line}{}{}{GREY}│{RESET}\n",
+                " ".repeat(PANEL_PADDING),
+                " ".repeat(padding),
+                " ".repeat(PANEL_PADDING)
+            ));
+        }
     }
 
     out.push_str(&format!(
@@ -264,34 +275,41 @@ fn visible_width(text: &str) -> usize {
     strip_ansi(text).chars().count()
 }
 
-fn truncate_visible(text: &str, max_width: usize) -> String {
-    if visible_width(text) <= max_width {
-        return text.to_string();
+fn wrap_visible(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || visible_width(text) <= max_width {
+        return vec![text.to_string()];
     }
 
-    let target = max_width.saturating_sub(1);
-    let mut out = String::new();
+    let mut out = Vec::new();
+    let mut line = String::new();
     let mut visible = 0;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            out.push(ch);
+            line.push(ch);
             for next in chars.by_ref() {
-                out.push(next);
+                line.push(next);
                 if next == 'm' {
                     break;
                 }
             }
             continue;
         }
-        if visible >= target {
-            break;
+
+        if visible >= max_width {
+            out.push(std::mem::take(&mut line));
+            visible = 0;
         }
-        out.push(ch);
+        line.push(ch);
         visible += 1;
     }
-    out.push('…');
-    out.push_str(RESET);
+
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
     out
 }
 

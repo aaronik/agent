@@ -189,10 +189,23 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
 }
 
 fn replay_session(session: &Session, display: &TerminalDisplay) {
+    let mut tool_calls = std::collections::HashMap::new();
     for message in &session.messages {
         display.render_new_message(message);
-        if let AgentMessage::Tool(result) = message {
-            display.render_tool_result(result);
+        match message {
+            AgentMessage::Assistant(assistant) => {
+                for call in &assistant.tool_calls {
+                    tool_calls.insert(call.id.clone(), call.clone());
+                }
+            }
+            AgentMessage::Tool(result) => {
+                let call = tool_calls.remove(&result.tool_call_id);
+                print!(
+                    "{}",
+                    display.format_tool_result_for_call(result, call.as_ref())
+                );
+            }
+            _ => {}
         }
     }
 }
