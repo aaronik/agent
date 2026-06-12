@@ -1,3 +1,6 @@
+use std::sync::Mutex;
+
+use agent_rs::tools::browser::{BrowserControlArgs, browser_control};
 use agent_rs::tools::fetch::{FetchArgs, fetch};
 use agent_rs::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
@@ -9,6 +12,8 @@ use agent_rs::tools::spawn::{SpawnArgs, spawn};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
 async fn registry_exposes_and_executes_active_tool_surface() {
@@ -29,6 +34,7 @@ async fn registry_exposes_and_executes_active_tool_surface() {
             "search_replace",
             "gen_image",
             "communicate",
+            "browser_control",
             "spawn",
         ]
     );
@@ -81,7 +87,7 @@ async fn run_shell_command_reports_stdout_and_exit_code() {
 #[tokio::test]
 async fn run_shell_command_reports_timeout() {
     let timed_out = run_shell_command(RunShellCommandArgs {
-        cmd: "sleep 2".to_string(),
+        cmd: "/bin/sleep 2".to_string(),
         timeout: 1,
     })
     .await
@@ -166,6 +172,24 @@ async fn gen_image_uses_configured_openai_endpoint() {
     .expect("image generation");
 
     assert!(output.contains("https://example.test/image.png"));
+}
+
+#[tokio::test]
+async fn browser_control_fails_fast_when_playwright_missing_from_path() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _path = EnvGuard::set("PATH", "");
+    let output = browser_control(BrowserControlArgs {
+        javascript: "return await page.title();".to_string(),
+        url: Some("https://example.com".to_string()),
+        timeout: 1,
+        close: false,
+        reset: false,
+    })
+    .await
+    .expect_err("missing playwright should fail before Chrome/profile checks");
+
+    assert!(output.contains("playwright is not installed or not found in PATH"));
+    assert!(output.contains("browser_control cannot work"));
 }
 
 #[tokio::test]

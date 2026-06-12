@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::agent::{ToolResult, ToolStatus};
+use crate::tools::browser::{BrowserControlArgs, browser_control};
 use crate::tools::communicate::{CommunicateArgs, communicate};
 use crate::tools::fetch::{FetchArgs, fetch};
 use crate::tools::files::{
@@ -63,6 +64,10 @@ impl ToolRegistry {
                 "communicate",
                 "Communicate progress or intermediate status to the user.",
             ),
+            definition::<BrowserControlArgs>(
+                "browser_control",
+                "Control a Chrome browser signed in as the user by copying the Default profile into a temporary directory, launching Chrome with DevTools enabled, and running Playwright JavaScript against it. The browser session persists across calls by default so exploration state can be reused; set close=true when the task is complete, or reset=true to start fresh. Requires global playwright in PATH.",
+            ),
         ];
         if include_spawn {
             definitions.push(definition::<SpawnArgs>(
@@ -106,6 +111,10 @@ impl ToolRegistry {
             },
             "communicate" => match serde_json::from_value::<CommunicateArgs>(arguments) {
                 Ok(args) => communicate(args).await,
+                Err(err) => Err(format!("invalid tool arguments: {err}")),
+            },
+            "browser_control" => match serde_json::from_value::<BrowserControlArgs>(arguments) {
+                Ok(args) => browser_control(args).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {

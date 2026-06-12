@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod communicate;
 pub mod fetch;
 pub mod files;
