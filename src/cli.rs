@@ -1,4 +1,11 @@
 use clap::Parser;
+use crossterm::{
+    event::{
+        self, Event, KeyCode as CrosstermKeyCode, KeyEventKind,
+        KeyModifiers as CrosstermKeyModifiers,
+    },
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
 use reedline::{
     ColumnarMenu, Completer, DefaultPrompt, EditCommand, FileBackedHistory, KeyCode, KeyModifiers,
     Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion, Vi,
@@ -6,6 +13,10 @@ use reedline::{
 };
 use std::error::Error;
 use std::io::IsTerminal;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
@@ -123,6 +134,7 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             loop_runner = Some(build_loop_runner(&model_name)?);
         }
         let cancellation_token = CancellationToken::new();
+        let esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
         let result = tokio::select! {
             result = loop_runner
                 .as_ref()
@@ -137,16 +149,29 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
                         display.render_new_message(message);
                     },
                     |call| display.render_tool_start(call),
-                ) => result?,
+                ) => result,
+            _ = cancellation_token.cancelled() => Err(crate::providers::ProviderError::Cancelled),
             _ = tokio::signal::ctrl_c() => {
                 cancellation_token.cancel();
+                esc_abort.stop();
                 return Err("cancelled".into());
             }
         };
+        esc_abort.stop();
 
-        session.messages.extend(result.new_messages);
-        session.replace_messages(session.messages.clone());
-        store.save(&session)?;
+        match result {
+            Ok(result) => {
+                session.messages.extend(result.new_messages);
+                session.replace_messages(session.messages.clone());
+                store.save(&session)?;
+            }
+            Err(crate::providers::ProviderError::Cancelled)
+                if cancellation_token.is_cancelled() =>
+            {
+                eprintln!("turn aborted");
+            }
+            Err(err) => return Err(err.into()),
+        }
 
         if args.single {
             break;
@@ -154,6 +179,56 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+struct EscAbortWatcher {
+    stop: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl EscAbortWatcher {
+    fn spawn(cancellation_token: CancellationToken) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_watcher = Arc::clone(&stop);
+        let handle = tokio::task::spawn_blocking(move || {
+            if enable_raw_mode().is_err() {
+                return;
+            }
+            let _raw_mode = RawModeGuard;
+            while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
+                match event::poll(Duration::from_millis(50)) {
+                    Ok(true) => match event::read() {
+                        Ok(Event::Key(key))
+                            if key.code == CrosstermKeyCode::Esc
+                                && key.kind != KeyEventKind::Release
+                                && key.modifiers == CrosstermKeyModifiers::NONE =>
+                        {
+                            cancellation_token.cancel();
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    },
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { stop, handle }
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.handle.abort();
+    }
+}
+
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
 }
 
 fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, Box<dyn Error>> {

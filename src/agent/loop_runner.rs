@@ -84,10 +84,12 @@ where
                 &self.config.model,
                 self.config.max_context_tokens,
             );
-            let events = self
-                .provider
-                .events(&provider_messages, self.tools.definitions())
-                .await?;
+            let events = tokio::select! {
+                events = self
+                    .provider
+                    .events(&provider_messages, self.tools.definitions()) => events?,
+                _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+            };
             check_cancelled(cancellation_token)?;
             let assistant = assistant_from_events(events)?;
             usage = assistant.usage.clone().or(usage);
@@ -110,10 +112,12 @@ where
             for call in tool_calls {
                 check_cancelled(cancellation_token)?;
                 on_tool_start(&call);
-                let result = self
-                    .tools
-                    .execute(call.id.clone(), &call.name, call.arguments.clone())
-                    .await;
+                let result = tokio::select! {
+                    result = self
+                        .tools
+                        .execute(call.id.clone(), &call.name, call.arguments.clone()) => result,
+                    _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+                };
                 check_cancelled(cancellation_token)?;
                 let tool_message = AgentMessage::Tool(result);
                 on_message(&tool_message);
