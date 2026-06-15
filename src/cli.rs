@@ -668,37 +668,53 @@ fn agent_vi_mode() -> SlashCompletionVi {
 
 struct SlashCompletionVi {
     inner: Vi,
+    slash_completion_active: bool,
 }
 
 impl SlashCompletionVi {
     fn new(inner: Vi) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            slash_completion_active: false,
+        }
+    }
+
+    fn handle_event(&mut self, event: ReedlineEvent) -> ReedlineEvent {
+        match event {
+            ReedlineEvent::Edit(commands) if inserts_slash(&commands) => {
+                self.slash_completion_active = true;
+                ReedlineEvent::Multiple(vec![
+                    ReedlineEvent::Edit(commands),
+                    ReedlineEvent::Menu(COMPLETION_MENU_NAME.to_string()),
+                ])
+            }
+            ReedlineEvent::Enter | ReedlineEvent::Submit if self.slash_completion_active => {
+                self.slash_completion_active = false;
+                ReedlineEvent::Multiple(vec![ReedlineEvent::Enter, ReedlineEvent::Enter])
+            }
+            ReedlineEvent::Esc => {
+                self.slash_completion_active = false;
+                ReedlineEvent::Esc
+            }
+            ReedlineEvent::Multiple(events) => ReedlineEvent::Multiple(
+                events
+                    .into_iter()
+                    .map(|event| self.handle_event(event))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 }
 
 impl EditMode for SlashCompletionVi {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
-        open_completion_menu_after_slash(self.inner.parse_event(event))
+        let event = self.inner.parse_event(event);
+        self.handle_event(event)
     }
 
     fn edit_mode(&self) -> PromptEditMode {
         self.inner.edit_mode()
-    }
-}
-
-fn open_completion_menu_after_slash(event: ReedlineEvent) -> ReedlineEvent {
-    match event {
-        ReedlineEvent::Edit(commands) if inserts_slash(&commands) => ReedlineEvent::Multiple(vec![
-            ReedlineEvent::Edit(commands),
-            ReedlineEvent::Menu(COMPLETION_MENU_NAME.to_string()),
-        ]),
-        ReedlineEvent::Multiple(events) => ReedlineEvent::Multiple(
-            events
-                .into_iter()
-                .map(open_completion_menu_after_slash)
-                .collect(),
-        ),
-        other => other,
     }
 }
 
@@ -769,5 +785,36 @@ mod tests {
         assert_eq!(termios.c_lflag & libc::ISIG, libc::ISIG);
         assert_eq!(termios.c_cc[libc::VMIN], 0);
         assert_eq!(termios.c_cc[libc::VTIME], 1);
+    }
+}
+
+#[cfg(test)]
+mod completion_input_tests {
+    use super::*;
+    use crossterm::event::{Event, KeyEvent};
+
+    fn key(code: KeyCode) -> ReedlineRawEvent {
+        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .expect("reedline raw event")
+    }
+
+    #[test]
+    fn enter_after_auto_opened_slash_completion_accepts_and_submits() {
+        let mut mode = agent_vi_mode();
+
+        assert!(matches!(
+            mode.parse_event(key(KeyCode::Char('/'))),
+            ReedlineEvent::Multiple(events)
+                if events == vec![
+                    ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
+                    ReedlineEvent::Menu(COMPLETION_MENU_NAME.to_string()),
+                ]
+        ));
+
+        assert!(matches!(
+            mode.parse_event(key(KeyCode::Enter)),
+            ReedlineEvent::Multiple(events)
+                if events == vec![ReedlineEvent::Enter, ReedlineEvent::Enter]
+        ));
     }
 }
