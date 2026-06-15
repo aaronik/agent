@@ -21,6 +21,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "insta",
+ "libc",
  "predicates",
  "reedline",
  "reqwest",

@@ -1,11 +1,9 @@
 use clap::Parser;
-use crossterm::{
-    event::{
-        self, Event, KeyCode as CrosstermKeyCode, KeyEventKind,
-        KeyModifiers as CrosstermKeyModifiers,
-    },
-    terminal::{disable_raw_mode, enable_raw_mode},
+use crossterm::event::{
+    self, Event, KeyCode as CrosstermKeyCode, KeyEventKind, KeyModifiers as CrosstermKeyModifiers,
 };
+#[cfg(not(unix))]
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reedline::{
     ColumnarMenu, Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode,
     KeyModifiers, Keybindings, MenuBuilder, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu,
@@ -154,11 +152,11 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             _ = cancellation_token.cancelled() => Err(crate::providers::ProviderError::Cancelled),
             _ = tokio::signal::ctrl_c() => {
                 cancellation_token.cancel();
-                esc_abort.stop();
+                esc_abort.stop().await;
                 return Err("cancelled".into());
             }
         };
-        esc_abort.stop();
+        esc_abort.stop().await;
 
         match result {
             Ok(result) => {
@@ -184,49 +182,115 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
 
 struct EscAbortWatcher {
     stop: Arc<AtomicBool>,
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EscAbortWatcher {
     fn spawn(cancellation_token: CancellationToken) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_watcher = Arc::clone(&stop);
-        let handle = tokio::task::spawn_blocking(move || {
-            if enable_raw_mode().is_err() {
-                return;
-            }
-            let _raw_mode = RawModeGuard;
-            while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
-                match event::poll(Duration::from_millis(50)) {
-                    Ok(true) => match event::read() {
-                        Ok(Event::Key(key))
-                            if key.code == CrosstermKeyCode::Esc
-                                && key.kind != KeyEventKind::Release
-                                && key.modifiers == CrosstermKeyModifiers::NONE =>
-                        {
-                            cancellation_token.cancel();
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    },
-                    Ok(false) => {}
-                    Err(_) => break,
+        let handle = std::io::stdin().is_terminal().then(|| {
+            let stop_watcher = Arc::clone(&stop);
+            tokio::task::spawn_blocking(move || {
+                if InputModeGuard::enable().is_err() {
+                    return;
                 }
-            }
+                let _input_mode = InputModeGuard;
+                while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
+                    match event::poll(Duration::from_millis(50)) {
+                        Ok(true) => match event::read() {
+                            Ok(Event::Key(key))
+                                if key.code == CrosstermKeyCode::Esc
+                                    && key.kind != KeyEventKind::Release
+                                    && key.modifiers == CrosstermKeyModifiers::NONE =>
+                            {
+                                cancellation_token.cancel();
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(_) => break,
+                        },
+                        Ok(false) => {}
+                        Err(_) => break,
+                    }
+                }
+            })
         });
         Self { stop, handle }
     }
 
-    fn stop(self) {
+    async fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.handle.abort();
+        if let Some(handle) = self.handle {
+            let _ = handle.await;
+        }
     }
 }
 
-struct RawModeGuard;
+#[cfg(unix)]
+struct InputModeGuard;
 
-impl Drop for RawModeGuard {
+#[cfg(unix)]
+impl InputModeGuard {
+    fn enable() -> std::io::Result<()> {
+        use std::mem::MaybeUninit;
+
+        let mut termios = MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: termios points to valid uninitialized storage for tcgetattr to fill.
+        let result = unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: tcgetattr succeeded, so termios has been initialized.
+        let original = unsafe { termios.assume_init() };
+        let mut input_mode = original;
+        apply_esc_abort_input_mode(&mut input_mode);
+        // SAFETY: input_mode is a valid termios value for stdin.
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &input_mode) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        TERMINAL_MODE_ORIGINAL.with(|saved| saved.set(Some(original)));
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InputModeGuard {
+    fn drop(&mut self) {
+        TERMINAL_MODE_ORIGINAL.with(|saved| {
+            if let Some(original) = saved.take() {
+                // SAFETY: original was captured from tcgetattr for stdin in this thread.
+                let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+thread_local! {
+    static TERMINAL_MODE_ORIGINAL: std::cell::Cell<Option<libc::termios>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(unix)]
+fn apply_esc_abort_input_mode(termios: &mut libc::termios) {
+    termios.c_iflag &= !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
+    termios.c_cflag |= libc::CS8;
+    termios.c_lflag &= !(libc::ECHO | libc::ICANON | libc::IEXTEN);
+    termios.c_cc[libc::VMIN] = 0;
+    termios.c_cc[libc::VTIME] = 1;
+}
+
+#[cfg(not(unix))]
+struct InputModeGuard;
+
+#[cfg(not(unix))]
+impl InputModeGuard {
+    fn enable() -> std::io::Result<()> {
+        enable_raw_mode()
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for InputModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
     }
@@ -683,4 +747,27 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
         search_start += offset + query_char.len_utf8();
     }
     Some(score)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn esc_abort_input_mode_preserves_output_processing() {
+        // SAFETY: the test fills the fields it asserts against before reading them.
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        termios.c_iflag = libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON;
+        termios.c_oflag = libc::OPOST;
+        termios.c_lflag = libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG;
+
+        super::apply_esc_abort_input_mode(&mut termios);
+
+        assert_eq!(termios.c_oflag & libc::OPOST, libc::OPOST);
+        assert_eq!(termios.c_lflag & libc::ICANON, 0);
+        assert_eq!(termios.c_lflag & libc::ECHO, 0);
+        assert_eq!(termios.c_lflag & libc::IEXTEN, 0);
+        assert_eq!(termios.c_lflag & libc::ISIG, libc::ISIG);
+        assert_eq!(termios.c_cc[libc::VMIN], 0);
+        assert_eq!(termios.c_cc[libc::VTIME], 1);
+    }
 }
