@@ -1,4 +1,4 @@
-use agent_rs::cli::completion_values_for_line;
+use agent_rs::cli::{completion_values_for_line, completion_values_for_line_with_models};
 use agent_rs::session::SessionStore;
 use assert_cmd::Command;
 use serde_json::json;
@@ -220,10 +220,14 @@ fn slash_completion_includes_models_command_and_model_ids() {
 
     let command_values = completion_values_for_line(&store, "/mod", 4);
     assert!(command_values.contains(&"/models".to_string()));
-    assert!(command_values.contains(&"/models mock".to_string()));
+    assert!(!command_values.contains(&"/models mock".to_string()));
+
+    let exact_command_values = completion_values_for_line(&store, "/clear", 6);
+    assert_eq!(exact_command_values.first(), Some(&"/clear".to_string()));
 
     let model_values = completion_values_for_line(&store, "/models ", 8);
-    assert!(model_values.contains(&"/models mock".to_string()));
+    assert!(!model_values.contains(&"/models mock".to_string()));
+    assert!(model_values.contains(&"/models gpt-5.5".to_string()));
     assert!(model_values.contains(&"/models openai:gpt-5.5".to_string()));
 
     let fuzzy_values = completion_values_for_line(&store, "/models op", 10);
@@ -231,6 +235,40 @@ fn slash_completion_includes_models_command_and_model_ids() {
         fuzzy_values.first(),
         Some(&"/models openai:gpt-5.5".to_string())
     );
+}
+
+#[test]
+fn slash_completion_includes_dynamic_model_ids_but_not_pricing_cache_surface() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let store = SessionStore::with_root(temp_home.path().join(".agent-rs"));
+    let pricing_dir = store.root().join("pricing");
+    std::fs::create_dir_all(&pricing_dir).expect("pricing dir");
+    std::fs::write(
+        pricing_dir.join("model_prices_and_context_window.json"),
+        serde_json::to_string(&json!({
+            "gpt-4o": { "input_cost_per_token": 0.000001 },
+            "openai/gpt-4.1": { "input_cost_per_token": 0.000001 },
+            "anthropic/claude-sonnet-4": { "input_cost_per_token": 0.000001 },
+            "amazon/nova-pro": { "input_cost_per_token": 0.000001 }
+        }))
+        .expect("pricing json"),
+    )
+    .expect("write pricing cache");
+
+    let values = completion_values_for_line_with_models(
+        &store,
+        "/models ",
+        8,
+        &["openai:gpt-5.2".to_string(), "ollama:llama3.2".to_string()],
+    );
+
+    assert!(values.contains(&"/models openai:gpt-5.2".to_string()));
+    assert!(values.contains(&"/models ollama:llama3.2".to_string()));
+    assert!(!values.contains(&"/models gpt-4o".to_string()));
+    assert!(!values.contains(&"/models openai:gpt-4o".to_string()));
+    assert!(!values.contains(&"/models openai:gpt-4.1".to_string()));
+    assert!(!values.contains(&"/models anthropic:claude-sonnet-4".to_string()));
+    assert!(!values.contains(&"/models amazon:nova-pro".to_string()));
 }
 
 #[tokio::test]

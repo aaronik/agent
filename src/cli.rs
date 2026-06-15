@@ -7,9 +7,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use reedline::{
-    ColumnarMenu, Completer, DefaultPrompt, EditCommand, FileBackedHistory, KeyCode, KeyModifiers,
-    Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion, Vi,
-    default_vi_insert_keybindings, default_vi_normal_keybindings,
+    ColumnarMenu, Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode,
+    KeyModifiers, Keybindings, MenuBuilder, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu,
+    ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
+    default_vi_normal_keybindings,
 };
 use std::error::Error;
 use std::io::IsTerminal;
@@ -102,7 +103,7 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
                 if args.single && !session.messages.is_empty() {
                     break;
                 }
-                prompt_for_input(&store, &session, &model_name)?
+                prompt_for_input(&store, &session, &model_name).await?
             }
         };
 
@@ -285,7 +286,7 @@ fn replay_session(session: &Session, display: &TerminalDisplay) {
     }
 }
 
-fn prompt_for_input(
+async fn prompt_for_input(
     store: &SessionStore,
     session: &Session,
     model_name: &str,
@@ -302,15 +303,19 @@ fn prompt_for_input(
         10_000,
         store.prompt_history_path(),
     )?);
-    let completer = Box::new(AgentCompleter::new(completion_candidates(store)));
+    let available_models = list_models().await;
+    let completer = Box::new(AgentCompleter::new(completion_candidates(
+        store,
+        &available_models,
+    )));
     let mut line_editor = Reedline::create()
         .with_history(history)
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(
             ColumnarMenu::default().with_name(COMPLETION_MENU_NAME),
         )))
-        .with_quick_completions(true)
-        .with_partial_completions(true)
+        .with_quick_completions(false)
+        .with_partial_completions(false)
         .with_edit_mode(Box::new(agent_vi_mode()));
     let prompt = DefaultPrompt::default();
     println!(
@@ -472,25 +477,66 @@ fn system_prompt() -> String {
     "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented.".to_string()
 }
 
-fn completion_candidates(store: &SessionStore) -> Vec<String> {
+fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {
     let mut candidates = vec![
         "/clear".to_string(),
         "/help".to_string(),
         "/models".to_string(),
-        "/models mock".to_string(),
-        "/models openai:gpt-5.5".to_string(),
         "/pricing refresh".to_string(),
         "/resume".to_string(),
         "/resume latest".to_string(),
     ];
+
+    candidates.extend(
+        model_completion_values(store, available_models)
+            .into_iter()
+            .map(|model| format!("/models {model}")),
+    );
+
     if let Ok(labels) = store.list_session_labels(80) {
         candidates.extend(labels.into_iter().map(|label| format!("/resume {label}")));
     }
     candidates
 }
 
+fn model_completion_values(store: &SessionStore, available_models: &[String]) -> Vec<String> {
+    let mut models = vec![
+        crate::providers::configuration::DEFAULT_MODEL.to_string(),
+        format!("openai:{}", crate::providers::configuration::DEFAULT_MODEL),
+    ];
+
+    models.extend(available_models.iter().cloned());
+
+    for env_name in ["AGENT_MODEL", "OPENAI_MODEL"] {
+        if let Ok(model) = std::env::var(env_name)
+            && !model.trim().is_empty()
+        {
+            models.push(model);
+        }
+    }
+    if let Ok(model) = std::env::var("OLLAMA_MODEL")
+        && !model.trim().is_empty()
+    {
+        models.push(format!("ollama:{model}"));
+    }
+
+    let _ = store;
+    models.sort();
+    models.dedup();
+    models
+}
+
 pub fn completion_values_for_line(store: &SessionStore, line: &str, pos: usize) -> Vec<String> {
-    AgentCompleter::new(completion_candidates(store))
+    completion_values_for_line_with_models(store, line, pos, &[])
+}
+
+pub fn completion_values_for_line_with_models(
+    store: &SessionStore,
+    line: &str,
+    pos: usize,
+    available_models: &[String],
+) -> Vec<String> {
+    AgentCompleter::new(completion_candidates(store, available_models))
         .complete(line, pos)
         .into_iter()
         .map(|suggestion| suggestion.value)
@@ -525,9 +571,6 @@ impl Completer for AgentCompleter {
             .iter()
             .filter_map(|candidate| {
                 let score = completion_score(candidate, prefix)?;
-                if candidate.len() <= prefix.len() && candidate == prefix {
-                    return None;
-                }
                 Some((score, candidate))
             })
             .collect::<Vec<_>>();
@@ -551,12 +594,56 @@ impl Completer for AgentCompleter {
     }
 }
 
-fn agent_vi_mode() -> Vi {
+fn agent_vi_mode() -> SlashCompletionVi {
     let mut insert_keybindings = default_vi_insert_keybindings();
     let mut normal_keybindings = default_vi_normal_keybindings();
     add_completion_keybindings(&mut insert_keybindings);
     add_completion_keybindings(&mut normal_keybindings);
-    Vi::new(insert_keybindings, normal_keybindings)
+    SlashCompletionVi::new(Vi::new(insert_keybindings, normal_keybindings))
+}
+
+struct SlashCompletionVi {
+    inner: Vi,
+}
+
+impl SlashCompletionVi {
+    fn new(inner: Vi) -> Self {
+        Self { inner }
+    }
+}
+
+impl EditMode for SlashCompletionVi {
+    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        open_completion_menu_after_slash(self.inner.parse_event(event))
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+fn open_completion_menu_after_slash(event: ReedlineEvent) -> ReedlineEvent {
+    match event {
+        ReedlineEvent::Edit(commands) if inserts_slash(&commands) => ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(commands),
+            ReedlineEvent::Menu(COMPLETION_MENU_NAME.to_string()),
+        ]),
+        ReedlineEvent::Multiple(events) => ReedlineEvent::Multiple(
+            events
+                .into_iter()
+                .map(open_completion_menu_after_slash)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn inserts_slash(commands: &[EditCommand]) -> bool {
+    commands.iter().any(|command| match command {
+        EditCommand::InsertChar('/') => true,
+        EditCommand::InsertString(text) => text.starts_with('/'),
+        _ => false,
+    })
 }
 
 fn add_completion_keybindings(keybindings: &mut Keybindings) {
