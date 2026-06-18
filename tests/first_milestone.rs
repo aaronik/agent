@@ -112,6 +112,31 @@ fn new_session_loads_agents_md_memory_file() {
 }
 
 #[test]
+fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args(["--model", "mock", "-c", "run echo hi"])
+        .assert()
+        .success()
+        .stdout("run echo hi\n");
+
+    assert!(!temp_home.path().join(".agent-rs").join("sessions").exists());
+}
+
+#[test]
+fn command_buffer_flag_is_available_in_help() {
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env_remove("OPENAI_API_KEY")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--command"))
+        .stdout(predicates::str::contains("-c"));
+}
+
+#[test]
 fn help_does_not_require_provider_configuration() {
     let mut cmd = Command::cargo_bin("agent").expect("agent binary");
     cmd.env_remove("OPENAI_API_KEY")

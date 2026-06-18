@@ -43,6 +43,12 @@ pub struct Args {
     #[arg(short, long, help = "Run one turn and exit")]
     pub single: bool,
     #[arg(
+        short = 'c',
+        long = "command",
+        help = "Run one turn and print only the final response for zsh print -z wrappers"
+    )]
+    pub command: bool,
+    #[arg(
         long,
         num_args = 0..=1,
         default_missing_value = "__LATEST__",
@@ -76,6 +82,10 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             println!("{model}");
         }
         return Ok(());
+    }
+
+    if args.command {
+        return run_command_mode(&args).await;
     }
 
     let store = SessionStore::new()?;
@@ -177,6 +187,41 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    Ok(())
+}
+
+async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
+    if args.query.is_empty() {
+        return Err("command mode requires a query".into());
+    }
+
+    let store = SessionStore::new()?;
+    let mut session = load_or_create_session(
+        &Args {
+            model: args.model.clone(),
+            list_models: false,
+            update_pricing: false,
+            single: true,
+            command: false,
+            resume: None,
+            new: true,
+            query: Vec::new(),
+        },
+        &store,
+    )?;
+    session.messages.push(AgentMessage::System {
+        content: command_mode_system_prompt(),
+    });
+    session.messages.push(AgentMessage::User {
+        content: args.query.join(" "),
+    });
+
+    let model_name = effective_model_name(args.model.as_deref());
+    let assistant = build_provider(&model_name)?
+        .complete(&session.messages, &[])
+        .await?;
+
+    println!("{}", assistant.content.trim());
     Ok(())
 }
 
@@ -430,6 +475,7 @@ async fn handle_slash_command(
                     model: args.model.clone(),
                     list_models: false,
                     update_pricing: false,
+                    command: false,
                 },
                 store,
             )?;
@@ -539,6 +585,10 @@ async fn list_models() -> Vec<String> {
 
 fn system_prompt() -> String {
     "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented.".to_string()
+}
+
+fn command_mode_system_prompt() -> String {
+    "Command-buffer mode: produce the text the user wants placed into their zsh prompt. Prefer a single bash/zsh command when the user is asking for a command. Return only the command/text to insert, with no Markdown fences or explanatory prose.".to_string()
 }
 
 fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {

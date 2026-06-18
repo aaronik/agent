@@ -31,8 +31,25 @@ impl Provider for MockProvider {
     async fn complete(
         &self,
         messages: &[AgentMessage],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
     ) -> Result<AssistantMessage, ProviderError> {
+        if tools.is_empty() {
+            let content = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    AgentMessage::User { content } => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Ok(AssistantMessage {
+                content,
+                tool_calls: Vec::new(),
+                usage: None,
+                metadata: Default::default(),
+            });
+        }
+
         if messages
             .iter()
             .any(|message| matches!(message, AgentMessage::Tool(_)))
