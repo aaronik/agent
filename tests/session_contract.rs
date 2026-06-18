@@ -35,6 +35,7 @@ fn session_schema_v1_round_trip() {
                 name: "run_shell_command".to_string(),
                 status: ToolStatus::Success,
                 content: "hi\n".to_string(),
+                elapsed_ms: Some(7),
             }),
         ],
     );

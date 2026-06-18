@@ -1,6 +1,7 @@
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::time::Instant;
 
 use crate::agent::{ToolResult, ToolStatus};
 use crate::tools::browser::{BrowserControlArgs, browser_control};
@@ -84,28 +85,25 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, tool_call_id: String, name: &str, arguments: Value) -> ToolResult {
+        let started = Instant::now();
         if !self
             .definitions
             .iter()
             .any(|definition| definition.name == name)
         {
-            return ToolResult {
+            return tool_result(
                 tool_call_id,
-                name: name.to_string(),
-                status: ToolStatus::Error,
-                content: format!("unknown tool: {name}"),
-            };
+                name,
+                ToolStatus::Error,
+                format!("unknown tool: {name}"),
+                started,
+            );
         }
 
         let arguments = match validated_tool_arguments(arguments) {
             Ok(arguments) => arguments,
             Err(content) => {
-                return ToolResult {
-                    tool_call_id,
-                    name: name.to_string(),
-                    status: ToolStatus::Error,
-                    content,
-                };
+                return tool_result(tool_call_id, name, ToolStatus::Error, content, started);
             }
         };
 
@@ -150,20 +148,30 @@ impl ToolRegistry {
         };
 
         match content {
-            Ok(content) => ToolResult {
-                tool_call_id,
-                name: name.to_string(),
-                status: ToolStatus::Success,
-                content,
-            },
-            Err(content) => ToolResult {
-                tool_call_id,
-                name: name.to_string(),
-                status: ToolStatus::Error,
-                content,
-            },
+            Ok(content) => tool_result(tool_call_id, name, ToolStatus::Success, content, started),
+            Err(content) => tool_result(tool_call_id, name, ToolStatus::Error, content, started),
         }
     }
+}
+
+fn tool_result(
+    tool_call_id: String,
+    name: &str,
+    status: ToolStatus,
+    content: String,
+    started: Instant,
+) -> ToolResult {
+    ToolResult {
+        tool_call_id,
+        name: name.to_string(),
+        status,
+        content,
+        elapsed_ms: Some(duration_ms(started)),
+    }
+}
+
+fn duration_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn definition<T>(name: &str, description: &str) -> ToolDefinition

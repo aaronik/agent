@@ -110,6 +110,21 @@ async fn registry_exposes_and_executes_active_tool_surface() {
 }
 
 #[tokio::test]
+async fn registry_records_elapsed_time_for_tool_results() {
+    let registry = ToolRegistry::new();
+    let result = registry
+        .execute(
+            "call_communicate".to_string(),
+            "communicate",
+            json!({"intent": "share progress", "message": "done"}),
+        )
+        .await;
+
+    assert_eq!(result.status, agent_rs::agent::ToolStatus::Success);
+    assert!(result.elapsed_ms.is_some());
+}
+
+#[tokio::test]
 async fn run_shell_command_reports_stdout_and_exit_code() {
     let ok = run_shell_command(RunShellCommandArgs {
         cmd: "printf hi".to_string(),
@@ -127,6 +142,62 @@ async fn run_shell_command_reports_stdout_and_exit_code() {
     .expect("error command output");
     assert!(err.contains("nope"));
     assert!(err.contains("(exit code: 7)"));
+}
+
+#[tokio::test]
+async fn run_shell_command_blocks_git_write_operations() {
+    let blocked_commands = [
+        "git commit -m nope",
+        "git revert HEAD",
+        "git reset --hard HEAD~1",
+        "git push origin main",
+        "git add src/lib.rs",
+        "git checkout -b feature",
+        "git --no-pager commit -m nope",
+        "git -c user.name=test commit -m nope",
+        "cd repo && git commit -m nope",
+        "git -C repo commit -m nope",
+        "GIT_DIR=.git git update-ref refs/heads/main HEAD",
+    ];
+
+    for cmd in blocked_commands {
+        let output = run_shell_command(RunShellCommandArgs {
+            cmd: cmd.to_string(),
+            timeout: 30,
+        })
+        .await
+        .expect_err("git write command should be blocked");
+
+        assert!(
+            output.contains("blocked git write operation"),
+            "unexpected output for {cmd}: {output}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_shell_command_allows_git_read_only_operations() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo dir");
+    std::fs::create_dir(repo.join(".git")).expect("git dir marker");
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("head");
+
+    let read_only_commands = [
+        format!("git -C {} status --short", repo.display()),
+        format!("git -C {} log --oneline -1", repo.display()),
+        format!("git -C {} reflog", repo.display()),
+        format!("git -C {} diff -- src/lib.rs", repo.display()),
+        format!("git -C {} branch --list", repo.display()),
+    ];
+
+    for cmd in read_only_commands {
+        let output = run_shell_command(RunShellCommandArgs { cmd, timeout: 30 }).await;
+        assert!(
+            output.is_ok(),
+            "read-only git command should reach the shell: {output:?}"
+        );
+    }
 }
 
 #[tokio::test]

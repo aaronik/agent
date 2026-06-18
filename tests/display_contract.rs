@@ -10,6 +10,7 @@ fn tool_panels_render_without_raw_tool_call_json() {
         name: "run_shell_command".to_string(),
         status: ToolStatus::Success,
         content: "hi\n".to_string(),
+        elapsed_ms: None,
     });
 
     assert!(rendered.contains("╭─"));
@@ -46,9 +47,11 @@ fn communicate_renders_as_progress_text() {
         name: "communicate".to_string(),
         status: ToolStatus::Success,
         content: "working".to_string(),
+        elapsed_ms: Some(12),
     });
 
     assert!(rendered.contains("working"));
+    assert!(rendered.contains("12ms"));
     assert!(rendered.ends_with('\n'));
 }
 
@@ -67,6 +70,21 @@ fn tool_start_panel_summarizes_running_call() {
 }
 
 #[test]
+fn tool_result_panel_shows_elapsed_time() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "call_1".to_string(),
+        name: "fetch".to_string(),
+        status: ToolStatus::Success,
+        content: "ok".to_string(),
+        elapsed_ms: Some(1_234),
+    });
+
+    assert!(rendered.contains("[OK Done]"));
+    assert!(rendered.contains("1.2s"));
+}
+
+#[test]
 fn no_live_env_disables_live_mode() {
     let _guard = EnvGuard::set("AGENT_NO_LIVE", "1");
 
@@ -81,6 +99,7 @@ fn diff_panels_render_with_diff_ansi() {
         name: "search_replace".to_string(),
         status: ToolStatus::Success,
         content: "Successfully replaced 1 occurrence(s)\n\nDiff:\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+        elapsed_ms: None,
     });
 
     assert!(rendered.contains("\x1b[31m-old\x1b[0m"));
@@ -102,6 +121,7 @@ fn live_tool_result_can_replace_running_panel_in_place() {
             name: "run_shell_command".to_string(),
             status: ToolStatus::Success,
             content: "hi\n".to_string(),
+            elapsed_ms: None,
         },
         Some(&call),
         start.lines().count(),

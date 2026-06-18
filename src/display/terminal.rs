@@ -133,12 +133,16 @@ impl TerminalDisplay {
 
     fn format_tool_result_with_call(&self, result: &ToolResult, call: Option<&ToolCall>) -> String {
         if result.name == "communicate" {
-            return format!("{DIM}{ITALIC}{}{RESET}\n", result.content.trim());
+            let elapsed = result
+                .elapsed_ms
+                .map(|elapsed_ms| format!(" ({})", format_elapsed(elapsed_ms)))
+                .unwrap_or_default();
+            return format!("{DIM}{ITALIC}{}{elapsed}{RESET}\n", result.content.trim());
         }
 
         let exit_code = extract_exit_code(&result.content);
         let visual_status = visual_status(result.status.clone(), exit_code);
-        let title = tool_title(&result.name, visual_status);
+        let title = tool_result_title(&result.name, visual_status, result.elapsed_ms);
         let mut body = call.map(tool_call_body).unwrap_or_default();
         let mut result_content = remove_exit_code_marker(&result.content);
         result_content = format_tool_content(&result.name, &result_content);
@@ -177,6 +181,24 @@ fn tool_title(name: &str, status: VisualToolStatus) -> String {
         VisualToolStatus::Error(None) => styled(RED, "[ERR Done]"),
     };
     format!("{}  {status_text}", styled(CYAN, name))
+}
+
+fn tool_result_title(name: &str, status: VisualToolStatus, elapsed_ms: Option<u64>) -> String {
+    let mut title = tool_title(name, status);
+    if let Some(elapsed_ms) = elapsed_ms {
+        title.push_str(&format!("  {}", styled(DIM, &format_elapsed(elapsed_ms))));
+    }
+    title
+}
+
+fn format_elapsed(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{elapsed_ms}ms")
+    } else if elapsed_ms < 10_000 {
+        format!("{:.1}s", elapsed_ms as f64 / 1_000.0)
+    } else {
+        format!("{}s", (elapsed_ms + 500) / 1_000)
+    }
 }
 
 fn tool_call_body(call: &ToolCall) -> Vec<String> {

@@ -30,6 +30,8 @@ pub struct ToolResult {
     pub name: String,
     pub status: ToolStatus,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
