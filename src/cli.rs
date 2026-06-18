@@ -6,8 +6,8 @@ use crossterm::event::{
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reedline::{
     ColumnarMenu, Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode,
-    KeyModifiers, Keybindings, MenuBuilder, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu,
-    ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
+    KeyModifiers, Keybindings, MenuBuilder, PromptEditMode, PromptViMode, Reedline, ReedlineEvent,
+    ReedlineMenu, ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
     default_vi_normal_keybindings,
 };
 use std::error::Error;
@@ -802,13 +802,35 @@ impl SlashCompletionVi {
 
 impl EditMode for SlashCompletionVi {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
-        let event = self.inner.parse_event(event);
+        let crossterm_event: Event = event.into();
+        let plain_enter = is_key_event(
+            &crossterm_event,
+            CrosstermKeyCode::Enter,
+            CrosstermKeyModifiers::NONE,
+        );
+        let was_insert_mode = matches!(
+            self.inner.edit_mode(),
+            PromptEditMode::Vi(PromptViMode::Insert)
+        );
+
+        let event = ReedlineRawEvent::try_from(crossterm_event)
+            .map(|event| self.inner.parse_event(event))
+            .unwrap_or(ReedlineEvent::None);
+
+        if plain_enter && was_insert_mode && !self.slash_completion_active {
+            return ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
+        }
+
         self.handle_event(event)
     }
 
     fn edit_mode(&self) -> PromptEditMode {
         self.inner.edit_mode()
     }
+}
+
+fn is_key_event(event: &Event, code: CrosstermKeyCode, modifiers: CrosstermKeyModifiers) -> bool {
+    matches!(event, Event::Key(key) if key.code == code && key.modifiers == modifiers)
 }
 
 fn inserts_slash(commands: &[EditCommand]) -> bool {
@@ -909,6 +931,23 @@ mod completion_input_tests {
             ReedlineEvent::Multiple(events)
                 if events == vec![ReedlineEvent::Enter, ReedlineEvent::Enter]
         ));
+    }
+
+    #[test]
+    fn enter_in_insert_mode_inserts_newline_and_enter_in_normal_mode_submits() {
+        let mut mode = agent_vi_mode();
+
+        assert_eq!(
+            mode.parse_event(key(KeyCode::Enter)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+
+        assert!(matches!(
+            mode.parse_event(key(KeyCode::Esc)),
+            ReedlineEvent::Multiple(events)
+                if events == vec![ReedlineEvent::Esc, ReedlineEvent::Repaint]
+        ));
+        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
     }
 
     #[test]
