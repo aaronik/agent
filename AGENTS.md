@@ -18,16 +18,18 @@ cd rs && cargo run -- --model mock --single "run echo hi"
 
 ## Testing Requirements
 
-**CRITICAL: No job is finished until all new functionality is tested and ALL tests are passing.**
+**CRITICAL: No job is finished until the formatter, build, lints, and tests are passing, and any changed feature has been manually tested.**
 
 When adding or modifying Rust functionality:
 1. Write tests FIRST (TDD approach preferred)
 2. Implement the functionality
-3. Ensure ALL tests pass:
+3. Ensure ALL automated checks pass:
    ```sh
-   cd rs && cargo fmt --check && cargo clippy -- -D warnings && cargo test
+   cargo fmt --check && cargo build && cargo clippy -- -D warnings && cargo test
    ```
-4. Only then is the work considered complete
+4. Manually test the changed feature or bug fix in a realistic scenario
+5. Present a brief manual testing report to the user upon completion
+6. Only then is the work considered complete
 
 Test guidelines:
 - Prefer high-level integration tests over unit tests
