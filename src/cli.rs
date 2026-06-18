@@ -13,7 +13,7 @@ use reedline::{
 use std::error::Error;
 use std::io::IsTerminal;
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -412,11 +412,12 @@ async fn prompt_for_input(
         10_000,
         store.prompt_history_path(),
     )?);
-    let available_models = list_models().await;
-    let completer = Box::new(AgentCompleter::new(completion_candidates(
-        store,
-        &available_models,
-    )));
+    let dynamic_models = Arc::new(RwLock::new(Vec::new()));
+    spawn_model_completion_refresh(Arc::clone(&dynamic_models));
+    let completer = Box::new(AgentCompleter::with_dynamic_models(
+        completion_candidates(store, &[]),
+        dynamic_models,
+    ));
     let mut line_editor = Reedline::create()
         .with_history(history)
         .with_completer(completer)
@@ -591,6 +592,17 @@ fn command_mode_system_prompt() -> String {
     "Command-buffer mode: produce the text the user wants placed into their zsh prompt. Prefer a single bash/zsh command when the user is asking for a command. Return only the command/text to insert, with no Markdown fences or explanatory prose.".to_string()
 }
 
+fn spawn_model_completion_refresh(dynamic_models: Arc<RwLock<Vec<String>>>) {
+    tokio::spawn(async move {
+        let available_models = list_models().await;
+        if !available_models.is_empty()
+            && let Ok(mut models) = dynamic_models.write()
+        {
+            *models = available_models;
+        }
+    });
+}
+
 fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {
     let mut candidates = vec![
         "/clear".to_string(),
@@ -660,13 +672,43 @@ pub fn completion_values_for_line_with_models(
 #[derive(Clone, Debug)]
 struct AgentCompleter {
     candidates: Vec<String>,
+    dynamic_models: Option<Arc<RwLock<Vec<String>>>>,
 }
 
 impl AgentCompleter {
-    fn new(mut candidates: Vec<String>) -> Self {
+    fn new(candidates: Vec<String>) -> Self {
+        Self::from_parts(candidates, None)
+    }
+
+    fn with_dynamic_models(
+        candidates: Vec<String>,
+        dynamic_models: Arc<RwLock<Vec<String>>>,
+    ) -> Self {
+        Self::from_parts(candidates, Some(dynamic_models))
+    }
+
+    fn from_parts(
+        mut candidates: Vec<String>,
+        dynamic_models: Option<Arc<RwLock<Vec<String>>>>,
+    ) -> Self {
         candidates.sort();
         candidates.dedup();
-        Self { candidates }
+        Self {
+            candidates,
+            dynamic_models,
+        }
+    }
+
+    fn candidates(&self) -> Vec<String> {
+        let mut candidates = self.candidates.clone();
+        if let Some(dynamic_models) = &self.dynamic_models
+            && let Ok(models) = dynamic_models.read()
+        {
+            candidates.extend(models.iter().map(|model| format!("/models {model}")));
+        }
+        candidates.sort();
+        candidates.dedup();
+        candidates
     }
 }
 
@@ -680,8 +722,8 @@ impl Completer for AgentCompleter {
         }
 
         let span = Span::new(0, pos);
-        let mut matches = self
-            .candidates
+        let candidates = self.candidates();
+        let mut matches = candidates
             .iter()
             .filter_map(|candidate| {
                 let score = completion_score(candidate, prefix)?;
@@ -866,5 +908,33 @@ mod completion_input_tests {
             ReedlineEvent::Multiple(events)
                 if events == vec![ReedlineEvent::Enter, ReedlineEvent::Enter]
         ));
+    }
+
+    #[test]
+    fn completer_picks_up_background_model_refreshes() {
+        let dynamic_models = Arc::new(RwLock::new(Vec::new()));
+        let mut completer = AgentCompleter::with_dynamic_models(
+            vec!["/models".to_string(), "/models gpt-5.5".to_string()],
+            Arc::clone(&dynamic_models),
+        );
+
+        let initial_values = completer
+            .complete("/models op", 10)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(!initial_values.contains(&"/models openai:gpt-5.2".to_string()));
+
+        *dynamic_models.write().expect("dynamic models lock") = vec!["openai:gpt-5.2".to_string()];
+
+        let refreshed_values = completer
+            .complete("/models op", 10)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refreshed_values.first(),
+            Some(&"/models openai:gpt-5.2".to_string())
+        );
     }
 }
