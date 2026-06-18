@@ -54,11 +54,11 @@ impl ToolRegistry {
             definition::<ReadFileArgs>("read_file", "Read a UTF-8 file from the filesystem."),
             definition::<WriteFileArgs>(
                 "write_file",
-                "Write UTF-8 contents to a filesystem path and return a unified diff.",
+                "Write complete UTF-8 file contents to a path and return a unified diff. Use this only when creating a new file or replacing most/all of an existing file. For small edits to existing files, prefer `search_replace`.",
             ),
             definition::<SearchReplaceArgs>(
                 "search_replace",
-                "Search for exact text in a file and replace all occurrences.",
+                "Perform a targeted edit by replacing exact text in an existing file. Prefer this over `write_file` for small or localized modifications. Use when the original text can be matched exactly.",
             ),
             definition::<GenImageArgs>("gen_image", "Generate images with the OpenAI image API."),
             definition::<CommunicateArgs>(

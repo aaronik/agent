@@ -39,6 +39,26 @@ async fn registry_exposes_and_executes_active_tool_surface() {
         ]
     );
 
+    let write_description = registry
+        .definitions()
+        .iter()
+        .find(|definition| definition.name == "write_file")
+        .expect("write_file definition")
+        .description
+        .as_str();
+    assert!(write_description.contains("Use this only when creating a new file"));
+    assert!(write_description.contains("prefer `search_replace`"));
+
+    let search_replace_description = registry
+        .definitions()
+        .iter()
+        .find(|definition| definition.name == "search_replace")
+        .expect("search_replace definition")
+        .description
+        .as_str();
+    assert!(search_replace_description.contains("Prefer this over `write_file`"));
+    assert!(search_replace_description.contains("original text can be matched exactly"));
+
     for definition in registry.definitions() {
         let parameters = &definition.parameters;
         let intent = parameters
