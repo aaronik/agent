@@ -11,7 +11,7 @@ use reedline::{
     default_vi_normal_keybindings,
 };
 use std::error::Error;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -63,10 +63,18 @@ pub struct Args {
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    run_with_args(args).await
+    let prompt_prefill = capture_piped_prompt_prefill(&args)?;
+    run_with_args_and_prefill(args, prompt_prefill).await
 }
 
 pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
+    run_with_args_and_prefill(args, None).await
+}
+
+async fn run_with_args_and_prefill(
+    args: Args,
+    mut prompt_prefill: Option<String>,
+) -> Result<(), Box<dyn Error>> {
     if args.new && args.resume.is_some() {
         return Err("--new cannot be used with --resume".into());
     }
@@ -111,7 +119,13 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
                 if args.single && !session.messages.is_empty() {
                     break;
                 }
-                prompt_for_input(&store, &session, &model_name).await?
+                prompt_for_input(
+                    &store,
+                    &session,
+                    &model_name,
+                    prompt_prefill.take().as_deref(),
+                )
+                .await?
             }
         };
 
@@ -342,6 +356,44 @@ impl Drop for InputModeGuard {
     }
 }
 
+fn capture_piped_prompt_prefill(args: &Args) -> Result<Option<String>, Box<dyn Error>> {
+    if !args.query.is_empty() || args.command || args.list_models || args.update_pricing {
+        return Ok(None);
+    }
+    if std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    if !std::io::stdout().is_terminal() {
+        return Ok(None);
+    }
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let input = input.trim_end_matches(['\r', '\n']).to_string();
+    if input.is_empty() {
+        return Ok(None);
+    }
+
+    attach_stdin_to_stdout_tty()?;
+    Ok(Some(input))
+}
+
+#[cfg(unix)]
+fn attach_stdin_to_stdout_tty() -> Result<(), Box<dyn Error>> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::dup2(std::io::stdout().as_raw_fd(), libc::STDIN_FILENO) } == -1 {
+        Err(std::io::Error::last_os_error().into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+fn attach_stdin_to_stdout_tty() -> Result<(), Box<dyn Error>> {
+    Ok(())
+}
+
 fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, Box<dyn Error>> {
     if !args.new {
         if let Some(resume) = args.resume.as_deref() {
@@ -400,6 +452,7 @@ async fn prompt_for_input(
     store: &SessionStore,
     session: &Session,
     model_name: &str,
+    prefill: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(
@@ -433,10 +486,21 @@ async fn prompt_for_input(
         "\n{}",
         format_cost_and_context_line(&session.messages, model_name)
     );
+    seed_line_editor_prefill(&mut line_editor, prefill);
+
     match line_editor.read_line(&prompt)? {
         Signal::Success(input) => Ok(input),
         Signal::CtrlD | Signal::CtrlC => Err("Goodbye!".into()),
         _ => Err("unsupported prompt signal".into()),
+    }
+}
+
+fn seed_line_editor_prefill(line_editor: &mut Reedline, prefill: Option<&str>) {
+    if let Some(prefill) = prefill.filter(|input| !input.is_empty()) {
+        line_editor.run_edit_commands(&[
+            EditCommand::InsertString(prefill.to_string()),
+            EditCommand::MoveToEnd { select: false },
+        ]);
     }
 }
 
@@ -911,6 +975,16 @@ mod completion_input_tests {
     fn key(code: KeyCode) -> ReedlineRawEvent {
         ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
             .expect("reedline raw event")
+    }
+
+    #[test]
+    fn prefill_seeds_existing_reedline_buffer_at_end() {
+        let mut line_editor = Reedline::create();
+
+        seed_line_editor_prefill(&mut line_editor, Some("alpha\nbeta"));
+
+        assert_eq!(line_editor.current_buffer_contents(), "alpha\nbeta");
+        assert_eq!(line_editor.current_insertion_point(), "alpha\nbeta".len());
     }
 
     #[test]
