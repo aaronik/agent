@@ -138,6 +138,7 @@ pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             content: user_input,
         });
         store.save(&session)?;
+        display.render_turn_submitted();
 
         if loop_runner.is_none() {
             loop_runner = Some(build_loop_runner(&model_name)?);

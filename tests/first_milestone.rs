@@ -48,6 +48,29 @@ fn mock_single_turn_executes_tool_and_saves_session() {
 }
 
 #[test]
+fn submitted_user_message_shows_immediate_working_feedback() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let output = cmd
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .output()
+        .expect("agent output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+
+    let working_index = stdout.find("Working...").expect("working feedback");
+    let running_index = stdout.find("[> Running]").expect("running tool panel");
+    let final_index = stdout
+        .find("Tool completed: hi")
+        .expect("final assistant response");
+
+    assert!(working_index < running_index);
+    assert!(working_index < final_index);
+}
+
+#[test]
 fn resume_replay_shows_tool_commands() {
     let temp_home = tempfile::tempdir().expect("temp home");
 

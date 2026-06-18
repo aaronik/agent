@@ -45,6 +45,11 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
+    pub fn render_turn_submitted(&self) {
+        println!("{DIM}{ITALIC}Working... Press Esc to abort.{RESET}");
+        flush_stdout();
+    }
+
     pub fn render_new_message(&self, message: &AgentMessage) {
         match message {
             AgentMessage::System { .. } | AgentMessage::Tool(_) => {}
