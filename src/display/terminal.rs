@@ -58,7 +58,7 @@ impl TerminalDisplay {
             }
             AgentMessage::Assistant(assistant) => {
                 if !assistant.content.trim().is_empty() {
-                    println!("\n{}", assistant.content);
+                    println!("\n{}", self.format_assistant_content(&assistant.content));
                 }
             }
         }
@@ -98,6 +98,10 @@ impl TerminalDisplay {
             print!("{rendered}");
             flush_stdout();
         }
+    }
+
+    pub fn format_assistant_content(&self, content: &str) -> String {
+        format_markdown(content)
     }
 
     pub fn format_tool_start(&self, call: &ToolCall) -> String {
@@ -401,6 +405,141 @@ fn flush_stdout() {
     let _ = io::stdout().flush();
 }
 
+fn format_markdown(content: &str) -> String {
+    let code_blocks = markdown_code_blocks(content);
+    if code_blocks.is_empty() {
+        return render_markdown_with_termimad(content);
+    }
+
+    let mut out = String::new();
+    let mut cursor = 0;
+    for block in code_blocks {
+        if cursor < block.source_start {
+            out.push_str(&render_markdown_with_termimad(
+                &content[cursor..block.source_start],
+            ));
+        }
+        out.push_str(&format_highlighted_code_block(&block.language, &block.code));
+        cursor = block.source_end;
+    }
+    if cursor < content.len() {
+        out.push_str(&render_markdown_with_termimad(&content[cursor..]));
+    }
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarkdownCodeBlock {
+    source_start: usize,
+    source_end: usize,
+    language: String,
+    code: String,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveMarkdownCodeBlock {
+    source_start: usize,
+    source_end: usize,
+    language: String,
+    code: String,
+}
+
+fn render_markdown_with_termimad(content: &str) -> String {
+    format!("{}", termimad::MadSkin::default_dark().term_text(content))
+}
+
+fn markdown_code_blocks(content: &str) -> Vec<MarkdownCodeBlock> {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+    let mut blocks = Vec::new();
+    let mut active: Option<ActiveMarkdownCodeBlock> = None;
+
+    for (event, range) in Parser::new_ext(content, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                active = Some(ActiveMarkdownCodeBlock {
+                    source_start: range.start,
+                    source_end: range.end,
+                    language,
+                    code: String::new(),
+                });
+            }
+            Event::Text(text) => {
+                if let Some(block) = &mut active {
+                    block.code.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(block) = active.take() {
+                    blocks.push(MarkdownCodeBlock {
+                        source_start: block.source_start,
+                        source_end: block.source_end,
+                        language: block.language,
+                        code: block.code,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    blocks
+}
+
+fn format_highlighted_code_block(language: &str, code: &str) -> String {
+    let highlighted = highlight_code(code, language).unwrap_or_else(|| code.to_string());
+    let mut out = String::new();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(highlighted.trim_end_matches('\n'));
+    out.push('\n');
+    out
+}
+
+fn highlight_code(code: &str, language: &str) -> Option<String> {
+    let syntax_set = syntect::parsing::SyntaxSet::load_defaults_newlines();
+    let syntax = if language.is_empty() {
+        syntax_set.find_syntax_plain_text()
+    } else {
+        syntax_set
+            .find_syntax_by_token(language)
+            .or_else(|| syntax_set.find_syntax_by_extension(language))
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
+    };
+    highlight_with_syntax_set(code, syntax, &syntax_set)
+}
+
+fn highlight_with_syntax_set(
+    code: &str,
+    syntax: &syntect::parsing::SyntaxReference,
+    syntax_set: &syntect::parsing::SyntaxSet,
+) -> Option<String> {
+    let theme_set = syntect::highlighting::ThemeSet::load_defaults();
+    let theme = theme_set
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| theme_set.themes.values().next())?;
+    let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+    let mut out = String::new();
+    for line in syntect::util::LinesWithEndings::from(code) {
+        let ranges = highlighter.highlight_line(line, syntax_set).ok()?;
+        out.push_str(&syntect::util::as_24_bit_terminal_escaped(
+            &ranges[..],
+            false,
+        ));
+    }
+    Some(out)
+}
+
 fn color_diff(content: &str) -> String {
     content
         .lines()
@@ -429,21 +568,9 @@ fn highlight_read_file(content: &str) -> Option<String> {
     let syntax = extension
         .and_then(|extension| syntax_set.find_syntax_by_extension(extension))
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let theme_set = syntect::highlighting::ThemeSet::load_defaults();
-    let theme = theme_set
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| theme_set.themes.values().next())?;
-    let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
     let mut out = String::new();
     out.push_str(header);
     out.push('\n');
-    for line in syntect::util::LinesWithEndings::from(body) {
-        let ranges = highlighter.highlight_line(line, &syntax_set).ok()?;
-        out.push_str(&syntect::util::as_24_bit_terminal_escaped(
-            &ranges[..],
-            false,
-        ));
-    }
+    out.push_str(&highlight_with_syntax_set(body, syntax, &syntax_set)?);
     Some(out)
 }

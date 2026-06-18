@@ -2,6 +2,56 @@ use agent_rs::agent::{ToolCall, ToolResult, ToolStatus};
 use agent_rs::display::TerminalDisplay;
 use serde_json::json;
 
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+#[test]
+fn assistant_markdown_renders_common_markdown_features() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_assistant_content(
+        "# Title\n\nBefore **bold** and `inline`.\n\n- one\n- two\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\nAfter",
+    );
+    let plain = strip_ansi(&rendered);
+
+    assert!(plain.contains("Title"));
+    assert!(plain.contains("Before bold and inline."));
+    assert!(plain.contains("one"));
+    assert!(plain.contains("two"));
+    assert!(plain.contains("fn main"));
+    assert!(plain.contains("println!"));
+    assert!(plain.contains("After"));
+    assert!(!plain.contains("```"));
+    assert!(
+        rendered.contains("\x1b[38;2;"),
+        "fenced code should be syntax-highlighted with syntect true-color ANSI"
+    );
+    assert_ne!(
+        rendered, plain,
+        "markdown renderer should apply terminal styling"
+    );
+}
+
+#[test]
+fn assistant_plain_text_content_is_preserved() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_assistant_content("Plain text");
+
+    assert_eq!(strip_ansi(&rendered).trim(), "Plain text");
+}
+
 #[test]
 fn tool_panels_render_without_raw_tool_call_json() {
     let display = TerminalDisplay::new();
