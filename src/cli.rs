@@ -57,7 +57,7 @@ pub struct Args {
         help = "Resume latest session or the provided session id"
     )]
     pub resume: Option<String>,
-    #[arg(long, help = "Start a new session instead of resuming")]
+    #[arg(short = 'n', long, help = "Start a new session instead of resuming")]
     pub new: bool,
     #[arg(help = "Initial user message")]
     pub query: Vec<String>,
@@ -992,6 +992,14 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_new_short_flag() {
+        let args = Args::parse_from(["agent", "-n"]);
+        assert!(args.new);
+    }
+
     #[cfg(unix)]
     #[test]
     fn esc_abort_input_mode_preserves_output_processing() {
