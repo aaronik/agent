@@ -504,6 +504,7 @@ async fn prompt_for_input(
         .with_quick_completions(false)
         .with_partial_completions(false)
         .with_edit_mode(Box::new(agent_vi_mode()));
+    set_cursor_style_for_mode(PromptEditMode::Vi(PromptViMode::Insert));
     let prompt = DefaultPrompt::default();
     println!(
         "\n{}",
@@ -847,6 +848,26 @@ fn agent_vi_mode() -> SlashCompletionVi {
     SlashCompletionVi::new(Vi::new(insert_keybindings, normal_keybindings))
 }
 
+fn cursor_style_for_mode(mode: PromptEditMode) -> crossterm::cursor::SetCursorStyle {
+    use crossterm::cursor::SetCursorStyle;
+
+    match mode {
+        PromptEditMode::Vi(PromptViMode::Insert) => SetCursorStyle::BlinkingBar,
+        _ => SetCursorStyle::SteadyBlock,
+    }
+}
+
+fn set_cursor_style_for_mode(mode: PromptEditMode) {
+    use std::io::{IsTerminal, stdout};
+
+    let mut out = stdout();
+    if !out.is_terminal() {
+        return;
+    }
+
+    let _ = crossterm::execute!(out, cursor_style_for_mode(mode));
+}
+
 struct SlashCompletionVi {
     inner: Vi,
     slash_completion_active: bool,
@@ -909,6 +930,7 @@ impl EditMode for SlashCompletionVi {
             return ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
         }
 
+        set_cursor_style_for_mode(self.inner.edit_mode());
         self.handle_event(event)
     }
 
@@ -1009,6 +1031,18 @@ mod completion_input_tests {
 
         assert_eq!(line_editor.current_buffer_contents(), "alpha\nbeta");
         assert_eq!(line_editor.current_insertion_point(), "alpha\nbeta".len());
+    }
+
+    #[test]
+    fn cursor_style_for_insert_and_normal_modes() {
+        assert!(matches!(
+            cursor_style_for_mode(PromptEditMode::Vi(PromptViMode::Insert)),
+            crossterm::cursor::SetCursorStyle::BlinkingBar
+        ));
+        assert!(matches!(
+            cursor_style_for_mode(PromptEditMode::Vi(PromptViMode::Normal)),
+            crossterm::cursor::SetCursorStyle::SteadyBlock
+        ));
     }
 
     #[test]
