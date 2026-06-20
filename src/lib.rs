@@ -6,3 +6,4 @@ pub mod pricing;
 pub mod providers;
 pub mod session;
 pub mod tools;
+pub mod voice;

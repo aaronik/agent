@@ -42,6 +42,8 @@ pub struct Args {
     pub update_pricing: bool,
     #[arg(short, long, help = "Run one turn and exit")]
     pub single: bool,
+    #[arg(short = 't', long = "talk", help = "Start a realtime voice session")]
+    pub talk: bool,
     #[arg(
         short = 'c',
         long = "command",
@@ -78,6 +80,11 @@ async fn run_with_args_and_prefill(
     if args.new && args.resume.is_some() {
         return Err("--new cannot be used with --resume".into());
     }
+    if args.talk && (args.single || args.command || !args.query.is_empty()) {
+        return Err(
+            "--talk cannot be combined with --single, --command, or an initial query".into(),
+        );
+    }
 
     if args.update_pricing {
         let store = SessionStore::new()?;
@@ -105,6 +112,16 @@ async fn run_with_args_and_prefill(
 
     let mut session = load_or_create_session(&args, &store)?;
     replay_session(&session, &display);
+
+    if args.talk {
+        return crate::voice::session::run_talk_session(
+            &store,
+            &mut session,
+            &model_name,
+            &system_prompt(),
+        )
+        .await;
+    }
 
     let mut first_input = if args.query.is_empty() {
         None
@@ -217,6 +234,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             list_models: false,
             update_pricing: false,
             single: true,
+            talk: false,
             command: false,
             resume: None,
             new: true,
@@ -357,7 +375,12 @@ impl Drop for InputModeGuard {
 }
 
 fn capture_piped_prompt_prefill(args: &Args) -> Result<Option<String>, Box<dyn Error>> {
-    if !args.query.is_empty() || args.command || args.list_models || args.update_pricing {
+    if !args.query.is_empty()
+        || args.command
+        || args.talk
+        || args.list_models
+        || args.update_pricing
+    {
         return Ok(None);
     }
     if std::io::stdin().is_terminal() {
@@ -541,6 +564,7 @@ async fn handle_slash_command(
                     model: args.model.clone(),
                     list_models: false,
                     update_pricing: false,
+                    talk: false,
                     command: false,
                 },
                 store,

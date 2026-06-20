@@ -27,6 +27,10 @@ tiktoken-rs = "0.12.0"
 tokio = { version = "1.48.0", features = ["full"] }
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 libc = "0.2.178"
+base64 = "0.22.1"
+cpal = "0.15.3"
+tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+url = "2.5.7"
 termimad = "0.34.1"
 pulldown-cmark = "0.13.4"
 
