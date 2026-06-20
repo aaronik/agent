@@ -29,6 +29,7 @@ uuid = { version = "1.19.0", features = ["v4", "serde"] }
 libc = "0.2.178"
 base64 = "0.22.1"
 cpal = "0.15.3"
+coreaudio-rs = "0.11.3"
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 url = "2.5.7"
 termimad = "0.34.1"

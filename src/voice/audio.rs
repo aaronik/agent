@@ -10,28 +10,34 @@ pub const REALTIME_SAMPLE_RATE: u32 = 24_000;
 pub const CHANNELS_MONO: u16 = 1;
 
 pub struct AudioIo {
-    input_stream: Stream,
+    input_stream: InputAudioStream,
     output_stream: Stream,
     playback: PlaybackQueue,
+}
+
+enum InputAudioStream {
+    Cpal(Stream),
+    #[cfg(target_os = "macos")]
+    VoiceProcessing(VoiceProcessingInputStream),
 }
 
 impl AudioIo {
     pub fn start(input_tx: mpsc::UnboundedSender<Vec<i16>>) -> Result<Self, AudioError> {
         let host = cpal::default_host();
-        let input_device = host
-            .default_input_device()
-            .ok_or(AudioError::NoInputDevice)?;
         let output_device = host
             .default_output_device()
             .ok_or(AudioError::NoOutputDevice)?;
 
-        let input_config = input_device.default_input_config()?;
+        let input_stream = build_input_audio_stream(input_tx)?;
         let output_config = output_device.default_output_config()?;
-        let input_stream = build_input_stream(&input_device, &input_config, input_tx)?;
         let playback = PlaybackQueue::default();
         let output_stream = build_output_stream(&output_device, &output_config, playback.clone())?;
 
-        input_stream.play()?;
+        match &input_stream {
+            InputAudioStream::Cpal(stream) => stream.play()?,
+            #[cfg(target_os = "macos")]
+            InputAudioStream::VoiceProcessing(stream) => stream.keepalive(),
+        }
         output_stream.play()?;
 
         Ok(Self {
@@ -136,6 +142,34 @@ pub enum AudioError {
     BuildStream(#[from] cpal::BuildStreamError),
     #[error(transparent)]
     PlayStream(#[from] cpal::PlayStreamError),
+}
+
+fn build_input_audio_stream(
+    tx: mpsc::UnboundedSender<Vec<i16>>,
+) -> Result<InputAudioStream, AudioError> {
+    #[cfg(target_os = "macos")]
+    if use_macos_voice_processing_input() {
+        match VoiceProcessingInputStream::start(tx.clone()) {
+            Ok(stream) => return Ok(InputAudioStream::VoiceProcessing(stream)),
+            Err(err) => eprintln!(
+                "macOS voice processing input unavailable ({err}); falling back to default input"
+            ),
+        }
+    }
+
+    let host = cpal::default_host();
+    let input_device = host
+        .default_input_device()
+        .ok_or(AudioError::NoInputDevice)?;
+    let input_config = input_device.default_input_config()?;
+    build_input_stream(&input_device, &input_config, tx).map(InputAudioStream::Cpal)
+}
+
+#[cfg(target_os = "macos")]
+fn use_macos_voice_processing_input() -> bool {
+    std::env::var("AGENT_MACOS_VOICE_PROCESSING")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
 }
 
 fn build_input_stream(
@@ -294,9 +328,169 @@ impl LinearResampler {
     }
 }
 
+#[cfg(target_os = "macos")]
+struct VoiceProcessingInputStream {
+    audio_unit: coreaudio::audio_unit::AudioUnit,
+}
+
+#[cfg(target_os = "macos")]
+impl VoiceProcessingInputStream {
+    fn keepalive(&self) {
+        let _ = &self.audio_unit;
+    }
+
+    fn start(tx: mpsc::UnboundedSender<Vec<i16>>) -> Result<Self, AudioError> {
+        use coreaudio::audio_unit::{AudioUnit, Element, IOType, Scope, StreamFormat};
+        use coreaudio::sys;
+
+        let mut audio_unit = AudioUnit::new(IOType::VoiceProcessingIO)
+            .map_err(|err| AudioError::Stream(format!("VoiceProcessingIO init failed: {err}")))?;
+        audio_unit
+            .uninitialize()
+            .map_err(|err| AudioError::Stream(format!("uninitialize voice input failed: {err}")))?;
+
+        let enable_input = 1u32;
+        audio_unit
+            .set_property(
+                sys::kAudioOutputUnitProperty_EnableIO,
+                Scope::Input,
+                Element::Input,
+                Some(&enable_input),
+            )
+            .map_err(|err| AudioError::Stream(format!("enable voice input failed: {err}")))?;
+
+        let disable_output = 0u32;
+        audio_unit
+            .set_property(
+                sys::kAudioOutputUnitProperty_EnableIO,
+                Scope::Output,
+                Element::Output,
+                Some(&disable_output),
+            )
+            .map_err(|err| AudioError::Stream(format!("disable voice output failed: {err}")))?;
+
+        let input_asbd: sys::AudioStreamBasicDescription = audio_unit
+            .get_property(
+                sys::kAudioUnitProperty_StreamFormat,
+                Scope::Output,
+                Element::Input,
+            )
+            .map_err(|err| AudioError::Stream(format!("get voice input format failed: {err}")))?;
+        let input_format = StreamFormat::from_asbd(input_asbd)
+            .map_err(|err| AudioError::Stream(format!("parse voice input format failed: {err}")))?;
+        set_voice_processing_callback(&mut audio_unit, input_format, tx)?;
+
+        audio_unit
+            .initialize()
+            .map_err(|err| AudioError::Stream(format!("initialize voice input failed: {err}")))?;
+
+        audio_unit
+            .start()
+            .map_err(|err| AudioError::Stream(format!("start voice input failed: {err}")))?;
+
+        Ok(Self { audio_unit })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_voice_processing_callback(
+    audio_unit: &mut coreaudio::audio_unit::AudioUnit,
+    input_format: coreaudio::audio_unit::StreamFormat,
+    tx: mpsc::UnboundedSender<Vec<i16>>,
+) -> Result<(), AudioError> {
+    use coreaudio::audio_unit::audio_format::LinearPcmFlags;
+    use coreaudio::audio_unit::render_callback::Args;
+    use coreaudio::audio_unit::render_callback::data::{Interleaved, NonInterleaved};
+    use coreaudio::audio_unit::{SampleFormat, Scope};
+
+    let input_rate = input_format.sample_rate as u32;
+    if input_format.sample_format != SampleFormat::F32 {
+        return Err(AudioError::Stream(format!(
+            "unsupported voice input format: {:?}",
+            input_format.sample_format
+        )));
+    }
+
+    if input_format
+        .flags
+        .contains(LinearPcmFlags::IS_NON_INTERLEAVED)
+    {
+        let mut resampler = LinearResampler::new(input_rate, REALTIME_SAMPLE_RATE);
+        audio_unit
+            .set_input_callback(move |args: Args<NonInterleaved<f32>>| {
+                if let Some(channel) = args.data.channels().next() {
+                    let mono = channel.iter().map(|sample| float_sample_to_i16(*sample));
+                    send_resampled_voice_input(&tx, &mut resampler, mono);
+                }
+                Ok(())
+            })
+            .map_err(|err| {
+                AudioError::Stream(format!("set voice non-interleaved callback failed: {err}"))
+            })?;
+    } else {
+        let channels = input_format.channels as usize;
+        let mut resampler = LinearResampler::new(input_rate, REALTIME_SAMPLE_RATE);
+        audio_unit
+            .set_input_callback(move |args: Args<Interleaved<f32>>| {
+                let mono = args
+                    .data
+                    .buffer
+                    .chunks(channels)
+                    .map(|frame| float_sample_to_i16(*frame.first().unwrap_or(&0.0)));
+                send_resampled_voice_input(&tx, &mut resampler, mono);
+                Ok(())
+            })
+            .map_err(|err| {
+                AudioError::Stream(format!("set voice interleaved callback failed: {err}"))
+            })?;
+    }
+
+    let _ = audio_unit.stream_format(Scope::Output);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_resampled_voice_input<I>(
+    tx: &mpsc::UnboundedSender<Vec<i16>>,
+    resampler: &mut LinearResampler,
+    samples: I,
+) where
+    I: IntoIterator<Item = i16>,
+{
+    let out = resampler.process(samples);
+    if !out.is_empty() {
+        let _ = tx.send(out);
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for VoiceProcessingInputStream {
+    fn drop(&mut self) {
+        let _ = self.audio_unit.stop();
+    }
+}
+
+fn float_sample_to_i16(sample: f32) -> i16 {
+    let sample = sample.clamp(-1.0, 1.0);
+    if sample < 0.0 {
+        (sample * 32768.0) as i16
+    } else {
+        (sample * 32767.0) as i16
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_sample_conversion_clamps_to_pcm16() {
+        assert_eq!(float_sample_to_i16(-2.0), -32768);
+        assert_eq!(float_sample_to_i16(-1.0), -32768);
+        assert_eq!(float_sample_to_i16(0.0), 0);
+        assert_eq!(float_sample_to_i16(1.0), 32767);
+        assert_eq!(float_sample_to_i16(2.0), 32767);
+    }
 
     #[test]
     fn same_rate_resampler_passes_samples_through() {

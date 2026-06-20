@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -15,7 +15,9 @@ use crate::voice::realtime::{
 
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
 const PLAYBACK_ECHO_SUPPRESSION_HANGOVER: Duration = Duration::from_millis(900);
-const DEFAULT_BARGE_IN_RMS_THRESHOLD: f64 = 1_200.0;
+const DEFAULT_BARGE_IN_RMS_THRESHOLD: f64 = 900.0;
+const DEFAULT_BARGE_IN_VOLUME_SCALE: f64 = 2_400.0;
+const SYSTEM_VOLUME_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputAudioAction {
@@ -44,11 +46,12 @@ pub async fn run_talk_session(
     let mut client = RealtimeClient::connect(&config).await?;
     let tools = ToolRegistry::new();
     let display = TerminalDisplay::new();
+    let mut input_gate = InputAudioGate::default();
 
     loop {
         tokio::select! {
             Some(samples) = audio_rx.recv() => {
-                match input_audio_action(&playback, &samples) {
+                match input_gate.action(&playback, &samples) {
                     InputAudioAction::SuppressEcho => continue,
                     InputAudioAction::BargeIn => {
                         audio.clear_playback();
@@ -233,18 +236,60 @@ async fn handle_tool_calls(
     Ok(())
 }
 
-fn input_audio_action(
+#[derive(Debug, Default)]
+struct InputAudioGate {
+    system_volume: CachedSystemVolume,
+}
+
+impl InputAudioGate {
+    fn action(
+        &mut self,
+        playback: &crate::voice::audio::PlaybackQueue,
+        samples: &[i16],
+    ) -> InputAudioAction {
+        input_audio_action_with_volume(playback, samples, self.system_volume.current())
+    }
+}
+
+#[derive(Debug, Default)]
+struct CachedSystemVolume {
+    value: Option<f64>,
+    fetched_at: Option<Instant>,
+}
+
+impl CachedSystemVolume {
+    fn current(&mut self) -> Option<f64> {
+        if self
+            .fetched_at
+            .is_some_and(|fetched_at| fetched_at.elapsed() <= SYSTEM_VOLUME_CACHE_TTL)
+        {
+            return self.value;
+        }
+
+        self.value = system_output_volume();
+        self.fetched_at = Some(Instant::now());
+        self.value
+    }
+}
+
+fn input_audio_action_with_volume(
     playback: &crate::voice::audio::PlaybackQueue,
     samples: &[i16],
+    system_volume: Option<f64>,
 ) -> InputAudioAction {
     if !playback.is_active_within(PLAYBACK_ECHO_SUPPRESSION_HANGOVER) {
         return InputAudioAction::Forward;
     }
-    if rms(samples) < barge_in_rms_threshold() {
+    if rms(samples) < volume_adjusted_barge_in_rms_threshold(system_volume) {
         InputAudioAction::SuppressEcho
     } else {
         InputAudioAction::BargeIn
     }
+}
+
+fn volume_adjusted_barge_in_rms_threshold(system_volume: Option<f64>) -> f64 {
+    barge_in_rms_threshold()
+        + system_volume.unwrap_or(0.0).clamp(0.0, 1.0) * barge_in_volume_scale()
 }
 
 fn barge_in_rms_threshold() -> f64 {
@@ -253,6 +298,37 @@ fn barge_in_rms_threshold() -> f64 {
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| *value >= 0.0)
         .unwrap_or(DEFAULT_BARGE_IN_RMS_THRESHOLD)
+}
+
+fn barge_in_volume_scale() -> f64 {
+    std::env::var("AGENT_BARGE_IN_VOLUME_SCALE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value >= 0.0)
+        .unwrap_or(DEFAULT_BARGE_IN_VOLUME_SCALE)
+}
+
+fn system_output_volume() -> Option<f64> {
+    platform_system_output_volume()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_system_output_volume() -> Option<f64> {
+    let output = std::process::Command::new("osascript")
+        .args(["-e", "output volume of (get volume settings)"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let volume = raw.trim().parse::<f64>().ok()?;
+    Some((volume / 100.0).clamp(0.0, 1.0))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_system_output_volume() -> Option<f64> {
+    None
 }
 
 fn rms(samples: &[i16]) -> f64 {
@@ -290,12 +366,35 @@ mod tests {
         playback.push_pcm16(&[1000; 240]);
 
         assert_eq!(
-            input_audio_action(&playback, &[200; 240]),
+            input_audio_action_with_volume(&playback, &[200; 240], None),
             InputAudioAction::SuppressEcho
         );
         assert_eq!(
-            input_audio_action(&playback, &[8000; 240]),
+            input_audio_action_with_volume(&playback, &[8000; 240], None),
             InputAudioAction::BargeIn
+        );
+    }
+
+    #[test]
+    fn higher_system_volume_raises_barge_in_threshold() {
+        assert!(
+            volume_adjusted_barge_in_rms_threshold(Some(1.0))
+                > volume_adjusted_barge_in_rms_threshold(Some(0.0))
+        );
+    }
+
+    #[test]
+    fn loud_output_volume_suppresses_louder_echo() {
+        let playback = crate::voice::audio::PlaybackQueue::default();
+        playback.push_pcm16(&[1000; 240]);
+
+        assert_eq!(
+            input_audio_action_with_volume(&playback, &[2_000; 240], Some(0.0)),
+            InputAudioAction::BargeIn
+        );
+        assert_eq!(
+            input_audio_action_with_volume(&playback, &[2_000; 240], Some(1.0)),
+            InputAudioAction::SuppressEcho
         );
     }
 
@@ -304,7 +403,7 @@ mod tests {
         let playback = crate::voice::audio::PlaybackQueue::default();
 
         assert_eq!(
-            input_audio_action(&playback, &[200; 240]),
+            input_audio_action_with_volume(&playback, &[200; 240], None),
             InputAudioAction::Forward
         );
     }
