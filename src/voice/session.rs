@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentMessage, AssistantMessage, ToolCall};
+use crate::agent::{AgentMessage, AssistantMessage, CancellationToken, ToolCall};
+use crate::cli::EscAbortWatcher;
 use crate::display::TerminalDisplay;
 use crate::providers::parse_model_id;
 use crate::session::{Session, SessionStore};
@@ -37,7 +38,9 @@ pub async fn run_talk_session(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
         config.model, config.voice, config.voice_speed
     );
-    println!("Speak normally. Interrupt by talking over the assistant. Press Ctrl-C to exit.\n");
+    println!(
+        "Speak normally. Interrupt by talking over the assistant. Press Esc to cancel the current response. Press Ctrl-C to exit.\n"
+    );
 
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<i16>>();
     let audio = AudioIo::start(audio_tx)?;
@@ -47,6 +50,8 @@ pub async fn run_talk_session(
     let tools = ToolRegistry::new();
     let display = TerminalDisplay::new();
     let mut input_gate = InputAudioGate::default();
+    let mut cancellation_token = CancellationToken::new();
+    let mut esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
 
     loop {
         tokio::select! {
@@ -77,6 +82,14 @@ pub async fn run_talk_session(
                 };
                 handle_realtime_event(event, &mut event_context).await?;
             }
+            _ = cancellation_token.cancelled() => {
+                print_status("cancelled");
+                audio.clear_playback();
+                let _ = client.cancel_response().await;
+                esc_abort.stop().await;
+                cancellation_token = CancellationToken::new();
+                esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
+            }
             _ = tokio::signal::ctrl_c() => {
                 println!("\nending voice session");
                 audio.clear_playback();
@@ -85,6 +98,7 @@ pub async fn run_talk_session(
         }
     }
 
+    esc_abort.stop().await;
     Ok(())
 }
 

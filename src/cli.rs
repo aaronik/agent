@@ -258,13 +258,13 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-struct EscAbortWatcher {
+pub struct EscAbortWatcher {
     stop: Arc<AtomicBool>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EscAbortWatcher {
-    fn spawn(cancellation_token: CancellationToken) -> Self {
+    pub fn spawn(cancellation_token: CancellationToken) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let handle = std::io::stdin().is_terminal().then(|| {
             let stop_watcher = Arc::clone(&stop);
@@ -278,7 +278,7 @@ impl EscAbortWatcher {
                         Ok(true) => match event::read() {
                             Ok(Event::Key(key))
                                 if key.code == CrosstermKeyCode::Esc
-                                    && key.kind != KeyEventKind::Release
+                                    && key.kind == KeyEventKind::Press
                                     && key.modifiers == CrosstermKeyModifiers::NONE =>
                             {
                                 cancellation_token.cancel();
@@ -296,7 +296,7 @@ impl EscAbortWatcher {
         Self { stop, handle }
     }
 
-    async fn stop(self) {
+    pub async fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle {
             let _ = handle.await;
