@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use crate::agent::{ToolCall, Usage};
+use crate::agent::{AgentMessage, ToolCall, Usage};
 use crate::tools::ToolDefinition;
 use crate::voice::audio::REALTIME_SAMPLE_RATE;
 
@@ -31,6 +31,9 @@ impl RealtimeClient {
             .map_err(|err| RealtimeError::Connection(err.to_string()))?;
         let mut client = Self { socket };
         client.send_json(session_update_event(config)).await?;
+        for item in conversation_item_create_events(&config.history) {
+            client.send_json(item).await?;
+        }
         Ok(client)
     }
 
@@ -98,6 +101,7 @@ pub struct RealtimeConfig {
     pub base_url: String,
     pub transcription_model: String,
     pub tools: Vec<ToolDefinition>,
+    pub history: Vec<AgentMessage>,
 }
 
 impl RealtimeConfig {
@@ -124,11 +128,17 @@ impl RealtimeConfig {
                 .filter(|model| !model.trim().is_empty())
                 .unwrap_or_else(|| DEFAULT_TRANSCRIPTION_MODEL.to_string()),
             tools: Vec::new(),
+            history: Vec::new(),
         }
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_history(mut self, history: Vec<AgentMessage>) -> Self {
+        self.history = history;
         self
     }
 }
@@ -236,6 +246,49 @@ pub fn function_call_output_event(call_id: &str, output: &str) -> Value {
             "output": output
         }
     })
+}
+
+pub fn conversation_item_create_events(messages: &[AgentMessage]) -> Vec<Value> {
+    messages
+        .iter()
+        .flat_map(conversation_items_for_message)
+        .map(|item| json!({ "type": "conversation.item.create", "item": item }))
+        .collect()
+}
+
+fn conversation_items_for_message(message: &AgentMessage) -> Vec<Value> {
+    match message {
+        AgentMessage::User { content } if !content.trim().is_empty() => vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": content }]
+        })],
+        AgentMessage::Assistant(assistant) => {
+            let mut items = Vec::new();
+            if !assistant.content.trim().is_empty() {
+                items.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": assistant.content }]
+                }));
+            }
+            items.extend(assistant.tool_calls.iter().map(|call| {
+                json!({
+                    "type": "function_call",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments.to_string()
+                })
+            }));
+            items
+        }
+        AgentMessage::Tool(result) => vec![json!({
+            "type": "function_call_output",
+            "call_id": result.tool_call_id,
+            "output": result.content
+        })],
+        _ => Vec::new(),
+    }
 }
 
 pub fn response_create_event() -> Value {
@@ -393,7 +446,7 @@ mod tests {
 
     fn test_config() -> RealtimeConfig {
         RealtimeConfig {
-            model: "gpt-realtime-2".to_string(),
+            model: "gpt-realtime".to_string(),
             api_key: "sk-test".to_string(),
             instructions: "be helpful".to_string(),
             voice: "cedar".to_string(),
@@ -401,6 +454,7 @@ mod tests {
             base_url: OPENAI_REALTIME_URL.to_string(),
             transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
             tools: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -538,6 +592,6 @@ mod tests {
             request.headers().get("Authorization").unwrap(),
             "Bearer sk-test"
         );
-        assert!(request.uri().to_string().contains("gpt-realtime-2"));
+        assert!(request.uri().to_string().contains("gpt-realtime"));
     }
 }

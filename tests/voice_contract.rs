@@ -1,9 +1,10 @@
-use agent_rs::agent::ToolCall;
+use agent_rs::agent::{AgentMessage, AssistantMessage, ToolCall, ToolResult, ToolStatus};
 use agent_rs::tools::ToolDefinition;
 use agent_rs::voice::audio::{LinearResampler, PlaybackQueue};
 use agent_rs::voice::realtime::{
-    RealtimeEvent, build_realtime_request, decode_pcm16_base64, encode_pcm16_base64,
-    function_call_output_event, parse_realtime_event, response_create_event, session_update_event,
+    RealtimeEvent, build_realtime_request, conversation_item_create_events, decode_pcm16_base64,
+    encode_pcm16_base64, function_call_output_event, parse_realtime_event, response_create_event,
+    session_update_event,
 };
 use agent_rs::voice::session::talk_model_name;
 use serde_json::json;
@@ -21,7 +22,7 @@ fn realtime_session_update_configures_voice_vad_and_interruption() {
     let event = session_update_event(&config);
 
     assert_eq!(event["session"]["type"], "realtime");
-    assert_eq!(event["session"]["model"], "gpt-realtime-2");
+    assert_eq!(event["session"]["model"], "gpt-realtime");
     assert_eq!(event["session"]["output_modalities"], json!(["audio"]));
     assert_eq!(
         event["session"]["audio"]["input"]["format"]["type"],
@@ -143,8 +144,7 @@ fn realtime_response_done_usage_contributes_to_cost_line() {
             metadata: Default::default(),
         },
     )];
-    let line =
-        agent_rs::providers::format_cost_and_context_line(&messages, "openai:gpt-realtime-2");
+    let line = agent_rs::providers::format_cost_and_context_line(&messages, "openai:gpt-realtime");
 
     assert!(line.contains("Cost: $1.2345"));
 }
@@ -172,7 +172,7 @@ fn realtime_request_contains_openai_auth_and_model_query() {
         request.headers().get("Authorization").unwrap(),
         "Bearer sk-test"
     );
-    assert!(request.uri().to_string().contains("model=gpt-realtime-2"));
+    assert!(request.uri().to_string().contains("model=gpt-realtime"));
 }
 
 #[test]
@@ -192,13 +192,61 @@ fn resampler_handles_common_mac_sample_rate_to_realtime_rate() {
 
 #[test]
 fn talk_mode_defaults_text_models_to_realtime_model() {
-    assert_eq!(talk_model_name("gpt-5.5"), "gpt-realtime-2");
-    assert_eq!(talk_model_name("openai:gpt-realtime-2"), "gpt-realtime-2");
+    assert_eq!(talk_model_name("gpt-5.5"), "gpt-realtime");
+    assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
+}
+
+#[test]
+fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
+    let events = conversation_item_create_events(&[
+        AgentMessage::System {
+            content: "system prompt".to_string(),
+        },
+        AgentMessage::User {
+            content: "remember blue".to_string(),
+        },
+        AgentMessage::Assistant(AssistantMessage {
+            content: "I will remember blue.".to_string(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "run_shell_command".to_string(),
+                arguments: json!({ "cmd": "echo blue", "intent": "recall color", "timeout": 30 }),
+            }],
+            usage: None,
+            metadata: Default::default(),
+        }),
+        AgentMessage::Tool(ToolResult {
+            tool_call_id: "call_1".to_string(),
+            name: "run_shell_command".to_string(),
+            status: ToolStatus::Success,
+            content: "blue\n".to_string(),
+            elapsed_ms: None,
+        }),
+    ]);
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["item"]["role"], "user");
+    assert_eq!(events[0]["item"]["content"][0]["text"], "remember blue");
+    assert_eq!(events[1]["item"]["role"], "assistant");
+    assert_eq!(
+        events[1]["item"]["content"][0]["text"],
+        "I will remember blue."
+    );
+    assert_eq!(events[2]["item"]["type"], "function_call");
+    assert_eq!(events[2]["item"]["call_id"], "call_1");
+    assert_eq!(events[2]["item"]["name"], "run_shell_command");
+    assert_eq!(
+        events[2]["item"]["arguments"],
+        r#"{"cmd":"echo blue","intent":"recall color","timeout":30}"#
+    );
+    assert_eq!(events[3]["item"]["type"], "function_call_output");
+    assert_eq!(events[3]["item"]["call_id"], "call_1");
+    assert_eq!(events[3]["item"]["output"], "blue\n");
 }
 
 fn test_config() -> agent_rs::voice::realtime::RealtimeConfig {
     agent_rs::voice::realtime::RealtimeConfig {
-        model: "gpt-realtime-2".to_string(),
+        model: "gpt-realtime".to_string(),
         api_key: "sk-test".to_string(),
         instructions: "be helpful".to_string(),
         voice: "cedar".to_string(),
@@ -206,5 +254,6 @@ fn test_config() -> agent_rs::voice::realtime::RealtimeConfig {
         base_url: "wss://api.openai.com/v1/realtime".to_string(),
         transcription_model: "gpt-4o-mini-transcribe".to_string(),
         tools: Vec::new(),
+        history: Vec::new(),
     }
 }

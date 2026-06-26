@@ -14,7 +14,7 @@ use crate::voice::realtime::{
     RealtimeClient, RealtimeConfig, RealtimeError, RealtimeEvent, voice_instructions,
 };
 
-const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
+const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime";
 const PLAYBACK_ECHO_SUPPRESSION_HANGOVER: Duration = Duration::from_millis(900);
 const DEFAULT_BARGE_IN_RMS_THRESHOLD: f64 = 900.0;
 const DEFAULT_BARGE_IN_VOLUME_SCALE: f64 = 2_400.0;
@@ -33,7 +33,8 @@ pub async fn run_talk_session(
     model_name: &str,
     base_system_prompt: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let config = talk_config(model_name, base_system_prompt)?;
+    let config =
+        talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
     println!(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
         config.model, config.voice, config.voice_speed
@@ -416,7 +417,7 @@ mod tests {
 
     #[test]
     fn talk_model_keeps_explicit_realtime_model() {
-        assert_eq!(talk_model_name("openai:gpt-realtime-2"), "gpt-realtime-2");
+        assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
     }
 
     #[test]

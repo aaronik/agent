@@ -1012,6 +1012,51 @@ mod tests {
         assert!(args.new);
     }
 
+    #[test]
+    fn talk_resume_loads_existing_session_history() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+        store
+            .save(&Session::new(
+                "voice-session".to_string(),
+                vec![AgentMessage::User {
+                    content: "remember blue".to_string(),
+                }],
+            ))
+            .expect("save session");
+        let args = Args::parse_from(["agent", "--talk", "--resume", "voice-session"]);
+
+        let session = load_or_create_session(&args, &store).expect("loaded session");
+
+        assert_eq!(session.session_id, "voice-session");
+        assert_eq!(
+            session.messages,
+            vec![AgentMessage::User {
+                content: "remember blue".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn talk_without_resume_reuses_latest_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+        store
+            .save(&Session::new(
+                "latest-voice-session".to_string(),
+                vec![AgentMessage::User {
+                    content: "prior voice turn".to_string(),
+                }],
+            ))
+            .expect("save session");
+        let args = Args::parse_from(["agent", "--talk"]);
+
+        let session = load_or_create_session(&args, &store).expect("loaded latest session");
+
+        assert_eq!(session.session_id, "latest-voice-session");
+        assert_eq!(session.messages[0].content(), "prior voice turn");
+    }
+
     #[cfg(unix)]
     #[test]
     fn esc_abort_input_mode_preserves_output_processing() {
