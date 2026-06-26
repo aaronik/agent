@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::agent::{AgentMessage, AssistantMessage, CancellationToken, ToolCall};
 use crate::cli::EscAbortWatcher;
 use crate::display::TerminalDisplay;
-use crate::providers::parse_model_id;
+use crate::providers::{format_cost_and_context_line, parse_model_id};
 use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
 use crate::voice::audio::AudioIo;
@@ -77,6 +77,7 @@ pub async fn run_talk_session(
                     display: &display,
                     audio: &audio,
                     playback: &playback,
+                    model_name: config.model.as_str(),
                     store,
                     session,
                 };
@@ -143,6 +144,7 @@ struct RealtimeEventContext<'a> {
     display: &'a TerminalDisplay,
     audio: &'a AudioIo,
     playback: &'a crate::voice::audio::PlaybackQueue,
+    model_name: &'a str,
     store: &'a SessionStore,
     session: &'a mut Session,
 }
@@ -172,12 +174,7 @@ async fn handle_realtime_event(
                 context
                     .session
                     .messages
-                    .push(AgentMessage::Assistant(AssistantMessage {
-                        content: transcript,
-                        tool_calls: Vec::new(),
-                        usage: None,
-                        metadata: serde_json::Map::new(),
-                    }));
+                    .push(assistant_message(transcript, None));
                 context.store.save(context.session)?;
             }
         }
@@ -185,16 +182,23 @@ async fn handle_realtime_event(
             eprintln!("[voice warning] {message}");
         }
         RealtimeEvent::Error(message) => return Err(RealtimeError::Connection(message).into()),
-        RealtimeEvent::ResponseDone { tool_calls } => {
-            handle_tool_calls(
-                tool_calls,
-                context.client,
-                context.tools,
-                context.display,
-                context.store,
-                context.session,
-            )
-            .await?;
+        RealtimeEvent::ResponseDone { tool_calls, usage } => {
+            if tool_calls.is_empty() {
+                attach_usage_to_latest_voice_assistant(context.session, usage);
+                context.store.save(context.session)?;
+            } else {
+                handle_tool_calls(
+                    tool_calls,
+                    usage,
+                    context.client,
+                    context.tools,
+                    context.display,
+                    context.store,
+                    context.session,
+                )
+                .await?;
+            }
+            print_cost_and_context(context.session, context.model_name);
         }
         RealtimeEvent::Other(_) => {}
     }
@@ -205,6 +209,46 @@ fn print_status(status: &str) {
     println!("\n[{status}]");
 }
 
+fn assistant_message(content: String, usage: Option<crate::agent::Usage>) -> AgentMessage {
+    AgentMessage::Assistant(AssistantMessage {
+        content,
+        tool_calls: Vec::new(),
+        usage,
+        metadata: serde_json::Map::new(),
+    })
+}
+
+fn attach_usage_to_latest_voice_assistant(
+    session: &mut Session,
+    usage: Option<crate::agent::Usage>,
+) {
+    let Some(usage) = usage else {
+        return;
+    };
+
+    if let Some(AgentMessage::Assistant(assistant)) = session
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message, AgentMessage::Assistant(_)))
+        && assistant.usage.is_none()
+    {
+        assistant.usage = Some(usage);
+        return;
+    }
+
+    session
+        .messages
+        .push(assistant_message(String::new(), Some(usage)));
+}
+
+fn print_cost_and_context(session: &Session, model_name: &str) {
+    println!(
+        "\n{}",
+        format_cost_and_context_line(&session.messages, model_name)
+    );
+}
+
 fn is_benign_realtime_error(message: &str) -> bool {
     message.contains("Cancellation failed: no active response found")
         || message.contains("no active response found")
@@ -212,6 +256,7 @@ fn is_benign_realtime_error(message: &str) -> bool {
 
 async fn handle_tool_calls(
     tool_calls: Vec<ToolCall>,
+    usage: Option<crate::agent::Usage>,
     client: &mut RealtimeClient,
     tools: &ToolRegistry,
     display: &TerminalDisplay,
@@ -228,7 +273,7 @@ async fn handle_tool_calls(
         .push(AgentMessage::Assistant(AssistantMessage {
             content: String::new(),
             tool_calls: assistant_tool_calls,
-            usage: None,
+            usage,
             metadata: serde_json::Map::new(),
         }));
 
@@ -372,6 +417,53 @@ mod tests {
     #[test]
     fn talk_model_keeps_explicit_realtime_model() {
         assert_eq!(talk_model_name("openai:gpt-realtime-2"), "gpt-realtime-2");
+    }
+
+    #[test]
+    fn response_usage_attaches_to_latest_voice_assistant() {
+        let mut session = Session::new(
+            "s1".to_string(),
+            vec![AgentMessage::Assistant(AssistantMessage {
+                content: "hello".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                metadata: serde_json::Map::new(),
+            })],
+        );
+
+        attach_usage_to_latest_voice_assistant(
+            &mut session,
+            Some(crate::agent::Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                raw: Some(serde_json::json!({"total_cost": 0.0123})),
+            }),
+        );
+
+        let AgentMessage::Assistant(assistant) = &session.messages[0] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(assistant.usage.as_ref().expect("usage").input_tokens, 10);
+    }
+
+    #[test]
+    fn response_usage_without_assistant_creates_cost_carrier_message() {
+        let mut session = Session::new("s1".to_string(), Vec::new());
+
+        attach_usage_to_latest_voice_assistant(
+            &mut session,
+            Some(crate::agent::Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                raw: Some(serde_json::json!({"total_cost": 0.0123})),
+            }),
+        );
+
+        let AgentMessage::Assistant(assistant) = &session.messages[0] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(assistant.content, "");
+        assert_eq!(assistant.usage.as_ref().expect("usage").output_tokens, 3);
     }
 
     #[test]

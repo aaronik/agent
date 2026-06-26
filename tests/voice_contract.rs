@@ -107,9 +107,46 @@ fn realtime_response_done_parses_function_calls() {
                 id: "call_1".to_string(),
                 name: "read_file".to_string(),
                 arguments: json!({"path": "README.md", "intent": "inspect docs"}),
-            }]
+            }],
+            usage: None,
         }
     );
+}
+
+#[test]
+fn realtime_response_done_usage_contributes_to_cost_line() {
+    let event = parse_realtime_event(
+        &json!({
+            "type": "response.done",
+            "response": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12,
+                    "total_tokens": 112,
+                    "total_cost": 1.2345
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let RealtimeEvent::ResponseDone { usage, .. } = event else {
+        panic!("expected response done event");
+    };
+
+    let messages = vec![agent_rs::agent::AgentMessage::Assistant(
+        agent_rs::agent::AssistantMessage {
+            content: "hello".to_string(),
+            tool_calls: Vec::new(),
+            usage,
+            metadata: Default::default(),
+        },
+    )];
+    let line =
+        agent_rs::providers::format_cost_and_context_line(&messages, "openai:gpt-realtime-2");
+
+    assert!(line.contains("Cost: $1.2345"));
 }
 
 #[test]

@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use crate::agent::ToolCall;
+use crate::agent::{ToolCall, Usage};
 use crate::tools::ToolDefinition;
 use crate::voice::audio::REALTIME_SAMPLE_RATE;
 
@@ -139,7 +139,10 @@ pub enum RealtimeEvent {
     UserTranscript(String),
     AssistantTranscript(String),
     SpeechStarted,
-    ResponseDone { tool_calls: Vec<ToolCall> },
+    ResponseDone {
+        tool_calls: Vec<ToolCall>,
+        usage: Option<Usage>,
+    },
     Error(String),
     Other(String),
 }
@@ -276,6 +279,7 @@ pub fn parse_realtime_event(text: &str) -> Result<RealtimeEvent, RealtimeError> 
         "input_audio_buffer.speech_started" => Ok(RealtimeEvent::SpeechStarted),
         "response.done" => Ok(RealtimeEvent::ResponseDone {
             tool_calls: parse_response_done_tool_calls(&value),
+            usage: parse_response_done_usage(&value),
         }),
         "error" => Ok(RealtimeEvent::Error(
             value
@@ -310,6 +314,30 @@ fn parse_response_done_tool_calls(value: &Value) -> Vec<ToolCall> {
         .flatten()
         .filter_map(parse_realtime_tool_call)
         .collect()
+}
+
+fn parse_response_done_usage(value: &Value) -> Option<Usage> {
+    let usage = value.pointer("/response/usage")?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+
+    Some(Usage {
+        input_tokens,
+        output_tokens,
+        raw: Some(usage.clone()),
+    })
 }
 
 fn parse_realtime_tool_call(value: &Value) -> Option<ToolCall> {
@@ -481,7 +509,8 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "read_file".to_string(),
                     arguments: json!({"path": "README.md", "intent": "inspect docs"}),
-                }]
+                }],
+                usage: None,
             }
         );
     }
