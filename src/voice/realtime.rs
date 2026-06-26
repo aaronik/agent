@@ -383,7 +383,7 @@ pub fn decode_pcm16_base64(encoded: &str) -> Result<Vec<i16>, RealtimeError> {
 
 pub fn voice_instructions(base_system_prompt: &str) -> String {
     format!(
-        "{base_system_prompt}\n\nYou are in a realtime voice session. Keep responses conversational and concise. You have access to the same tools as the text agent and should use them when helpful. The user may interrupt you at any time; stop cleanly and answer the latest utterance. Audio sample rate: {REALTIME_SAMPLE_RATE} Hz."
+        "{base_system_prompt}\n\nYou are in a realtime voice session. Keep responses conversational and concise. You have access to the same tools as the text agent and should use them when helpful. For any substantial code changes, use the sub-agent via the agent command. The user may interrupt you at any time; stop cleanly and answer the latest utterance. Audio sample rate: {REALTIME_SAMPLE_RATE} Hz."
     )
 }
 
