@@ -52,6 +52,19 @@ fn session_schema_v1_round_trip() {
 }
 
 #[test]
+fn new_session_ids_are_guids() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+
+    let first = store.new_session_id();
+    let second = store.new_session_id();
+
+    uuid::Uuid::parse_str(&first).expect("first session id is a guid");
+    uuid::Uuid::parse_str(&second).expect("second session id is a guid");
+    assert_ne!(first, second);
+}
+
+#[test]
 fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
     let messages = vec![AgentMessage::Assistant(AssistantMessage {
         content: String::new(),

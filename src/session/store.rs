@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use chrono::Local;
+use uuid::Uuid;
 
 use super::types::{SESSION_SCHEMA_VERSION, Session};
 
@@ -45,7 +45,7 @@ impl SessionStore {
     }
 
     pub fn new_session_id(&self) -> String {
-        Local::now().format("%Y%m%d-%H%M%S-%6f").to_string()
+        Uuid::new_v4().to_string()
     }
 
     pub fn save(&self, session: &Session) -> io::Result<()> {

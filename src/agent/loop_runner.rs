@@ -87,7 +87,10 @@ where
             let events = tokio::select! {
                 events = self
                     .provider
-                    .events(&provider_messages, self.tools.definitions()) => events?,
+                    .events(
+                        &provider_messages,
+                        self.tools.definitions(),
+                    ) => events?,
                 _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
             };
             check_cancelled(cancellation_token)?;

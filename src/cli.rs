@@ -108,9 +108,8 @@ async fn run_with_args_and_prefill(
     let mut model_name = effective_model_name(args.model.as_deref());
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
 
-    println!("\n[agent]\nmodel: {model_name}");
-
     let mut session = load_or_create_session(&args, &store)?;
+    print_agent_header(&model_name);
     replay_session(&session, &display);
 
     if args.talk {
@@ -136,19 +135,25 @@ async fn run_with_args_and_prefill(
                 if args.single && !session.messages.is_empty() {
                     break;
                 }
-                prompt_for_input(
+                match prompt_for_input(
                     &store,
                     &session,
                     &model_name,
                     prompt_prefill.take().as_deref(),
                 )
-                .await?
+                .await
+                {
+                    Ok(input) => input,
+                    Err(err) if err.to_string() == "Goodbye!" => break,
+                    Err(err) => return Err(err),
+                }
             }
         };
 
         match handle_slash_command(&user_input, &args, &store, &mut session).await? {
             SlashCommandResult::NotCommand => {}
             SlashCommandResult::Handled => {
+                loop_runner = None;
                 if args.single {
                     break;
                 }
@@ -157,7 +162,7 @@ async fn run_with_args_and_prefill(
             SlashCommandResult::SwitchModel(new_model) => {
                 model_name = new_model;
                 loop_runner = None;
-                println!("\n[agent]\nmodel: {model_name}");
+                print_agent_header(&model_name);
                 if args.single {
                     break;
                 }
@@ -219,6 +224,7 @@ async fn run_with_args_and_prefill(
         }
     }
 
+    println!("sessionId: {}", session.session_id);
     Ok(())
 }
 
@@ -449,6 +455,10 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
     Ok(Session::new(store.new_session_id(), messages))
 }
 
+fn print_agent_header(model_name: &str) {
+    println!("\n[agent]\nmodel: {model_name}");
+}
+
 fn replay_session(session: &Session, display: &TerminalDisplay) {
     let mut tool_calls = std::collections::HashMap::new();
     for message in &session.messages {
@@ -573,6 +583,7 @@ async fn handle_slash_command(
             *session = new_session;
             store.save(session)?;
             println!("cleared");
+            println!("sessionId: {}", session.session_id);
         }
         "/models" => {
             if rest.is_empty() {
@@ -589,6 +600,7 @@ async fn handle_slash_command(
                 other => Some(other.split('\t').next().unwrap_or(other)),
             };
             *session = store.load(resume_id)?;
+            println!("sessionId: {}", session.session_id);
         }
         "/pricing" => match rest {
             "refresh" => {

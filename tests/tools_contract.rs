@@ -334,12 +334,15 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
 
     let output = spawn(SpawnArgs {
         task: "run echo hi".to_string(),
+        conversation_id: None,
     })
     .await
     .expect("spawn");
 
     assert!(output.contains("[SPAWNED AGENT OUTPUT]"));
     assert!(output.contains("Tool completed: hi"));
+    assert!(output.contains("sessionId: "));
+    assert!(output.contains("[CONVERSATION ID]"));
 }
 
 struct EnvGuard {
