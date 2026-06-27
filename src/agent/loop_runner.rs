@@ -118,7 +118,12 @@ where
                 let result = tokio::select! {
                     result = self
                         .tools
-                        .execute(call.id.clone(), &call.name, call.arguments.clone()) => result,
+                        .execute_cancellable(
+                            call.id.clone(),
+                            &call.name,
+                            call.arguments.clone(),
+                            cancellation_token,
+                        ) => result,
                     _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
                 };
                 check_cancelled(cancellation_token)?;

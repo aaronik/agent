@@ -413,6 +413,74 @@ async fn agent_loop_respects_pre_cancelled_token() {
 }
 
 #[tokio::test]
+async fn agent_loop_aborts_in_flight_shell_tool_when_token_is_cancelled() {
+    #[derive(Clone, Debug)]
+    struct ShellToolProvider;
+
+    #[async_trait]
+    impl Provider for ShellToolProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            let has_tool_result = messages
+                .iter()
+                .any(|message| matches!(message, AgentMessage::Tool(_)));
+            Ok(AssistantMessage {
+                content: if has_tool_result {
+                    "too late".to_string()
+                } else {
+                    String::new()
+                },
+                tool_calls: if has_tool_result {
+                    Vec::new()
+                } else {
+                    vec![ToolCall {
+                        id: "call_sleep".to_string(),
+                        name: "run_shell_command".to_string(),
+                        arguments: json!({
+                            "intent": "simulate a long running command",
+                            "cmd": "/bin/sleep 60",
+                            "timeout": 120,
+                        }),
+                    }]
+                },
+                usage: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let token = CancellationToken::new();
+    let loop_runner = AgentLoop::new(
+        ShellToolProvider,
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 2,
+            max_context_tokens: 16_384,
+            model: "mock".to_string(),
+        },
+    );
+
+    let messages = [AgentMessage::User {
+        content: "sleep".to_string(),
+    }];
+    let turn = loop_runner.run_turn_cancellable(&messages, &token);
+    tokio::pin!(turn);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    token.cancel();
+
+    let err = tokio::time::timeout(std::time::Duration::from_secs(1), turn)
+        .await
+        .expect("turn should abort promptly")
+        .expect_err("cancelled turn should fail");
+
+    assert!(matches!(err, ProviderError::Cancelled));
+}
+
+#[tokio::test]
 async fn agent_loop_aborts_in_flight_provider_request_when_token_is_cancelled() {
     #[derive(Clone, Debug)]
     struct SlowProvider;

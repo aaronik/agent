@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 use tokio::time;
+
+use crate::agent::CancellationToken;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RunShellCommandArgs {
@@ -14,31 +17,139 @@ pub struct RunShellCommandArgs {
 }
 
 pub async fn run_shell_command(args: RunShellCommandArgs) -> Result<String, String> {
+    run_shell_command_cancellable(args, &CancellationToken::new()).await
+}
+
+pub async fn run_shell_command_cancellable(
+    args: RunShellCommandArgs,
+    cancellation_token: &CancellationToken,
+) -> Result<String, String> {
     if let Some(blocked) = blocked_git_write_operation(&args.cmd) {
         return Err(format!(
             "blocked git write operation: `{blocked}`. Read-only git commands such as log, reflog, status, diff, show, and branch --list are allowed."
         ));
     }
 
+    let output = run_command_output(
+        &args.cmd,
+        Duration::from_secs(args.timeout),
+        cancellation_token,
+    )
+    .await?;
+    match output {
+        CommandOutput::Completed(output) => Ok(format_completed_output(output)),
+        CommandOutput::TimedOut => Ok(format!(
+            "(exit code: 124)\ncommand timed out after {}s",
+            args.timeout
+        )),
+        CommandOutput::Cancelled => Err("tool call cancelled".to_string()),
+    }
+}
+
+async fn run_command_output(
+    command_text: &str,
+    timeout: Duration,
+    cancellation_token: &CancellationToken,
+) -> Result<CommandOutput, String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = Command::new(shell);
     command
         .arg("-c")
-        .arg(&args.cmd)
+        .arg(command_text)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    set_process_group(&mut command);
 
-    let output = match time::timeout(Duration::from_secs(args.timeout), command.output()).await {
-        Ok(result) => result.map_err(|err| format!("failed to run command: {err}"))?,
-        Err(_) => {
-            return Ok(format!(
-                "(exit code: 124)\ncommand timed out after {}s",
-                args.timeout
-            ));
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to run command: {err}"))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(read_pipe(stdout));
+    let stderr_task = tokio::spawn(read_pipe(stderr));
+
+    tokio::select! {
+        status = child.wait() => {
+            let status = status.map_err(|err| format!("failed to wait for command: {err}"))?;
+            let stdout = join_pipe_task(stdout_task, "stdout").await?;
+            let stderr = join_pipe_task(stderr_task, "stderr").await?;
+            Ok(CommandOutput::Completed(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            }))
         }
-    };
+        _ = time::sleep(timeout) => {
+            terminate_child(&mut child).await;
+            Ok(CommandOutput::TimedOut)
+        }
+        _ = cancellation_token.cancelled() => {
+            terminate_child(&mut child).await;
+            Ok(CommandOutput::Cancelled)
+        }
+    }
+}
 
+enum CommandOutput {
+    Completed(std::process::Output),
+    TimedOut,
+    Cancelled,
+}
+
+async fn join_pipe_task(
+    task: tokio::task::JoinHandle<Result<Vec<u8>, String>>,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    task.await
+        .map_err(|err| format!("failed to join {name} reader: {err}"))?
+}
+
+async fn read_pipe<T>(pipe: Option<T>) -> Result<Vec<u8>, String>
+where
+    T: tokio::io::AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut output)
+            .await
+            .map_err(|err| format!("failed to read command output: {err}"))?;
+    }
+    Ok(output)
+}
+
+async fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    #[cfg(unix)]
+    kill_process_group(child);
+    let _ = child.start_kill();
+    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
+}
+
+#[cfg(unix)]
+fn set_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn set_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_group(child: &Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: kill is called with a negative pid to signal the child's process group.
+    let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+}
+
+fn format_completed_output(output: std::process::Output) -> String {
     let mut combined = String::new();
     combined.push_str(&String::from_utf8_lossy(&output.stdout));
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -51,7 +162,7 @@ pub async fn run_shell_command(args: RunShellCommandArgs) -> Result<String, Stri
         combined.push_str(&format!("(exit code: {code})"));
     }
 
-    Ok(combined)
+    combined
 }
 
 fn default_timeout() -> u64 {

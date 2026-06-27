@@ -81,6 +81,7 @@ pub async fn run_talk_session(
                     model_name: config.model.as_str(),
                     store,
                     session,
+                    cancellation_token: &cancellation_token,
                 };
                 handle_realtime_event(event, &mut event_context).await?;
             }
@@ -148,6 +149,7 @@ struct RealtimeEventContext<'a> {
     model_name: &'a str,
     store: &'a SessionStore,
     session: &'a mut Session,
+    cancellation_token: &'a CancellationToken,
 }
 
 async fn handle_realtime_event(
@@ -188,16 +190,7 @@ async fn handle_realtime_event(
                 attach_usage_to_latest_voice_assistant(context.session, usage);
                 context.store.save(context.session)?;
             } else {
-                handle_tool_calls(
-                    tool_calls,
-                    usage,
-                    context.client,
-                    context.tools,
-                    context.display,
-                    context.store,
-                    context.session,
-                )
-                .await?;
+                handle_tool_calls(tool_calls, usage, context).await?;
             }
             print_cost_and_context(context.session, context.model_name);
         }
@@ -258,18 +251,15 @@ fn is_benign_realtime_error(message: &str) -> bool {
 async fn handle_tool_calls(
     tool_calls: Vec<ToolCall>,
     usage: Option<crate::agent::Usage>,
-    client: &mut RealtimeClient,
-    tools: &ToolRegistry,
-    display: &TerminalDisplay,
-    store: &SessionStore,
-    session: &mut Session,
+    context: &mut RealtimeEventContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     if tool_calls.is_empty() {
         return Ok(());
     }
 
     let assistant_tool_calls = tool_calls.clone();
-    session
+    context
+        .session
         .messages
         .push(AgentMessage::Assistant(AssistantMessage {
             content: String::new(),
@@ -279,20 +269,30 @@ async fn handle_tool_calls(
         }));
 
     for call in tool_calls {
-        display.render_tool_start(&call);
+        context.display.render_tool_start(&call);
 
-        let result = tools
-            .execute(call.id.clone(), &call.name, call.arguments.clone())
+        let result = context
+            .tools
+            .execute_cancellable(
+                call.id.clone(),
+                &call.name,
+                call.arguments.clone(),
+                context.cancellation_token,
+            )
             .await;
-        display.render_tool_result(&result);
-        client
+        context.display.render_tool_result(&result);
+        if context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+        context
+            .client
             .send_function_call_output(&result.tool_call_id, &result.content)
             .await?;
-        session.messages.push(AgentMessage::Tool(result));
+        context.session.messages.push(AgentMessage::Tool(result));
     }
 
-    store.save(session)?;
-    client.create_response().await?;
+    context.store.save(context.session)?;
+    context.client.create_response().await?;
     Ok(())
 }
 

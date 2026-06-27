@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::time::Instant;
 
-use crate::agent::{ToolResult, ToolStatus};
+use crate::agent::{CancellationToken, ToolResult, ToolStatus};
 use crate::tools::browser::{BrowserControlArgs, browser_control};
 use crate::tools::communicate::{CommunicateArgs, communicate};
 use crate::tools::fetch::{FetchArgs, fetch};
@@ -11,7 +11,7 @@ use crate::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
 };
 use crate::tools::image::{GenImageArgs, gen_image};
-use crate::tools::shell::{RunShellCommandArgs, run_shell_command};
+use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
 use crate::tools::spawn::{SpawnArgs, spawn};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -85,6 +85,17 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, tool_call_id: String, name: &str, arguments: Value) -> ToolResult {
+        self.execute_cancellable(tool_call_id, name, arguments, &CancellationToken::new())
+            .await
+    }
+
+    pub async fn execute_cancellable(
+        &self,
+        tool_call_id: String,
+        name: &str,
+        arguments: Value,
+        cancellation_token: &CancellationToken,
+    ) -> ToolResult {
         let started = Instant::now();
         if !self
             .definitions
@@ -109,7 +120,7 @@ impl ToolRegistry {
 
         let content = match name {
             "run_shell_command" => match serde_json::from_value::<RunShellCommandArgs>(arguments) {
-                Ok(args) => run_shell_command(args).await,
+                Ok(args) => run_shell_command_cancellable(args, cancellation_token).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "fetch" => match serde_json::from_value::<FetchArgs>(arguments) {
