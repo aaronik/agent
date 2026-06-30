@@ -30,6 +30,19 @@ use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
 
 const COMPLETION_MENU_NAME: &str = "completion_menu";
+const TOGGLE_TALK_HOST_COMMAND: &str = "agent:toggle-talk";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptInput {
+    Text(String),
+    ToggleTalk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionMode {
+    Text,
+    Talk,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "agent", about = "Personal Command Line Agent")]
@@ -80,10 +93,8 @@ async fn run_with_args_and_prefill(
     if args.new && args.resume.is_some() {
         return Err("--new cannot be used with --resume".into());
     }
-    if args.talk && (args.single || args.command || !args.query.is_empty()) {
-        return Err(
-            "--talk cannot be combined with --single, --command, or an initial query".into(),
-        );
+    if args.talk && (args.single || args.command) {
+        return Err("--talk cannot be combined with --single or --command".into());
     }
 
     if args.update_pricing {
@@ -112,15 +123,11 @@ async fn run_with_args_and_prefill(
     print_agent_header(&model_name);
     replay_session(&session, &display);
 
-    if args.talk {
-        return crate::voice::session::run_talk_session(
-            &store,
-            &mut session,
-            &model_name,
-            &system_prompt(),
-        )
-        .await;
-    }
+    let mut interaction_mode = if args.talk {
+        InteractionMode::Talk
+    } else {
+        InteractionMode::Text
+    };
 
     let mut first_input = if args.query.is_empty() {
         None
@@ -129,6 +136,25 @@ async fn run_with_args_and_prefill(
     };
 
     loop {
+        if interaction_mode == InteractionMode::Talk && first_input.is_none() {
+            match crate::voice::session::run_talk_session(
+                &store,
+                &mut session,
+                &model_name,
+                &system_prompt(),
+            )
+            .await?
+            {
+                crate::voice::session::TalkSessionExit::ToggleText => {
+                    interaction_mode = InteractionMode::Text;
+                    loop_runner = None;
+                    print_agent_header(&model_name);
+                    continue;
+                }
+                crate::voice::session::TalkSessionExit::Ended => break,
+            }
+        }
+
         let user_input = match first_input.take() {
             Some(input) => input,
             None => {
@@ -143,7 +169,12 @@ async fn run_with_args_and_prefill(
                 )
                 .await
                 {
-                    Ok(input) => input,
+                    Ok(PromptInput::Text(input)) => input,
+                    Ok(PromptInput::ToggleTalk) => {
+                        interaction_mode = InteractionMode::Talk;
+                        loop_runner = None;
+                        continue;
+                    }
                     Err(err) if err.to_string() == "Goodbye!" => break,
                     Err(err) => return Err(err),
                 }
@@ -180,7 +211,11 @@ async fn run_with_args_and_prefill(
             loop_runner = Some(build_loop_runner(&model_name)?);
         }
         let cancellation_token = CancellationToken::new();
-        let esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
+        let esc_abort = if args.single {
+            EscAbortWatcher::disabled()
+        } else {
+            EscAbortWatcher::spawn(cancellation_token.clone())
+        };
         let result = tokio::select! {
             result = loop_runner
                 .as_ref()
@@ -270,6 +305,13 @@ pub struct EscAbortWatcher {
 }
 
 impl EscAbortWatcher {
+    pub fn disabled() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(true)),
+            handle: None,
+        }
+    }
+
     pub fn spawn(cancellation_token: CancellationToken) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let handle = std::io::stdin().is_terminal().then(|| {
@@ -486,7 +528,7 @@ async fn prompt_for_input(
     session: &Session,
     model_name: &str,
     prefill: Option<&str>,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<PromptInput, Box<dyn Error>> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(
             "interactive mode requires a TTY; pass a query argument or use --single with a query"
@@ -523,7 +565,10 @@ async fn prompt_for_input(
     seed_line_editor_prefill(&mut line_editor, prefill);
 
     match line_editor.read_line(&prompt)? {
-        Signal::Success(input) => Ok(input),
+        Signal::Success(input) => Ok(PromptInput::Text(input)),
+        Signal::HostCommand(command) if command == TOGGLE_TALK_HOST_COMMAND => {
+            Ok(PromptInput::ToggleTalk)
+        }
         Signal::CtrlD | Signal::CtrlC => Err("Goodbye!".into()),
         _ => Err("unsupported prompt signal".into()),
     }
@@ -924,6 +969,10 @@ impl SlashCompletionVi {
 impl EditMode for SlashCompletionVi {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let crossterm_event: Event = event.into();
+        if is_toggle_talk_key(&crossterm_event) {
+            return ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string());
+        }
+
         let plain_enter = is_key_event(
             &crossterm_event,
             CrosstermKeyCode::Enter,
@@ -951,6 +1000,16 @@ impl EditMode for SlashCompletionVi {
     }
 }
 
+fn is_toggle_talk_key(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press
+                && matches!(key.code, CrosstermKeyCode::Char('t' | 'T'))
+                && key.modifiers.contains(CrosstermKeyModifiers::CONTROL)
+    )
+}
+
 fn is_key_event(event: &Event, code: CrosstermKeyCode, modifiers: CrosstermKeyModifiers) -> bool {
     matches!(event, Event::Key(key) if key.code == code && key.modifiers == modifiers)
 }
@@ -962,8 +1021,12 @@ fn inserts_slash(commands: &[EditCommand]) -> bool {
         _ => false,
     })
 }
-
 fn add_completion_keybindings(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('t'),
+        ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string()),
+    );
     keybindings.add_binding(
         KeyModifiers::NONE,
         KeyCode::Tab,
@@ -1084,7 +1147,11 @@ mod completion_input_tests {
     use crossterm::event::{Event, KeyEvent};
 
     fn key(code: KeyCode) -> ReedlineRawEvent {
-        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        modified_key(code, KeyModifiers::NONE)
+    }
+
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> ReedlineRawEvent {
+        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers)))
             .expect("reedline raw event")
     }
 
@@ -1108,6 +1175,29 @@ mod completion_input_tests {
             cursor_style_for_mode(PromptEditMode::Vi(PromptViMode::Normal)),
             crossterm::cursor::SetCursorStyle::SteadyBlock
         ));
+    }
+
+    #[test]
+    fn ctrl_t_returns_toggle_talk_host_command() {
+        let mut mode = agent_vi_mode();
+
+        assert_eq!(
+            mode.parse_event(modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string())
+        );
+    }
+
+    #[test]
+    fn shift_ctrl_t_returns_toggle_talk_host_command() {
+        let mut mode = agent_vi_mode();
+
+        assert_eq!(
+            mode.parse_event(modified_key(
+                KeyCode::Char('T'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string())
+        );
     }
 
     #[test]

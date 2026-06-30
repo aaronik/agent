@@ -56,6 +56,7 @@ async fn run_command_output(
     command
         .arg("-c")
         .arg(command_text)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

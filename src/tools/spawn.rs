@@ -23,6 +23,7 @@ pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
         .arg("--model")
         .arg(raw_model)
         .arg("--single")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

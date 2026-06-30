@@ -1,6 +1,12 @@
 use std::error::Error;
+use std::io::IsTerminal;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentMessage, AssistantMessage, CancellationToken, ToolCall};
@@ -21,6 +27,17 @@ const DEFAULT_BARGE_IN_VOLUME_SCALE: f64 = 2_400.0;
 const SYSTEM_VOLUME_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TalkSessionExit {
+    ToggleText,
+    Ended,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceControlEvent {
+    ToggleText,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputAudioAction {
     Forward,
     SuppressEcho,
@@ -32,7 +49,7 @@ pub async fn run_talk_session(
     session: &mut Session,
     model_name: &str,
     base_system_prompt: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<TalkSessionExit, Box<dyn Error>> {
     let config =
         talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
     println!(
@@ -40,7 +57,7 @@ pub async fn run_talk_session(
         config.model, config.voice, config.voice_speed
     );
     println!(
-        "Speak normally. Interrupt by talking over the assistant. Press Esc to cancel the current response. Press Ctrl-C to exit.\n"
+        "Speak normally. Interrupt by talking over the assistant. Press Esc to cancel the current response. Press Ctrl-T to return to text mode. Press Ctrl-C to exit.\n"
     );
 
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<i16>>();
@@ -53,6 +70,8 @@ pub async fn run_talk_session(
     let mut input_gate = InputAudioGate::default();
     let mut cancellation_token = CancellationToken::new();
     let mut esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+    let control_watcher = VoiceControlWatcher::spawn(control_tx);
 
     loop {
         tokio::select! {
@@ -85,6 +104,18 @@ pub async fn run_talk_session(
                 };
                 handle_realtime_event(event, &mut event_context).await?;
             }
+            Some(control) = control_rx.recv() => {
+                match control {
+                    VoiceControlEvent::ToggleText => {
+                        println!("\nreturning to text mode");
+                        audio.clear_playback();
+                        let _ = client.cancel_response().await;
+                        esc_abort.stop().await;
+                        control_watcher.stop().await;
+                        return Ok(TalkSessionExit::ToggleText);
+                    }
+                }
+            }
             _ = cancellation_token.cancelled() => {
                 print_status("cancelled");
                 audio.clear_playback();
@@ -102,7 +133,8 @@ pub async fn run_talk_session(
     }
 
     esc_abort.stop().await;
-    Ok(())
+    control_watcher.stop().await;
+    Ok(TalkSessionExit::Ended)
 }
 
 pub fn talk_model_name(model_name: &str) -> String {
@@ -197,6 +229,52 @@ async fn handle_realtime_event(
         RealtimeEvent::Other(_) => {}
     }
     Ok(())
+}
+
+struct VoiceControlWatcher {
+    stop: Arc<AtomicBool>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl VoiceControlWatcher {
+    fn spawn(tx: mpsc::UnboundedSender<VoiceControlEvent>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = std::io::stdin().is_terminal().then(|| {
+            let stop_watcher = Arc::clone(&stop);
+            tokio::task::spawn_blocking(move || {
+                while !stop_watcher.load(Ordering::SeqCst) {
+                    match event::poll(Duration::from_millis(50)) {
+                        Ok(true) => match event::read() {
+                            Ok(Event::Key(key))
+                                if is_toggle_text_key(key.code, key.modifiers, key.kind) =>
+                            {
+                                let _ = tx.send(VoiceControlEvent::ToggleText);
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(_) => break,
+                        },
+                        Ok(false) => {}
+                        Err(_) => break,
+                    }
+                }
+            })
+        });
+        Self { stop, handle }
+    }
+
+    async fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle {
+            let _ = handle.await;
+        }
+    }
+}
+
+fn is_toggle_text_key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> bool {
+    matches!(code, KeyCode::Char('t' | 'T'))
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && kind == KeyEventKind::Press
 }
 
 fn print_status(status: &str) {
@@ -418,6 +496,30 @@ mod tests {
     #[test]
     fn talk_model_keeps_explicit_realtime_model() {
         assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
+    }
+
+    #[test]
+    fn ctrl_t_is_voice_toggle_key() {
+        assert!(is_toggle_text_key(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ));
+        assert!(is_toggle_text_key(
+            KeyCode::Char('T'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        ));
+        assert!(!is_toggle_text_key(
+            KeyCode::Char('t'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        assert!(!is_toggle_text_key(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
     }
 
     #[test]

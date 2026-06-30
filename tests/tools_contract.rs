@@ -234,6 +234,22 @@ async fn run_shell_command_reports_timeout() {
 }
 
 #[tokio::test]
+async fn run_shell_command_does_not_wait_for_stdin() {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        run_shell_command(RunShellCommandArgs {
+            cmd: "/bin/cat".to_string(),
+            timeout: 30,
+        }),
+    )
+    .await
+    .expect("cat should see closed stdin promptly")
+    .expect("cat output");
+
+    assert_eq!(output, "");
+}
+
+#[tokio::test]
 async fn file_tools_read_write_and_search_replace_with_diffs() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("sample.txt");
