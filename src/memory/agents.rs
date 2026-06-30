@@ -23,7 +23,7 @@ pub fn find_all_agents_md_files(start_dir: Option<&Path>) -> Vec<PathBuf> {
         files.push(project);
     }
     if let Some(home) = dirs::home_dir() {
-        let user = home.join(".agents").join("AGENTS.md");
+        let user = home.join(".agent").join("AGENTS.md");
         if user.is_file() {
             files.push(user);
         }

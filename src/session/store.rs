@@ -16,7 +16,7 @@ impl SessionStore {
         let home = dirs::home_dir()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
         Ok(Self {
-            root: home.join(".agent-rs"),
+            root: home.join(".agent"),
         })
     }
 

@@ -6,7 +6,7 @@ use serde_json::json;
 #[test]
 fn session_schema_v1_round_trip() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+    let store = SessionStore::with_root(temp.path().join(".agent"));
     let session = Session::new(
         "s1".to_string(),
         vec![
@@ -54,7 +54,7 @@ fn session_schema_v1_round_trip() {
 #[test]
 fn new_session_ids_are_guids() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+    let store = SessionStore::with_root(temp.path().join(".agent"));
 
     let first = store.new_session_id();
     let second = store.new_session_id();

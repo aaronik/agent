@@ -26,7 +26,7 @@ fn mock_single_turn_executes_tool_and_saves_session() {
     assert!(running_index < ok_index);
     assert!(ok_index < final_index);
 
-    let sessions_dir = temp_home.path().join(".agent-rs").join("sessions");
+    let sessions_dir = temp_home.path().join(".agent").join("sessions");
     let entries = std::fs::read_dir(&sessions_dir)
         .expect("sessions dir")
         .collect::<Result<Vec<_>, _>>()
@@ -47,6 +47,20 @@ fn mock_single_turn_executes_tool_and_saves_session() {
                 && message["name"] == "run_shell_command"
                 && message["content"].as_str().unwrap_or("").contains("hi"))
     );
+}
+
+#[test]
+fn default_store_uses_consolidated_agent_home_directory() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    assert!(temp_home.path().join(".agent").join("sessions").exists());
+    assert!(!temp_home.path().join(".agent-rs").exists());
 }
 
 #[test]
@@ -116,7 +130,7 @@ fn new_session_loads_agents_md_memory_file() {
         .assert()
         .success();
 
-    let sessions_dir = temp_home.path().join(".agent-rs").join("sessions");
+    let sessions_dir = temp_home.path().join(".agent").join("sessions");
     let entries = std::fs::read_dir(&sessions_dir)
         .expect("sessions dir")
         .collect::<Result<Vec<_>, _>>()
@@ -137,6 +151,45 @@ fn new_session_loads_agents_md_memory_file() {
 }
 
 #[test]
+fn new_session_loads_user_agents_md_from_agent_directory() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("project");
+    let user_memory_dir = temp_home.path().join(".agent");
+    std::fs::create_dir_all(&user_memory_dir).expect("user memory dir");
+    std::fs::write(
+        user_memory_dir.join("AGENTS.md"),
+        "user agent instructions from consolidated home",
+    )
+    .expect("write user agents memory");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.current_dir(project.path())
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    let sessions_dir = temp_home.path().join(".agent").join("sessions");
+    let entries = std::fs::read_dir(&sessions_dir)
+        .expect("sessions dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("session entries");
+    let payload = std::fs::read_to_string(entries[0].path()).expect("session payload");
+    let value: serde_json::Value = serde_json::from_str(&payload).expect("session json");
+    let system_messages = value["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(system_messages.contains("user agent instructions from consolidated home"));
+    assert!(!temp_home.path().join(".agent-rs").exists());
+}
+
+#[test]
 fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
@@ -147,7 +200,7 @@ fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
         .success()
         .stdout("run echo hi\n");
 
-    assert!(!temp_home.path().join(".agent-rs").join("sessions").exists());
+    assert!(!temp_home.path().join(".agent").join("sessions").exists());
 }
 
 #[test]
@@ -199,7 +252,7 @@ async fn update_pricing_flag_downloads_litellm_pricing_without_provider_configur
     assert!(
         temp_home
             .path()
-            .join(".agent-rs")
+            .join(".agent")
             .join("pricing")
             .join("model_prices_and_context_window.json")
             .exists()
@@ -281,7 +334,7 @@ fn slash_new_aliases_clear_without_provider_configuration() {
 #[test]
 fn slash_completion_includes_models_command_and_model_ids() {
     let temp_home = tempfile::tempdir().expect("temp home");
-    let store = SessionStore::with_root(temp_home.path().join(".agent-rs"));
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
 
     let command_values = completion_values_for_line(&store, "/mod", 4);
     assert!(command_values.contains(&"/models".to_string()));
@@ -308,7 +361,7 @@ fn slash_completion_includes_models_command_and_model_ids() {
 #[test]
 fn slash_completion_includes_dynamic_model_ids_but_not_pricing_cache_surface() {
     let temp_home = tempfile::tempdir().expect("temp home");
-    let store = SessionStore::with_root(temp_home.path().join(".agent-rs"));
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
     let pricing_dir = store.root().join("pricing");
     std::fs::create_dir_all(&pricing_dir).expect("pricing dir");
     std::fs::write(

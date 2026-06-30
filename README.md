@@ -1,8 +1,6 @@
-# agent-rs
+# Agent
 
-Standalone Rust rewrite of the agent CLI.
-
-This crate must not run, embed, import, shell out to, or otherwise depend on Python code.
+My personal agent harness - starts up instantly, has talk mode, the tools I need including signed in chrome browser.
 
 ## Commands
 
@@ -36,5 +34,6 @@ Refresh cached LiteLLM pricing data:
 cargo run -- --update-pricing
 ```
 
-Rust-native state is stored under `$HOME/.agent-rs`.
-Pricing data is cached under `$HOME/.agent-rs/pricing`.
+Agent state is stored under `$HOME/.agent`.
+Pricing data is cached under `$HOME/.agent/pricing`.
+User-level instructions are read from `$HOME/.agent/AGENTS.md`.

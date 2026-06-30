@@ -1079,7 +1079,7 @@ mod tests {
     #[test]
     fn talk_resume_loads_existing_session_history() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+        let store = SessionStore::with_root(temp.path().join(".agent"));
         store
             .save(&Session::new(
                 "voice-session".to_string(),
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn talk_without_resume_reuses_latest_session() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let store = SessionStore::with_root(temp.path().join(".agent-rs"));
+        let store = SessionStore::with_root(temp.path().join(".agent"));
         store
             .save(&Session::new(
                 "latest-voice-session".to_string(),

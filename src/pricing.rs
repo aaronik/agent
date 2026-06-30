@@ -162,7 +162,7 @@ pub fn pricing_cache_path(root: &Path) -> PathBuf {
 }
 
 pub fn cost_from_cached_litellm_pricing(raw_model: &str, usage: &Usage) -> Option<f64> {
-    let root = dirs::home_dir()?.join(".agent-rs");
+    let root = dirs::home_dir()?.join(".agent");
     cost_from_cache_at(&root, raw_model, usage)
 }
 

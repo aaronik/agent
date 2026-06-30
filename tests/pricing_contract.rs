@@ -38,7 +38,7 @@ fn litellm_pricing_map_prices_prefixed_models_and_aliases() {
 #[test]
 fn cached_pricing_file_prices_sessions_without_network() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let root = temp.path().join(".agent-rs");
+    let root = temp.path().join(".agent");
     let cache_path = pricing_cache_path(&root);
     std::fs::create_dir_all(cache_path.parent().expect("cache parent")).expect("cache dir");
     std::fs::write(
@@ -80,7 +80,7 @@ async fn refresh_pricing_cache_writes_validated_litellm_map() {
         .mount(&server)
         .await;
     let temp = tempfile::tempdir().expect("temp dir");
-    let root = temp.path().join(".agent-rs");
+    let root = temp.path().join(".agent");
 
     let report = refresh_pricing_cache_from_url(&root, &format!("{}/pricing.json", server.uri()))
         .await
