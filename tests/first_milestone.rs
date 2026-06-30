@@ -258,9 +258,24 @@ fn slash_help_does_not_require_provider_configuration() {
         .assert()
         .success()
         .stdout(predicates::str::contains("/clear"))
+        .stdout(predicates::str::contains("/new"))
         .stdout(predicates::str::contains("/models"))
         .stdout(predicates::str::contains("/pricing refresh"))
         .stdout(predicates::str::contains("/resume"));
+}
+
+#[test]
+fn slash_new_aliases_clear_without_provider_configuration() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["--single", "/new"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("cleared"))
+        .stdout(predicates::str::contains("sessionId: "));
 }
 
 #[test]
@@ -274,6 +289,9 @@ fn slash_completion_includes_models_command_and_model_ids() {
 
     let exact_command_values = completion_values_for_line(&store, "/clear", 6);
     assert_eq!(exact_command_values.first(), Some(&"/clear".to_string()));
+
+    let new_command_values = completion_values_for_line(&store, "/new", 4);
+    assert_eq!(new_command_values.first(), Some(&"/new".to_string()));
 
     let model_values = completion_values_for_line(&store, "/models ", 8);
     assert!(!model_values.contains(&"/models mock".to_string()));

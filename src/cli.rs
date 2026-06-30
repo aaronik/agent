@@ -610,7 +610,7 @@ async fn handle_slash_command(
         "/help" => {
             println!("{}", slash_help());
         }
-        "/clear" => {
+        "/clear" | "/new" => {
             let new_session = load_or_create_session(
                 &Args {
                     new: true,
@@ -666,7 +666,7 @@ async fn handle_slash_command(
 }
 
 fn slash_help() -> &'static str {
-    "Available commands:\n  /clear\n      Clear the UI and start a new conversation/session.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
+    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
@@ -755,6 +755,7 @@ fn completion_candidates(store: &SessionStore, available_models: &[String]) -> V
         "/clear".to_string(),
         "/help".to_string(),
         "/models".to_string(),
+        "/new".to_string(),
         "/pricing refresh".to_string(),
         "/resume".to_string(),
         "/resume latest".to_string(),
