@@ -187,6 +187,39 @@ fn live_tool_result_can_replace_running_panel_in_place() {
     assert!(rendered.contains("hi"));
 }
 
+#[test]
+fn read_file_content_with_exit_code_text_still_renders_success() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "call_1".to_string(),
+        name: "read_file".to_string(),
+        status: ToolStatus::Success,
+        content: "[FILE]: ./notes.txt\nread_file  [ERR Done (7)]  0ms\n(exit code: 7)\n"
+            .to_string(),
+        elapsed_ms: Some(0),
+    });
+
+    assert!(rendered.contains("read_file"));
+    assert!(rendered.contains("[OK Done]"));
+    assert!(rendered.contains("read_file  [ERR Done (7)]  0ms"));
+    assert!(rendered.contains("(exit code: 7)"));
+}
+
+#[test]
+fn shell_command_exit_code_marker_still_renders_error() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "call_1".to_string(),
+        name: "run_shell_command".to_string(),
+        status: ToolStatus::Success,
+        content: "boom\n(exit code: 7)".to_string(),
+        elapsed_ms: None,
+    });
+
+    assert!(rendered.contains("[ERR Done (7)]"));
+    assert!(!rendered.contains("(exit code: 7)"));
+}
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<String>,

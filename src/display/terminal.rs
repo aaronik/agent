@@ -144,11 +144,11 @@ impl TerminalDisplay {
             return format!("{DIM}{ITALIC}{}{elapsed}{RESET}\n", result.content.trim());
         }
 
-        let exit_code = extract_exit_code(&result.content);
+        let exit_code = extract_shell_exit_code(&result.name, &result.content);
         let visual_status = visual_status(result.status.clone(), exit_code);
         let title = tool_result_title(&result.name, visual_status, result.elapsed_ms);
         let mut body = call.map(tool_call_body).unwrap_or_default();
-        let mut result_content = remove_exit_code_marker(&result.content);
+        let mut result_content = remove_shell_exit_code_marker(&result.name, &result.content);
         result_content = format_tool_content(&result.name, &result_content);
         if !result_content.trim().is_empty() {
             body.extend(preview_lines(&result_content));
@@ -319,11 +319,27 @@ fn styled(style: &str, text: &str) -> String {
     format!("{style}{text}{RESET}")
 }
 
+fn extract_shell_exit_code(name: &str, content: &str) -> Option<i32> {
+    if name == "run_shell_command" {
+        extract_exit_code(content)
+    } else {
+        None
+    }
+}
+
 fn extract_exit_code(content: &str) -> Option<i32> {
     let marker = "(exit code:";
     let rest = content.split_once(marker)?.1;
     let code = rest.split_once(')')?.0.trim();
     code.parse::<i32>().ok()
+}
+
+fn remove_shell_exit_code_marker(name: &str, content: &str) -> String {
+    if name == "run_shell_command" {
+        remove_exit_code_marker(content)
+    } else {
+        content.to_string()
+    }
 }
 
 fn remove_exit_code_marker(content: &str) -> String {
