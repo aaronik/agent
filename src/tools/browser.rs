@@ -33,6 +33,9 @@ pub struct BrowserControlArgs {
     /// Discard any existing persistent browser session and start from a fresh copy of the Chrome Default profile.
     #[serde(default)]
     pub reset: bool,
+    /// Show the browser window. Leave false unless the user directly asks to see it.
+    #[serde(default)]
+    pub visible: bool,
 }
 
 pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String> {
@@ -53,11 +56,14 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     }
 
     let needs_start = match session_guard.as_mut() {
-        Some(session) => session
-            .child
-            .try_wait()
-            .map_err(|err| format!("failed to inspect Chrome process: {err}"))?
-            .is_some(),
+        Some(session) => {
+            session.visible != args.visible
+                || session
+                    .child
+                    .try_wait()
+                    .map_err(|err| format!("failed to inspect Chrome process: {err}"))?
+                    .is_some()
+        }
         None => true,
     };
 
@@ -65,7 +71,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
         if let Some(session) = session_guard.take() {
             close_session(session).await;
         }
-        *session_guard = Some(start_session(args.url.as_deref()).await?);
+        *session_guard = Some(start_session(args.url.as_deref(), args.visible).await?);
     }
 
     let Some(session) = session_guard.as_ref() else {
@@ -143,7 +149,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     }
 }
 
-async fn start_session(url: Option<&str>) -> Result<BrowserSession, String> {
+async fn start_session(url: Option<&str>, visible: bool) -> Result<BrowserSession, String> {
     let chrome = chrome_path()?;
     let profile = chrome_profile_dir()?;
 
@@ -157,14 +163,19 @@ async fn start_session(url: Option<&str>) -> Result<BrowserSession, String> {
     copy_local_state(&profile, &user_data_dir)?;
 
     let port = available_port()?;
-    let mut child = launch_chrome(&chrome, &user_data_dir, port, url)?;
+    let mut child = launch_chrome(&chrome, &user_data_dir, port, url, visible)?;
 
     if let Err(err) = wait_for_cdp(port, &mut child).await {
         let _ = child.kill().await;
         return Err(err);
     }
 
-    Ok(BrowserSession { port, child, temp })
+    Ok(BrowserSession {
+        port,
+        child,
+        temp,
+        visible,
+    })
 }
 
 async fn close_session(mut session: BrowserSession) {
@@ -190,24 +201,41 @@ fn launch_chrome(
     user_data_dir: &Path,
     port: u16,
     url: Option<&str>,
+    visible: bool,
 ) -> Result<Child, String> {
     let mut command = Command::new(chrome);
     command
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg("--profile-directory=Default")
-        .arg(format!("--remote-debugging-port={port}"))
-        .arg("--remote-debugging-address=127.0.0.1")
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
+        .args(chrome_launch_args(user_data_dir, port, url, visible))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(url) = url {
-        command.arg(url);
-    }
     command
         .spawn()
         .map_err(|err| format!("failed to launch Chrome: {err}"))
+}
+
+fn chrome_launch_args(
+    user_data_dir: &Path,
+    port: u16,
+    url: Option<&str>,
+    visible: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        format!("--user-data-dir={}", user_data_dir.display()),
+        "--profile-directory=Default".to_string(),
+        format!("--remote-debugging-port={port}"),
+        "--remote-debugging-address=127.0.0.1".to_string(),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+    ];
+    if !visible {
+        args.push("--headless=new".to_string());
+        args.push("--disable-gpu".to_string());
+    }
+    if let Some(url) = url {
+        args.push(url.to_string());
+    }
+    args
 }
 
 async fn wait_for_cdp(port: u16, child: &mut Child) -> Result<(), String> {
@@ -452,6 +480,7 @@ struct BrowserSession {
     port: u16,
     child: Child,
     temp: TempDirGuard,
+    visible: bool,
 }
 
 struct TempDirGuard {
@@ -476,6 +505,27 @@ impl Drop for TempDirGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_launch_args_default_to_headless() {
+        let args = chrome_launch_args(Path::new("/tmp/profile"), 9222, None, false);
+
+        assert!(args.contains(&"--headless=new".to_string()));
+        assert!(args.contains(&"--disable-gpu".to_string()));
+    }
+
+    #[test]
+    fn chrome_launch_args_can_show_browser_explicitly() {
+        let args = chrome_launch_args(
+            Path::new("/tmp/profile"),
+            9222,
+            Some("https://example.com"),
+            true,
+        );
+
+        assert!(!args.contains(&"--headless=new".to_string()));
+        assert!(args.contains(&"https://example.com".to_string()));
+    }
 
     #[test]
     fn generated_playwright_script_keeps_browser_open_by_default() {

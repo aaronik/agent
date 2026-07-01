@@ -336,6 +336,7 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
         timeout: 1,
         close: false,
         reset: false,
+        visible: false,
     })
     .await
     .expect_err("missing playwright should fail before Chrome/profile checks");

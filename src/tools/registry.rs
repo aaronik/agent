@@ -67,7 +67,7 @@ impl ToolRegistry {
             ),
             definition::<BrowserControlArgs>(
                 "browser_control",
-                "Control a Chrome browser signed in as the user by copying the Default profile into a temporary directory, launching Chrome with DevTools enabled, and running Playwright JavaScript against it. The browser session persists across calls by default so exploration state can be reused; set close=true when the task is complete, or reset=true to start fresh. Requires global playwright in PATH.",
+                "Control a Chrome browser signed in as the user by copying the Default profile into a temporary directory, launching headless Chrome with DevTools enabled, and running Playwright JavaScript against it. The browser session persists across calls by default so exploration state can be reused; set close=true when the task is complete, or reset=true to start fresh. Set visible=true only if the user directly asks to see the browser. Requires global playwright in PATH.",
             ),
         ];
         if include_spawn {
