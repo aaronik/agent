@@ -4,16 +4,16 @@ Agent is a highly autonomous AI command line agent.
 
 ## Running the CLI in this environment
 
-When the user says “run `agent ...`” in this repo/environment, run the Rust CLI from the `rs/` folder via:
+When the user says “run `agent ...`” in this repo/environment, run the Rust CLI from the project root via:
 
 ```sh
-cd rs && cargo run -- ...
+cargo run -- ...
 ```
 
 For example, `agent --model mock --single "run echo hi"` should be run as:
 
 ```sh
-cd rs && cargo run -- --model mock --single "run echo hi"
+cargo run -- --model mock --single "run echo hi"
 ```
 
 ## Testing Requirements
@@ -38,7 +38,10 @@ Test guidelines:
 - Every bug fix should include a test that would have caught the bug
 - Tests are more important than the code itself - they guarantee stability
 
-Current test count: 108 tests
+Current test count can be checked with:
+```sh
+cargo test -- --list | grep ': test$' | wc -l
+```
 Target test execution time: < 2 seconds for full suite
 
 ## Note on Interaction with the User

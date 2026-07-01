@@ -2,7 +2,7 @@ use crate::agent::{
     AgentMessage, AgentTurnResult, AssistantMessage, CancellationToken, ProviderEvent, ToolCall,
     trim_messages,
 };
-use crate::providers::{Provider, ProviderError};
+use crate::providers::{Provider, ProviderError, configuration::DEFAULT_MODEL};
 use crate::tools::ToolRegistry;
 
 #[derive(Clone, Debug)]
@@ -17,7 +17,7 @@ impl Default for AgentLoopConfig {
         Self {
             max_turns: 200,
             max_context_tokens: 16_384,
-            model: "gpt-5.5".to_string(),
+            model: DEFAULT_MODEL.to_string(),
         }
     }
 }

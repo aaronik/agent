@@ -26,27 +26,24 @@ pub fn trim_messages(
         .filter(|message| matches!(message, AgentMessage::System { .. }))
         .cloned()
         .collect::<Vec<_>>();
-    let mut selected = system_messages;
+    let mut recent_messages = Vec::new();
 
     for message in messages
         .iter()
         .rev()
         .filter(|message| !matches!(message, AgentMessage::System { .. }))
     {
-        let mut candidate = selected.clone();
+        let mut candidate = system_messages.clone();
         candidate.push(message.clone());
-        candidate.sort_by_key(|candidate_message| {
-            messages
-                .iter()
-                .position(|message| message == candidate_message)
-                .unwrap_or(usize::MAX)
-        });
-        if count_tokens(&candidate, model) > max_context_tokens && !selected.is_empty() {
+        candidate.extend(recent_messages.iter().rev().cloned());
+        if count_tokens(&candidate, model) > max_context_tokens && !recent_messages.is_empty() {
             break;
         }
-        selected = candidate;
+        recent_messages.push(message.clone());
     }
 
+    let mut selected = system_messages;
+    selected.extend(recent_messages.into_iter().rev());
     selected
 }
 
@@ -95,6 +92,41 @@ mod tests {
             trimmed.iter().any(
                 |message| matches!(message, AgentMessage::User { content } if content == "new")
             )
+        );
+    }
+
+    #[test]
+    fn trim_preserves_order_with_duplicate_messages() {
+        let duplicate = AgentMessage::User {
+            content: "duplicate".to_string(),
+        };
+        let messages = vec![
+            AgentMessage::System {
+                content: "system".to_string(),
+            },
+            duplicate.clone(),
+            AgentMessage::User {
+                content: "old filler ".repeat(200),
+            },
+            duplicate.clone(),
+            AgentMessage::User {
+                content: "newest".to_string(),
+            },
+        ];
+
+        let trimmed = trim_messages(&messages, "unknown-local-model", 20);
+
+        assert_eq!(
+            trimmed,
+            vec![
+                AgentMessage::System {
+                    content: "system".to_string(),
+                },
+                duplicate,
+                AgentMessage::User {
+                    content: "newest".to_string(),
+                },
+            ]
         );
     }
 }
