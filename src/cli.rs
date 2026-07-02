@@ -548,6 +548,7 @@ async fn prompt_for_input(
         dynamic_models,
     ));
     let mut line_editor = Reedline::create()
+        .use_bracketed_paste(true)
         .with_history(history)
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(
@@ -1236,6 +1237,22 @@ mod completion_input_tests {
                 if events == vec![ReedlineEvent::Esc, ReedlineEvent::Repaint]
         ));
         assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
+    }
+
+    #[test]
+    fn bracketed_multiline_paste_inserts_text_without_submitting() {
+        let mut mode = agent_vi_mode();
+        let paste = "first line\r\n\tindented second line\rthird line";
+
+        let event = ReedlineRawEvent::try_from(Event::Paste(paste.to_string()))
+            .expect("paste event should convert");
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString(
+                "first line\n\tindented second line\nthird line".to_string(),
+            )])
+        );
     }
 
     #[test]
