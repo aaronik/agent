@@ -24,6 +24,12 @@ fn realtime_session_update_configures_voice_vad_and_interruption() {
     assert_eq!(event["session"]["type"], "realtime");
     assert_eq!(event["session"]["model"], "gpt-realtime");
     assert_eq!(event["session"]["output_modalities"], json!(["audio"]));
+    assert!(
+        event["session"]["instructions"]
+            .as_str()
+            .expect("instructions")
+            .contains("Use low verbosity")
+    );
     assert_eq!(
         event["session"]["audio"]["input"]["format"]["type"],
         "audio/pcm"

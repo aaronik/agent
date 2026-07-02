@@ -190,7 +190,7 @@ pub fn session_update_event(config: &RealtimeConfig) -> Value {
     let mut session = json!({
         "type": "realtime",
         "model": config.model,
-        "instructions": config.instructions,
+        "instructions": realtime_low_verbosity_instructions(&config.instructions),
         "output_modalities": ["audio"],
         "audio": {
             "input": {
@@ -235,6 +235,12 @@ pub fn session_update_event(config: &RealtimeConfig) -> Value {
         "type": "session.update",
         "session": session
     })
+}
+
+fn realtime_low_verbosity_instructions(instructions: &str) -> String {
+    format!(
+        "{instructions}\n\nUse low verbosity: keep spoken answers brief and avoid unnecessary detail."
+    )
 }
 
 pub fn function_call_output_event(call_id: &str, output: &str) -> Value {

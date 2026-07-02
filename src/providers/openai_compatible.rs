@@ -71,7 +71,10 @@ impl OpenAiCompatibleProvider {
             .create_byot(json!({
                 "model": self.config.model,
                 "input": responses_input(messages),
-                "tools": responses_tools(tools)
+                "tools": responses_tools(tools),
+                "text": {
+                    "verbosity": "low"
+                }
             }))
             .await
             .map_err(|err| ProviderError::Request(err.to_string()))?;
@@ -157,6 +160,9 @@ impl OpenAiCompatibleProvider {
                 "model": self.config.model,
                 "input": responses_input(messages),
                 "tools": responses_tools(tools),
+                "text": {
+                    "verbosity": "low"
+                },
                 "stream": true
             }))
             .await

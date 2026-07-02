@@ -194,6 +194,90 @@ async fn chat_provider_streams_events() {
 }
 
 #[tokio::test]
+async fn chat_provider_does_not_send_responses_text_verbosity_for_ollama() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok"
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "ollama".to_string(),
+        model: "test-model".to_string(),
+        base_url: server.uri(),
+        api_key: "test-key".to_string(),
+        flavor: ProviderFlavor::OpenAiChat,
+    });
+
+    let response = provider
+        .complete(
+            &[AgentMessage::User {
+                content: "be brief".to_string(),
+            }],
+            ToolRegistry::new().definitions(),
+        )
+        .await
+        .expect("provider response");
+
+    assert_eq!(response.content, "ok");
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    assert!(body.get("text").is_none());
+}
+
+#[tokio::test]
+async fn responses_provider_requests_low_text_verbosity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output_text": "ok",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "openai".to_string(),
+        model: "gpt-test".to_string(),
+        base_url: server.uri(),
+        api_key: "test-key".to_string(),
+        flavor: ProviderFlavor::OpenAiResponses,
+    });
+
+    provider
+        .complete(
+            &[AgentMessage::User {
+                content: "be brief".to_string(),
+            }],
+            ToolRegistry::new().definitions(),
+        )
+        .await
+        .expect("provider response");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    assert_eq!(body["text"]["verbosity"], "low");
+}
+
+#[tokio::test]
 async fn responses_provider_parses_final_text_and_tool_calls() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
