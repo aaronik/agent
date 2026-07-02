@@ -5,8 +5,8 @@ use crossterm::event::{
 #[cfg(not(unix))]
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reedline::{
-    ColumnarMenu, Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode,
-    KeyModifiers, Keybindings, MenuBuilder, PromptEditMode, PromptViMode, Reedline, ReedlineEvent,
+    Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode, KeyModifiers,
+    Keybindings, ListMenu, MenuBuilder, PromptEditMode, PromptViMode, Reedline, ReedlineEvent,
     ReedlineMenu, ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
     default_vi_normal_keybindings,
 };
@@ -552,7 +552,11 @@ async fn prompt_for_input(
         .with_history(history)
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(
-            ColumnarMenu::default().with_name(COMPLETION_MENU_NAME),
+            ListMenu::default()
+                .with_name(COMPLETION_MENU_NAME)
+                .with_page_size(12)
+                .with_max_entry_lines(1)
+                .with_only_buffer_difference(false),
         )))
         .with_quick_completions(false)
         .with_partial_completions(false)
@@ -759,7 +763,6 @@ fn completion_candidates(store: &SessionStore, available_models: &[String]) -> V
         "/new".to_string(),
         "/pricing refresh".to_string(),
         "/resume".to_string(),
-        "/resume latest".to_string(),
     ];
 
     candidates.extend(
@@ -771,6 +774,7 @@ fn completion_candidates(store: &SessionStore, available_models: &[String]) -> V
     if let Ok(labels) = store.list_session_labels(80) {
         candidates.extend(labels.into_iter().map(|label| format!("/resume {label}")));
     }
+    candidates.push("/resume latest".to_string());
     candidates
 }
 
@@ -837,13 +841,11 @@ impl AgentCompleter {
     }
 
     fn from_parts(
-        mut candidates: Vec<String>,
+        candidates: Vec<String>,
         dynamic_models: Option<Arc<RwLock<Vec<String>>>>,
     ) -> Self {
-        candidates.sort();
-        candidates.dedup();
         Self {
-            candidates,
+            candidates: dedup_preserving_order(candidates),
             dynamic_models,
         }
     }
@@ -855,10 +857,16 @@ impl AgentCompleter {
         {
             candidates.extend(models.iter().map(|model| format!("/models {model}")));
         }
-        candidates.sort();
-        candidates.dedup();
-        candidates
+        dedup_preserving_order(candidates)
     }
+}
+
+fn dedup_preserving_order(candidates: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(candidate.clone()))
+        .collect()
 }
 
 impl Completer for AgentCompleter {
@@ -874,22 +882,23 @@ impl Completer for AgentCompleter {
         let candidates = self.candidates();
         let mut matches = candidates
             .iter()
-            .filter_map(|candidate| {
+            .enumerate()
+            .filter_map(|(index, candidate)| {
                 let score = completion_score(candidate, prefix)?;
-                Some((score, candidate))
+                Some((score, index, candidate))
             })
             .collect::<Vec<_>>();
         matches.sort_by(
-            |(left_score, left_candidate), (right_score, right_candidate)| {
+            |(left_score, left_index, _), (right_score, right_index, _)| {
                 left_score
                     .cmp(right_score)
-                    .then_with(|| left_candidate.cmp(right_candidate))
+                    .then_with(|| left_index.cmp(right_index))
             },
         );
 
         matches
             .into_iter()
-            .map(|(_, candidate)| Suggestion {
+            .map(|(_, _, candidate)| Suggestion {
                 value: candidate.clone(),
                 span,
                 append_whitespace: false,
@@ -1028,6 +1037,16 @@ fn add_completion_keybindings(keybindings: &mut Keybindings) {
         KeyModifiers::CONTROL,
         KeyCode::Char('t'),
         ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string()),
+    );
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Up,
+        ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuPrevious, ReedlineEvent::Up]),
+    );
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Down,
+        ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuNext, ReedlineEvent::Down]),
     );
     keybindings.add_binding(
         KeyModifiers::NONE,
@@ -1200,6 +1219,61 @@ mod completion_input_tests {
             )),
             ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string())
         );
+    }
+
+    #[test]
+    fn down_arrow_cycles_completion_menu_when_active() {
+        let mut mode = agent_vi_mode();
+
+        assert_eq!(
+            mode.parse_event(key(KeyCode::Down)),
+            ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuNext, ReedlineEvent::Down])
+        );
+    }
+
+    #[test]
+    fn up_arrow_cycles_completion_menu_when_active() {
+        let mut mode = agent_vi_mode();
+
+        assert_eq!(
+            mode.parse_event(key(KeyCode::Up)),
+            ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuPrevious, ReedlineEvent::Up])
+        );
+    }
+
+    #[test]
+    fn completion_menu_queries_full_buffer_on_activation() {
+        use reedline::{Editor, Menu, MenuEvent};
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SessionStore::with_root(temp.path().join(".agent"));
+        store
+            .save(&Session::new(
+                "recent".to_string(),
+                vec![AgentMessage::User {
+                    content: "recent conversation".to_string(),
+                }],
+            ))
+            .expect("save session");
+        let mut completer = AgentCompleter::new(completion_candidates(&store, &[]));
+        let mut menu = ListMenu::default()
+            .with_name(COMPLETION_MENU_NAME)
+            .with_page_size(12)
+            .with_max_entry_lines(1)
+            .with_only_buffer_difference(false);
+        let mut editor = Editor::default();
+        editor.edit_buffer(
+            |buffer| {
+                buffer.set_buffer("/resume ".to_string());
+                buffer.set_insertion_point("/resume ".len());
+            },
+            reedline::UndoBehavior::CreateUndoPoint,
+        );
+
+        menu.menu_event(MenuEvent::Activate(false));
+        menu.update_values(&mut editor, &mut completer);
+
+        assert!(!menu.get_values().is_empty());
     }
 
     #[test]

@@ -359,6 +359,35 @@ fn slash_completion_includes_models_command_and_model_ids() {
 }
 
 #[test]
+fn slash_resume_completions_show_most_recent_sessions_first() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
+
+    store
+        .save(&agent_rs::session::Session::new(
+            "zz-old".to_string(),
+            vec![agent_rs::agent::AgentMessage::User {
+                content: "old conversation".to_string(),
+            }],
+        ))
+        .expect("save old");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    store
+        .save(&agent_rs::session::Session::new(
+            "aa-new".to_string(),
+            vec![agent_rs::agent::AgentMessage::User {
+                content: "new conversation".to_string(),
+            }],
+        ))
+        .expect("save new");
+
+    let values = completion_values_for_line(&store, "/resume ", 8);
+
+    assert_eq!(values[0], "/resume aa-new\tnew conversation");
+    assert_eq!(values[1], "/resume zz-old\told conversation");
+}
+
+#[test]
 fn slash_completion_includes_dynamic_model_ids_but_not_pricing_cache_surface() {
     let temp_home = tempfile::tempdir().expect("temp home");
     let store = SessionStore::with_root(temp_home.path().join(".agent"));

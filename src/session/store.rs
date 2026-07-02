@@ -100,18 +100,26 @@ impl SessionStore {
 
     pub fn list_session_ids(&self) -> io::Result<Vec<String>> {
         self.ensure_dirs()?;
-        let mut ids = Vec::new();
+        let mut sessions = Vec::new();
         for entry in fs::read_dir(self.sessions_dir())? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
             {
-                ids.push(stem.to_string());
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                sessions.push((stem.to_string(), modified));
             }
         }
-        ids.sort_by(|a, b| b.cmp(a));
-        Ok(ids)
+        sessions.sort_by(|(left_id, left_modified), (right_id, right_modified)| {
+            right_modified
+                .cmp(left_modified)
+                .then_with(|| right_id.cmp(left_id))
+        });
+        Ok(sessions.into_iter().map(|(id, _)| id).collect())
     }
 
     pub fn list_session_labels(&self, max_preview_len: usize) -> io::Result<Vec<String>> {

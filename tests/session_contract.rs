@@ -52,6 +52,35 @@ fn session_schema_v1_round_trip() {
 }
 
 #[test]
+fn session_labels_are_ordered_by_recently_saved_first() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+
+    store
+        .save(&Session::new(
+            "zz-old".to_string(),
+            vec![AgentMessage::User {
+                content: "old conversation".to_string(),
+            }],
+        ))
+        .expect("save old");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    store
+        .save(&Session::new(
+            "aa-new".to_string(),
+            vec![AgentMessage::User {
+                content: "new conversation".to_string(),
+            }],
+        ))
+        .expect("save new");
+
+    let labels = store.list_session_labels(80).expect("labels");
+
+    assert_eq!(labels[0], "aa-new\tnew conversation");
+    assert_eq!(labels[1], "zz-old\told conversation");
+}
+
+#[test]
 fn new_session_ids_are_guids() {
     let temp = tempfile::tempdir().expect("temp dir");
     let store = SessionStore::with_root(temp.path().join(".agent"));
