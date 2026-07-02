@@ -44,6 +44,14 @@ enum InputAudioAction {
     BargeIn,
 }
 
+enum TalkLoopAction {
+    Continue,
+    Reconnect(RealtimeError),
+    ToggleText,
+    Ended,
+    Error(Box<dyn Error>),
+}
+
 pub async fn run_talk_session(
     store: &SessionStore,
     session: &mut Session,
@@ -74,61 +82,56 @@ pub async fn run_talk_session(
     let control_watcher = VoiceControlWatcher::spawn(control_tx);
 
     loop {
-        tokio::select! {
-            Some(samples) = audio_rx.recv() => {
-                match input_gate.action(&playback, &samples) {
-                    InputAudioAction::SuppressEcho => continue,
-                    InputAudioAction::BargeIn => {
-                        audio.clear_playback();
-                        let _ = client.cancel_response().await;
-                    }
-                    InputAudioAction::Forward => {}
-                }
-                client.append_input_audio(&samples).await?;
-            }
-            event = client.next_event() => {
-                let Some(event) = event? else {
-                    println!("voice session ended by server");
-                    break;
-                };
-                let mut event_context = RealtimeEventContext {
-                    client: &mut client,
-                    tools: &tools,
-                    display: &display,
-                    audio: &audio,
-                    playback: &playback,
-                    model_name: config.model.as_str(),
-                    store,
-                    session,
-                    cancellation_token: &cancellation_token,
-                };
-                handle_realtime_event(event, &mut event_context).await?;
-            }
-            Some(control) = control_rx.recv() => {
-                match control {
-                    VoiceControlEvent::ToggleText => {
-                        println!("\nreturning to text mode");
-                        audio.clear_playback();
-                        let _ = client.cancel_response().await;
+        match talk_loop_tick(TalkLoopTick {
+            client: &mut client,
+            audio_rx: &mut audio_rx,
+            control_rx: &mut control_rx,
+            input_gate: &mut input_gate,
+            audio: &audio,
+            playback: &playback,
+            tools: &tools,
+            display: &display,
+            model_name: config.model.as_str(),
+            store,
+            session,
+            cancellation_token: &cancellation_token,
+        })
+        .await
+        {
+            TalkLoopAction::Continue => {}
+            TalkLoopAction::Reconnect(err) => {
+                eprintln!("[voice warning] {err}; reconnecting...");
+                audio.clear_playback();
+                match RealtimeClient::connect(&reconnect_config(&config, session)).await {
+                    Ok(reconnected_client) => client = reconnected_client,
+                    Err(err) => {
                         esc_abort.stop().await;
                         control_watcher.stop().await;
-                        return Ok(TalkSessionExit::ToggleText);
+                        return Err(err.into());
                     }
                 }
+                print_status("reconnected");
             }
-            _ = cancellation_token.cancelled() => {
-                print_status("cancelled");
-                audio.clear_playback();
-                let _ = client.cancel_response().await;
+            TalkLoopAction::ToggleText => {
                 esc_abort.stop().await;
-                cancellation_token = CancellationToken::new();
-                esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
+                control_watcher.stop().await;
+                return Ok(TalkSessionExit::ToggleText);
             }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nending voice session");
-                audio.clear_playback();
-                break;
+            TalkLoopAction::Ended => break,
+            TalkLoopAction::Error(err) => {
+                esc_abort.stop().await;
+                control_watcher.stop().await;
+                return Err(err);
             }
+        }
+
+        if cancellation_token.is_cancelled() {
+            print_status("cancelled");
+            audio.clear_playback();
+            let _ = client.cancel_response().await;
+            esc_abort.stop().await;
+            cancellation_token = CancellationToken::new();
+            esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
         }
     }
 
@@ -170,6 +173,118 @@ pub fn talk_config(
         voice_instructions(base_system_prompt),
     )
     .with_tools(ToolRegistry::new().definitions().to_vec()))
+}
+
+fn reconnect_config(config: &RealtimeConfig, session: &Session) -> RealtimeConfig {
+    config.clone().with_history(session.messages.clone())
+}
+
+struct TalkLoopTick<'a> {
+    client: &'a mut RealtimeClient,
+    audio_rx: &'a mut mpsc::UnboundedReceiver<Vec<i16>>,
+    control_rx: &'a mut mpsc::UnboundedReceiver<VoiceControlEvent>,
+    input_gate: &'a mut InputAudioGate,
+    audio: &'a AudioIo,
+    playback: &'a crate::voice::audio::PlaybackQueue,
+    tools: &'a ToolRegistry,
+    display: &'a TerminalDisplay,
+    model_name: &'a str,
+    store: &'a SessionStore,
+    session: &'a mut Session,
+    cancellation_token: &'a CancellationToken,
+}
+
+async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
+    tokio::select! {
+        Some(samples) = context.audio_rx.recv() => {
+            match context.input_gate.action(context.playback, &samples) {
+                InputAudioAction::SuppressEcho => return TalkLoopAction::Continue,
+                InputAudioAction::BargeIn => {
+                    context.audio.clear_playback();
+                    if let Err(err) = context.client.cancel_response().await
+                        && is_recoverable_realtime_error(&err)
+                    {
+                        return TalkLoopAction::Reconnect(err);
+                    }
+                }
+                InputAudioAction::Forward => {}
+            }
+            match context.client.append_input_audio(&samples).await {
+                Ok(()) => TalkLoopAction::Continue,
+                Err(err) if is_recoverable_realtime_error(&err) => TalkLoopAction::Reconnect(err),
+                Err(err) => TalkLoopAction::Error(err.into()),
+            }
+        }
+        event = context.client.next_event() => {
+            let event = match event {
+                Ok(Some(event)) => event,
+                Ok(None) => {
+                    println!("voice session ended by server");
+                    return TalkLoopAction::Ended;
+                }
+                Err(err) if is_recoverable_realtime_error(&err) => {
+                    return TalkLoopAction::Reconnect(err);
+                }
+                Err(err) => return TalkLoopAction::Error(err.into()),
+            };
+            let mut event_context = RealtimeEventContext {
+                client: context.client,
+                tools: context.tools,
+                display: context.display,
+                audio: context.audio,
+                playback: context.playback,
+                model_name: context.model_name,
+                store: context.store,
+                session: context.session,
+                cancellation_token: context.cancellation_token,
+            };
+            match handle_realtime_event(event, &mut event_context).await {
+                Ok(()) => TalkLoopAction::Continue,
+                Err(err) if boxed_error_is_recoverable_realtime_connection(err.as_ref()) => {
+                    TalkLoopAction::Reconnect(RealtimeError::Connection(err.to_string()))
+                }
+                Err(err) => TalkLoopAction::Error(err),
+            }
+        }
+        Some(control) = context.control_rx.recv() => {
+            match control {
+                VoiceControlEvent::ToggleText => {
+                    println!("\nreturning to text mode");
+                    context.audio.clear_playback();
+                    let _ = context.client.cancel_response().await;
+                    TalkLoopAction::ToggleText
+                }
+            }
+        }
+        _ = context.cancellation_token.cancelled() => TalkLoopAction::Continue,
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nending voice session");
+            context.audio.clear_playback();
+            TalkLoopAction::Ended
+        }
+    }
+}
+
+fn is_recoverable_realtime_error(err: &RealtimeError) -> bool {
+    match err {
+        RealtimeError::Connection(message) => is_recoverable_realtime_connection_message(message),
+        RealtimeError::InvalidEvent(_) | RealtimeError::InvalidRequest(_) => false,
+    }
+}
+
+fn boxed_error_is_recoverable_realtime_connection(err: &(dyn Error + 'static)) -> bool {
+    err.downcast_ref::<RealtimeError>()
+        .is_some_and(is_recoverable_realtime_error)
+        || is_recoverable_realtime_connection_message(&err.to_string())
+}
+
+fn is_recoverable_realtime_connection_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("connection reset")
+        || message.contains("without closing handshake")
+        || message.contains("broken pipe")
+        || message.contains("connection closed")
+        || message.contains("websocket protocol error")
 }
 
 struct RealtimeEventContext<'a> {
@@ -623,6 +738,42 @@ mod tests {
             "Cancellation failed: no active response found"
         ));
         assert!(!is_benign_realtime_error("Invalid session payload"));
+    }
+
+    #[test]
+    fn websocket_reset_error_is_recoverable() {
+        let err = RealtimeError::Connection(
+            "WebSocket protocol error: Connection reset without closing handshake".to_string(),
+        );
+
+        assert!(is_recoverable_realtime_error(&err));
+        assert!(boxed_error_is_recoverable_realtime_connection(&err));
+        assert!(!is_recoverable_realtime_error(&RealtimeError::Connection(
+            "Invalid session payload".to_string(),
+        )));
+    }
+
+    #[test]
+    fn reconnect_config_uses_latest_session_history() {
+        let original = RealtimeConfig::new(
+            "gpt-realtime".to_string(),
+            "sk-test".to_string(),
+            "instructions".to_string(),
+        )
+        .with_history(vec![AgentMessage::User {
+            content: "old".to_string(),
+        }]);
+        let session = Session::new(
+            "s1".to_string(),
+            vec![AgentMessage::User {
+                content: "latest".to_string(),
+            }],
+        );
+
+        let reconnect = reconnect_config(&original, &session);
+
+        assert_eq!(reconnect.model, original.model);
+        assert_eq!(reconnect.history, session.messages);
     }
 
     #[test]
