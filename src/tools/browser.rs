@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -24,6 +25,11 @@ pub struct BrowserControlArgs {
     /// Omit this on follow-up calls to keep the browser exactly where the previous call left it.
     #[serde(default)]
     pub url: Option<String>,
+    /// Optional Chrome profile selector: profile directory name (for example "Profile 8"),
+    /// signed-in email from Chrome Local State, or an explicit profile directory path.
+    /// Defaults to "Default". AGENT_BROWSER_CHROME_PROFILE can also set this.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// Maximum time in seconds for the Playwright script.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
@@ -58,6 +64,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     let needs_start = match session_guard.as_mut() {
         Some(session) => {
             session.visible != args.visible
+                || session.profile_selector != normalized_profile_selector(args.profile.as_deref())
                 || session
                     .child
                     .try_wait()
@@ -71,7 +78,8 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
         if let Some(session) = session_guard.take() {
             close_session(session).await;
         }
-        *session_guard = Some(start_session(args.url.as_deref(), args.visible).await?);
+        *session_guard =
+            Some(start_session(args.url.as_deref(), args.visible, args.profile.as_deref()).await?);
     }
 
     let Some(session) = session_guard.as_ref() else {
@@ -149,21 +157,42 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     }
 }
 
-async fn start_session(url: Option<&str>, visible: bool) -> Result<BrowserSession, String> {
+async fn start_session(
+    url: Option<&str>,
+    visible: bool,
+    profile_selector: Option<&str>,
+) -> Result<BrowserSession, String> {
     let chrome = chrome_path()?;
-    let profile = chrome_profile_dir()?;
+    let profile = chrome_profile_dir(profile_selector)?;
+    let profile_directory = profile
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Chrome profile path has no directory name: {}",
+                profile.display()
+            )
+        })?
+        .to_string();
 
     let temp = TempDirGuard::new()?;
     let user_data_dir = temp.path.join("chrome-user-data");
-    let copied_default = user_data_dir.join("Default");
+    let copied_profile = user_data_dir.join(&profile_directory);
     fs::create_dir_all(&user_data_dir)
         .map_err(|err| format!("failed to create temporary Chrome profile: {err}"))?;
-    copy_dir_recursive(&profile, &copied_default)
-        .map_err(|err| format!("failed to copy Chrome Default profile: {err}"))?;
+    copy_dir_recursive(&profile, &copied_profile)
+        .map_err(|err| format!("failed to copy Chrome profile {}: {err}", profile.display()))?;
     copy_local_state(&profile, &user_data_dir)?;
 
     let port = available_port()?;
-    let mut child = launch_chrome(&chrome, &user_data_dir, port, url, visible)?;
+    let mut child = launch_chrome(
+        &chrome,
+        &user_data_dir,
+        &profile_directory,
+        port,
+        url,
+        visible,
+    )?;
 
     if let Err(err) = wait_for_cdp(port, &mut child).await {
         let _ = child.kill().await;
@@ -175,6 +204,7 @@ async fn start_session(url: Option<&str>, visible: bool) -> Result<BrowserSessio
         child,
         temp,
         visible,
+        profile_selector: normalized_profile_selector(profile_selector),
     })
 }
 
@@ -199,13 +229,20 @@ fn append_session_status(mut output: String, closed: bool) -> String {
 fn launch_chrome(
     chrome: &Path,
     user_data_dir: &Path,
+    profile_directory: &str,
     port: u16,
     url: Option<&str>,
     visible: bool,
 ) -> Result<Child, String> {
     let mut command = Command::new(chrome);
     command
-        .args(chrome_launch_args(user_data_dir, port, url, visible))
+        .args(chrome_launch_args(
+            user_data_dir,
+            profile_directory,
+            port,
+            url,
+            visible,
+        ))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -216,13 +253,14 @@ fn launch_chrome(
 
 fn chrome_launch_args(
     user_data_dir: &Path,
+    profile_directory: &str,
     port: u16,
     url: Option<&str>,
     visible: bool,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--user-data-dir={}", user_data_dir.display()),
-        "--profile-directory=Default".to_string(),
+        format!("--profile-directory={profile_directory}"),
         format!("--remote-debugging-port={port}"),
         "--remote-debugging-address=127.0.0.1".to_string(),
         "--no-first-run".to_string(),
@@ -380,7 +418,7 @@ fn chrome_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn chrome_profile_dir() -> Result<PathBuf, String> {
+fn chrome_profile_dir(selector: Option<&str>) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("AGENT_BROWSER_CHROME_PROFILE_DIR") {
         let path = PathBuf::from(path);
         if path.is_dir() {
@@ -392,28 +430,115 @@ fn chrome_profile_dir() -> Result<PathBuf, String> {
         ));
     }
 
+    let user_data_dir = chrome_user_data_dir()?;
+    let env_selector = std::env::var("AGENT_BROWSER_CHROME_PROFILE").ok();
+    let selector = selector
+        .or(env_selector.as_deref())
+        .filter(|value| !value.trim().is_empty());
+    resolve_profile_in_user_data_dir(&user_data_dir, selector)
+}
+
+fn chrome_user_data_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
-    let path = if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Google/Chrome/Default")
+    if cfg!(target_os = "macos") {
+        Ok(home.join("Library/Application Support/Google/Chrome"))
     } else if cfg!(target_os = "windows") {
         let local_app_data = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
             .map_err(|_| {
                 "LOCALAPPDATA is not set; set AGENT_BROWSER_CHROME_PROFILE_DIR".to_string()
             })?;
-        local_app_data.join("Google/Chrome/User Data/Default")
+        Ok(local_app_data.join("Google/Chrome/User Data"))
     } else {
-        home.join(".config/google-chrome/Default")
-    };
+        Ok(home.join(".config/google-chrome"))
+    }
+}
 
-    if path.is_dir() {
-        Ok(path)
+fn resolve_profile_in_user_data_dir(
+    user_data_dir: &Path,
+    selector: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
+        let explicit_path = PathBuf::from(selector);
+        if explicit_path.is_dir() {
+            return Ok(explicit_path);
+        }
+
+        let by_directory = user_data_dir.join(selector);
+        if by_directory.is_dir() {
+            return Ok(by_directory);
+        }
+
+        let matches = matching_profiles_from_local_state(user_data_dir, selector);
+        match matches.as_slice() {
+            [profile] => return Ok(user_data_dir.join(profile)),
+            [] => {}
+            _ => {
+                return Err(format!(
+                    "Chrome profile selector {selector:?} matched multiple profiles: {}",
+                    matches.join(", ")
+                ));
+            }
+        }
+
+        return Err(format!(
+            "could not find Chrome profile matching {selector:?} under {}; use a profile directory name like 'Profile 8', a signed-in email from Chrome Local State, or set AGENT_BROWSER_CHROME_PROFILE_DIR",
+            user_data_dir.display()
+        ));
+    }
+
+    let default = user_data_dir.join("Default");
+    if default.is_dir() {
+        Ok(default)
     } else {
         Err(format!(
             "could not find Chrome Default profile at {}; set AGENT_BROWSER_CHROME_PROFILE_DIR",
-            path.display()
+            default.display()
         ))
     }
+}
+
+fn matching_profiles_from_local_state(user_data_dir: &Path, selector: &str) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(user_data_dir.join("Local State")) else {
+        return Vec::new();
+    };
+    let Ok(local_state) = serde_json::from_str::<Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(info_cache) = local_state
+        .pointer("/profile/info_cache")
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let selector = selector.to_lowercase();
+    info_cache
+        .iter()
+        .filter_map(|(profile_dir, info)| {
+            let matched = ["user_name", "email", "name", "gaia_name"]
+                .into_iter()
+                .filter_map(|field| info.get(field).and_then(Value::as_str))
+                .any(|value| value.eq_ignore_ascii_case(&selector))
+                || profile_dir.eq_ignore_ascii_case(&selector);
+            if matched && user_data_dir.join(profile_dir).is_dir() {
+                Some(profile_dir.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn normalized_profile_selector(selector: Option<&str>) -> Option<String> {
+    if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(selector.to_string());
+    }
+
+    std::env::var("AGENT_BROWSER_CHROME_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn copy_local_state(profile: &Path, user_data_dir: &Path) -> Result<(), String> {
@@ -481,6 +606,7 @@ struct BrowserSession {
     child: Child,
     temp: TempDirGuard,
     visible: bool,
+    profile_selector: Option<String>,
 }
 
 struct TempDirGuard {
@@ -508,7 +634,7 @@ mod tests {
 
     #[test]
     fn chrome_launch_args_default_to_headless() {
-        let args = chrome_launch_args(Path::new("/tmp/profile"), 9222, None, false);
+        let args = chrome_launch_args(Path::new("/tmp/profile"), "Default", 9222, None, false);
 
         assert!(args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--disable-gpu".to_string()));
@@ -518,6 +644,7 @@ mod tests {
     fn chrome_launch_args_can_show_browser_explicitly() {
         let args = chrome_launch_args(
             Path::new("/tmp/profile"),
+            "Default",
             9222,
             Some("https://example.com"),
             true,
@@ -525,6 +652,59 @@ mod tests {
 
         assert!(!args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"https://example.com".to_string()));
+    }
+
+    #[test]
+    fn profile_selector_can_resolve_chrome_profile_directory_name() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let user_data_dir = temp.path();
+        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
+        fs::create_dir(user_data_dir.join("Profile 8")).expect("profile 8");
+
+        let profile = resolve_profile_in_user_data_dir(user_data_dir, Some("Profile 8"))
+            .expect("profile selected by directory name");
+
+        assert_eq!(profile, user_data_dir.join("Profile 8"));
+    }
+
+    #[test]
+    fn profile_selector_can_resolve_chrome_profile_by_email_from_local_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let user_data_dir = temp.path();
+        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
+        fs::create_dir(user_data_dir.join("Profile 8")).expect("profile 8");
+        fs::write(
+            user_data_dir.join("Local State"),
+            r#"{
+              "profile": {
+                "info_cache": {
+                  "Default": {"user_name": "default@example.com", "gaia_name": "Default User"},
+                  "Profile 8": {"user_name": "aaronsullivanfishbowl@gmail.com", "gaia_name": "Aaron Sullivan Fishbowl"}
+                }
+              }
+            }"#,
+        )
+        .expect("local state");
+
+        let profile = resolve_profile_in_user_data_dir(
+            user_data_dir,
+            Some("aaronsullivanfishbowl@gmail.com"),
+        )
+        .expect("profile selected by email");
+
+        assert_eq!(profile, user_data_dir.join("Profile 8"));
+    }
+
+    #[test]
+    fn profile_selector_defaults_to_default_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let user_data_dir = temp.path();
+        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
+
+        let profile = resolve_profile_in_user_data_dir(user_data_dir, None)
+            .expect("default profile selected");
+
+        assert_eq!(profile, user_data_dir.join("Default"));
     }
 
     #[test]

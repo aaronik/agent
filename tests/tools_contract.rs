@@ -333,6 +333,7 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     let output = browser_control(BrowserControlArgs {
         javascript: "return await page.title();".to_string(),
         url: Some("https://example.com".to_string()),
+        profile: None,
         timeout: 1,
         close: false,
         reset: false,
