@@ -120,9 +120,15 @@ pub async fn refresh_pricing_cache_from_url(
     root: &Path,
     source_url: &str,
 ) -> Result<PricingRefreshReport, PricingError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()?;
+    let client = pricing_http_client()?;
+    refresh_pricing_cache_from_url_with_client(root, source_url, &client).await
+}
+
+async fn refresh_pricing_cache_from_url_with_client(
+    root: &Path,
+    source_url: &str,
+    client: &reqwest::Client,
+) -> Result<PricingRefreshReport, PricingError> {
     let response = client.get(source_url).send().await?;
     let status = response.status();
     if !status.is_success() {
@@ -155,6 +161,20 @@ pub async fn refresh_pricing_cache_from_url(
         model_count: pricing_map.model_count(),
         priced_model_count,
     })
+}
+
+fn pricing_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    pricing_http_client_with_timeouts(Duration::from_secs(20), Duration::from_secs(60))
+}
+
+fn pricing_http_client_with_timeouts(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
 }
 
 pub fn pricing_cache_path(root: &Path) -> PathBuf {
@@ -218,5 +238,60 @@ where
         Some(other) => Err(serde::de::Error::custom(format!(
             "expected number, string, or null; got {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn pricing_refresh_does_not_apply_connect_timeout_to_body_download() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test pricing server");
+        let address = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+
+            let body = r#"{"gpt-test":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000003}}"#;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write response headers");
+            socket.flush().await.expect("flush response headers");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            socket
+                .write_all(body.as_bytes())
+                .await
+                .expect("write response body");
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join(".agent");
+        let client =
+            pricing_http_client_with_timeouts(Duration::from_millis(25), Duration::from_secs(2))
+                .expect("pricing client");
+
+        let report = refresh_pricing_cache_from_url_with_client(
+            &root,
+            &format!("http://{address}/pricing.json"),
+            &client,
+        )
+        .await
+        .expect("refresh pricing");
+
+        server.await.expect("server task");
+        assert_eq!(report.model_count, 1);
+        assert_eq!(report.priced_model_count, 1);
+        assert!(pricing_cache_path(&root).exists());
     }
 }
