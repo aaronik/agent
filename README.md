@@ -19,7 +19,7 @@ cargo run -- --model mock --single "run echo hi"
 Run with OpenAI:
 
 ```sh
-OPENAI_API_KEY=... cargo run -- --model openai:gpt-5.5
+OPENAI_API_KEY=... cargo run -- --model openai:gpt-5.6-terra
 ```
 
 Run with Ollama:

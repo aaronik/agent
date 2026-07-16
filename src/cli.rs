@@ -1333,7 +1333,7 @@ mod completion_input_tests {
     fn completer_picks_up_background_model_refreshes() {
         let dynamic_models = Arc::new(RwLock::new(Vec::new()));
         let mut completer = AgentCompleter::with_dynamic_models(
-            vec!["/models".to_string(), "/models gpt-5.5".to_string()],
+            vec!["/models".to_string(), "/models gpt-5.6-terra".to_string()],
             Arc::clone(&dynamic_models),
         );
 

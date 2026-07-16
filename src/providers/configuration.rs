@@ -6,7 +6,7 @@ use crate::providers::{
     MockProvider, OpenAiCompatibleProvider, Provider, ProviderConfig, ProviderFlavor,
 };
 
-pub const DEFAULT_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
 pub const DEFAULT_CONTEXT_TOKENS: usize = 16_384;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +91,9 @@ pub fn context_window_tokens(raw_model: &str) -> usize {
     if parsed.provider == "ollama" || parsed.provider == "mock" {
         return DEFAULT_CONTEXT_TOKENS;
     }
-    if model.contains("gpt-5.5")
+    if model.contains("gpt-5.6")
+        || model.contains("gpt5.6")
+        || model.contains("gpt-5.5")
         || model.contains("gpt5.5")
         || model.contains("gpt-5.2")
         || model.contains("gpt5.2")
