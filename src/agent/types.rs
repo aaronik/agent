@@ -46,11 +46,25 @@ pub struct AssistantMessage {
     pub metadata: Map<String, Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub data: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
-    System { content: String },
-    User { content: String },
+    System {
+        content: String,
+    },
+    User {
+        content: String,
+    },
+    UserWithImages {
+        content: String,
+        images: Vec<ImageAttachment>,
+    },
     Assistant(AssistantMessage),
     Tool(ToolResult),
 }
@@ -58,7 +72,9 @@ pub enum AgentMessage {
 impl AgentMessage {
     pub fn content(&self) -> &str {
         match self {
-            Self::System { content } | Self::User { content } => content,
+            Self::System { content }
+            | Self::User { content }
+            | Self::UserWithImages { content, .. } => content,
             Self::Assistant(message) => &message.content,
             Self::Tool(result) => &result.content,
         }

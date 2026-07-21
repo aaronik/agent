@@ -613,3 +613,98 @@ async fn agent_loop_aborts_in_flight_provider_request_when_token_is_cancelled() 
 
     assert!(matches!(err, ProviderError::Cancelled));
 }
+
+#[tokio::test]
+async fn chat_provider_sends_images_as_openai_compatible_content_parts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "a cat"}}]
+        })))
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "ollama".to_string(),
+        model: "llava".to_string(),
+        base_url: server.uri(),
+        api_key: "test-key".to_string(),
+        flavor: ProviderFlavor::OpenAiChat,
+    });
+
+    provider
+        .complete(
+            &[AgentMessage::UserWithImages {
+                content: "What is this?".to_string(),
+                images: vec![agent_rs::agent::ImageAttachment {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                }],
+            }],
+            &[],
+        )
+        .await
+        .expect("provider response");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({
+            "type": "text", "text": "What is this?"
+        })
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,aGVsbG8="}
+        })
+    );
+}
+
+#[tokio::test]
+async fn responses_provider_sends_images_as_input_image_parts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output_text": "ok"})))
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "openai".to_string(),
+        model: "gpt-test".to_string(),
+        base_url: server.uri(),
+        api_key: "test-key".to_string(),
+        flavor: ProviderFlavor::OpenAiResponses,
+    });
+
+    provider
+        .complete(
+            &[AgentMessage::UserWithImages {
+                content: "Read this".to_string(),
+                images: vec![agent_rs::agent::ImageAttachment {
+                    media_type: "image/jpeg".to_string(),
+                    data: "/9j/".to_string(),
+                }],
+            }],
+            &[],
+        )
+        .await
+        .expect("provider response");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    assert_eq!(
+        body["input"][0]["content"][0],
+        json!({
+            "type": "input_text", "text": "Read this"
+        })
+    );
+    assert_eq!(
+        body["input"][0]["content"][1],
+        json!({
+            "type": "input_image", "image_url": "data:image/jpeg;base64,/9j/"
+        })
+    );
+}

@@ -266,6 +266,15 @@ fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
         .map(|message| match message {
             AgentMessage::System { content } => json!({"role": "system", "content": content}),
             AgentMessage::User { content } => json!({"role": "user", "content": content}),
+            AgentMessage::UserWithImages { content, images } => json!({
+                "role": "user",
+                "content": std::iter::once(json!({"type": "text", "text": content}))
+                    .chain(images.iter().map(|image| json!({
+                        "type": "image_url",
+                        "image_url": {"url": image_data_url(image)}
+                    })))
+                    .collect::<Vec<_>>()
+            }),
             AgentMessage::Assistant(assistant) => {
                 let mut value = json!({"role": "assistant", "content": assistant.content});
                 if !assistant.tool_calls.is_empty() {
@@ -297,6 +306,10 @@ fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
         .collect()
 }
 
+fn image_data_url(image: &crate::agent::ImageAttachment) -> String {
+    format!("data:{};base64,{}", image.media_type, image.data)
+}
+
 fn chat_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
@@ -322,6 +335,17 @@ fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
             }
             AgentMessage::User { content } => {
                 input.push(json!({"role": "user", "content": content}));
+            }
+            AgentMessage::UserWithImages { content, images } => {
+                input.push(json!({
+                    "role": "user",
+                    "content": std::iter::once(json!({"type": "input_text", "text": content}))
+                        .chain(images.iter().map(|image| json!({
+                            "type": "input_image",
+                            "image_url": image_data_url(image)
+                        })))
+                        .collect::<Vec<_>>()
+                }));
             }
             AgentMessage::Assistant(assistant) => {
                 if !assistant.content.is_empty() {

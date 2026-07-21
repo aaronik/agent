@@ -7,6 +7,6 @@ pub use cancel::CancellationToken;
 pub use context::{count_tokens, trim_messages};
 pub use loop_runner::{AgentLoop, AgentLoopConfig};
 pub use types::{
-    AgentMessage, AgentTurnResult, AssistantMessage, ProviderEvent, ToolCall, ToolResult,
-    ToolStatus, Usage,
+    AgentMessage, AgentTurnResult, AssistantMessage, ImageAttachment, ProviderEvent, ToolCall,
+    ToolResult, ToolStatus, Usage,
 };

@@ -128,7 +128,8 @@ impl SessionStore {
             let label = match self.load(Some(&id)) {
                 Ok(session) => {
                     let preview = session.messages.iter().find_map(|message| match message {
-                        crate::agent::AgentMessage::User { content } => {
+                        crate::agent::AgentMessage::User { content }
+                        | crate::agent::AgentMessage::UserWithImages { content, .. } => {
                             Some(collapse_preview(content, max_preview_len))
                         }
                         _ => None,

@@ -1,3 +1,4 @@
+use base64::Engine;
 use clap::Parser;
 use crossterm::event::{
     self, Event, KeyCode as CrosstermKeyCode, KeyEventKind, KeyModifiers as CrosstermKeyModifiers,
@@ -72,6 +73,13 @@ pub struct Args {
     pub resume: Option<String>,
     #[arg(short = 'n', long, help = "Start a new session instead of resuming")]
     pub new: bool,
+    #[arg(
+        long = "image",
+        value_name = "PATH",
+        action = clap::ArgAction::Append,
+        help = "Attach an image to the initial text message (repeatable)"
+    )]
+    pub images: Vec<std::path::PathBuf>,
     #[arg(help = "Initial user message")]
     pub query: Vec<String>,
 }
@@ -95,6 +103,12 @@ async fn run_with_args_and_prefill(
     }
     if args.talk && (args.single || args.command) {
         return Err("--talk cannot be combined with --single or --command".into());
+    }
+    if args.talk && !args.images.is_empty() {
+        return Err("--image is only supported in text mode".into());
+    }
+    if !args.images.is_empty() && args.query.is_empty() {
+        return Err("--image requires an initial query".into());
     }
 
     if args.update_pricing {
@@ -134,6 +148,7 @@ async fn run_with_args_and_prefill(
     } else {
         Some(args.query.join(" "))
     };
+    let mut pending_images = Some(args.images.as_slice());
 
     loop {
         if interaction_mode == InteractionMode::Talk && first_input.is_none() {
@@ -181,29 +196,41 @@ async fn run_with_args_and_prefill(
             }
         };
 
-        match handle_slash_command(&user_input, &args, &store, &mut session).await? {
-            SlashCommandResult::NotCommand => {}
-            SlashCommandResult::Handled => {
-                loop_runner = None;
-                if args.single {
-                    break;
+        let image_paths = pending_images.take().unwrap_or_default();
+        let parsed_input = parse_user_input(&user_input, image_paths)?;
+        if parsed_input.images.is_empty() {
+            match handle_slash_command(&user_input, &args, &store, &mut session).await? {
+                SlashCommandResult::NotCommand => {}
+                SlashCommandResult::Handled => {
+                    loop_runner = None;
+                    if args.single {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            SlashCommandResult::SwitchModel(new_model) => {
-                model_name = new_model;
-                loop_runner = None;
-                print_agent_header(&model_name);
-                if args.single {
-                    break;
+                SlashCommandResult::SwitchModel(new_model) => {
+                    model_name = new_model;
+                    loop_runner = None;
+                    print_agent_header(&model_name);
+                    if args.single {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
         }
 
-        session.messages.push(AgentMessage::User {
-            content: user_input,
-        });
+        let user_message = if parsed_input.images.is_empty() {
+            AgentMessage::User {
+                content: parsed_input.content,
+            }
+        } else {
+            AgentMessage::UserWithImages {
+                content: parsed_input.content,
+                images: parsed_input.images,
+            }
+        };
+        session.messages.push(user_message);
         store.save(&session)?;
         display.render_turn_submitted();
 
@@ -264,6 +291,117 @@ async fn run_with_args_and_prefill(
     Ok(())
 }
 
+struct ParsedUserInput {
+    content: String,
+    images: Vec<crate::agent::ImageAttachment>,
+}
+
+fn parse_user_input(
+    input: &str,
+    explicit_images: &[std::path::PathBuf],
+) -> Result<ParsedUserInput, Box<dyn Error>> {
+    let mut image_paths = explicit_images.to_vec();
+    let mut text_parts = Vec::new();
+    let mut found_dragged_image = false;
+    for part in shell_words(input) {
+        let candidate = part.trim_end_matches(['.', ',', ';', ':']);
+        let path = std::path::PathBuf::from(candidate);
+        if is_supported_image_path(&path) && path.is_file() {
+            image_paths.push(path);
+            found_dragged_image = true;
+        } else {
+            text_parts.push(part);
+        }
+    }
+    let content = if found_dragged_image {
+        text_parts.join(" ")
+    } else {
+        input.to_string()
+    };
+    Ok(ParsedUserInput {
+        content: if content.trim().is_empty() && !image_paths.is_empty() {
+            "Describe this image.".to_string()
+        } else {
+            content
+        },
+        images: load_image_attachments(&image_paths)?,
+    })
+}
+
+fn shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in input.chars() {
+        if escaped {
+            word.push(character);
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                word.push(character);
+            }
+        } else if character.is_ascii_whitespace() && quote.is_none() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(character);
+        }
+    }
+    if escaped {
+        word.push('\\');
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn is_supported_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
+fn load_image_attachments(
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<crate::agent::ImageAttachment>, Box<dyn Error>> {
+    paths
+        .iter()
+        .map(|path| {
+            let media_type = match path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("gif") => "image/gif",
+                Some("webp") => "image/webp",
+                _ => return Err(format!("unsupported image format: {}", path.display()).into()),
+            };
+            let bytes = std::fs::read(path)
+                .map_err(|err| format!("could not read image {}: {err}", path.display()))?;
+            Ok(crate::agent::ImageAttachment {
+                media_type: media_type.to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        })
+        .collect()
+}
+
 fn play_turn_completed_sound() {
     #[cfg(target_os = "macos")]
     {
@@ -290,6 +428,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             command: false,
             resume: None,
             new: true,
+            images: Vec::new(),
             query: Vec::new(),
         },
         &store,
@@ -297,8 +436,16 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
     session.messages.push(AgentMessage::System {
         content: command_mode_system_prompt(),
     });
-    session.messages.push(AgentMessage::User {
-        content: args.query.join(" "),
+    let command_content = args.query.join(" ");
+    session.messages.push(if args.images.is_empty() {
+        AgentMessage::User {
+            content: command_content,
+        }
+    } else {
+        AgentMessage::UserWithImages {
+            content: command_content,
+            images: load_image_attachments(&args.images)?,
+        }
     });
 
     let model_name = effective_model_name(args.model.as_deref());
@@ -631,6 +778,7 @@ async fn handle_slash_command(
                 &Args {
                     new: true,
                     resume: None,
+                    images: Vec::new(),
                     query: Vec::new(),
                     single: args.single,
                     model: args.model.clone(),
@@ -1103,6 +1251,49 @@ mod tests {
     fn parses_new_short_flag() {
         let args = Args::parse_from(["agent", "-n"]);
         assert!(args.new);
+    }
+
+    #[test]
+    fn dragged_image_path_becomes_an_attachment() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let image = temp.path().join("screen shot.png");
+        std::fs::write(&image, b"png").expect("image");
+        let escaped = image.display().to_string().replace(' ', "\\ ");
+
+        let parsed = parse_user_input(&format!("what is this? {escaped}"), &[])
+            .expect("parsed dragged image");
+
+        assert_eq!(parsed.content, "what is this?");
+        assert_eq!(parsed.images.len(), 1);
+        assert_eq!(parsed.images[0].media_type, "image/png");
+    }
+
+    #[test]
+    fn dragged_macos_screenshot_with_narrow_no_break_space_is_attached() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let image = temp
+            .path()
+            .join("Screenshot 2026-07-06 at 9.48.19\u{202f}AM.png");
+        std::fs::write(&image, b"png").expect("image");
+        let escaped = image.display().to_string().replace(' ', "\\ ");
+
+        let parsed = parse_user_input(&format!("{escaped}."), &[]).expect("parsed dragged image");
+
+        assert_eq!(parsed.content, "Describe this image.");
+        assert_eq!(parsed.images.len(), 1);
+    }
+
+    #[test]
+    fn dragging_only_an_image_supplies_a_default_prompt() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let image = temp.path().join("photo.jpg");
+        std::fs::write(&image, b"jpg").expect("image");
+
+        let parsed =
+            parse_user_input(&format!("'{}'", image.display()), &[]).expect("parsed dragged image");
+
+        assert_eq!(parsed.content, "Describe this image.");
+        assert_eq!(parsed.images.len(), 1);
     }
 
     #[test]

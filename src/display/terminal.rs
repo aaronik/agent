@@ -56,6 +56,9 @@ impl TerminalDisplay {
             AgentMessage::User { content } => {
                 println!("\n{content}\n");
             }
+            AgentMessage::UserWithImages { content, images } => {
+                println!("\n{content}\n[attached {} image(s)]\n", images.len());
+            }
             AgentMessage::Assistant(assistant) => {
                 if !assistant.content.trim().is_empty() {
                     println!("\n{}", self.format_assistant_content(&assistant.content));

@@ -520,3 +520,66 @@ fn pricing_payload() -> serde_json::Value {
         }
     })
 }
+
+#[test]
+fn dragged_absolute_image_path_is_not_treated_as_a_slash_command() {
+    let home = tempfile::tempdir().expect("temp home");
+    let image = home.path().join("Screenshot 9.48.19\u{202f}AM.png");
+    std::fs::write(&image, b"png").expect("write image");
+    let escaped = image.display().to_string().replace(' ', "\\ ");
+
+    let output = Command::cargo_bin("agent")
+        .expect("agent binary")
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", &format!("{escaped}.")])
+        .output()
+        .expect("run agent");
+
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Unknown command"));
+    let session_path = std::fs::read_dir(home.path().join(".agent/sessions"))
+        .expect("sessions")
+        .next()
+        .expect("session entry")
+        .expect("session")
+        .path();
+    let session = std::fs::read_to_string(session_path).expect("session file");
+    assert!(session.contains("user_with_images"));
+}
+
+#[test]
+fn image_flag_accepts_an_image_in_single_text_mode() {
+    let home = tempfile::tempdir().expect("temp home");
+    let image = home.path().join("pixel.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n").expect("write image");
+
+    let output = Command::cargo_bin("agent")
+        .expect("agent binary")
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "--image"])
+        .arg(&image)
+        .arg("describe this")
+        .output()
+        .expect("run agent");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sessions = std::fs::read_dir(home.path().join(".agent/sessions"))
+        .expect("sessions directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("session entries");
+    let session: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(sessions[0].path()).expect("session file"))
+            .expect("session json");
+    let user = session["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "user_with_images")
+        .expect("multimodal user message");
+    assert_eq!(user["content"], "describe this");
+    assert_eq!(user["images"][0]["media_type"], "image/png");
+}

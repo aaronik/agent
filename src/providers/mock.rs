@@ -38,7 +38,8 @@ impl Provider for MockProvider {
                 .iter()
                 .rev()
                 .find_map(|message| match message {
-                    AgentMessage::User { content } => Some(content.clone()),
+                    AgentMessage::User { content }
+                    | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
                     _ => None,
                 })
                 .unwrap_or_default();

@@ -51,6 +51,9 @@ fn message_to_text(message: &AgentMessage) -> String {
     match message {
         AgentMessage::System { content } => format!("system: {content}"),
         AgentMessage::User { content } => format!("user: {content}"),
+        AgentMessage::UserWithImages { content, images } => {
+            format!("user: {content} [attachments: {} image(s)]", images.len())
+        }
         AgentMessage::Assistant(assistant) => {
             let calls = assistant
                 .tool_calls
