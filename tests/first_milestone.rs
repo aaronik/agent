@@ -6,6 +6,47 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
+#[cfg(target_os = "macos")]
+fn successful_text_turn_plays_completion_sound() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let fake_bin = tempfile::tempdir().expect("fake bin");
+    let sound_log = temp_home.path().join("sound.log");
+    let afplay = fake_bin.path().join("afplay");
+    std::fs::write(
+        &afplay,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$AGENT_SOUND_LOG\"\n",
+    )
+    .expect("write fake afplay");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&afplay, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake afplay executable");
+
+    let path = format!(
+        "{}:{}",
+        fake_bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .env("PATH", path)
+        .env("AGENT_SOUND_LOG", &sound_log)
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    for _ in 0..20 {
+        if sound_log.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(sound_log).expect("completion sound was played"),
+        "/System/Library/Sounds/Ping.aiff"
+    );
+}
+
+#[test]
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 

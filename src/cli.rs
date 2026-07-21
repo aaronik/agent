@@ -245,6 +245,7 @@ async fn run_with_args_and_prefill(
                 session.messages.extend(result.new_messages);
                 session.replace_messages(session.messages.clone());
                 store.save(&session)?;
+                play_turn_completed_sound();
             }
             Err(crate::providers::ProviderError::Cancelled)
                 if cancellation_token.is_cancelled() =>
@@ -261,6 +262,16 @@ async fn run_with_args_and_prefill(
 
     println!("sessionId: {}", session.session_id);
     Ok(())
+}
+
+fn play_turn_completed_sound() {
+    #[cfg(target_os = "macos")]
+    {
+        const COMPLETION_SOUND: &str = "/System/Library/Sounds/Ping.aiff";
+        let _ = std::process::Command::new("afplay")
+            .arg(COMPLETION_SOUND)
+            .spawn();
+    }
 }
 
 async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
