@@ -984,23 +984,25 @@ impl EditMode for SlashCompletionVi {
             return ReedlineEvent::ExecuteHostCommand(TOGGLE_TALK_HOST_COMMAND.to_string());
         }
 
-        let plain_enter = is_key_event(
+        let newline_key = matches!(
             &crossterm_event,
-            CrosstermKeyCode::Enter,
-            CrosstermKeyModifiers::NONE,
+            Event::Key(key)
+                if (key.code == CrosstermKeyCode::Enter && !key.modifiers.is_empty())
+                    || (key.code == CrosstermKeyCode::Char('j')
+                        && key.modifiers.contains(CrosstermKeyModifiers::CONTROL))
         );
         let was_insert_mode = matches!(
             self.inner.edit_mode(),
             PromptEditMode::Vi(PromptViMode::Insert)
         );
 
+        if newline_key && was_insert_mode {
+            return ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
+        }
+
         let event = ReedlineRawEvent::try_from(crossterm_event)
             .map(|event| self.inner.parse_event(event))
             .unwrap_or(ReedlineEvent::None);
-
-        if plain_enter && was_insert_mode && !self.slash_completion_active {
-            return ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
-        }
 
         set_cursor_style_for_mode(self.inner.edit_mode());
         self.handle_event(event)
@@ -1019,10 +1021,6 @@ fn is_toggle_talk_key(event: &Event) -> bool {
                 && matches!(key.code, CrosstermKeyCode::Char('t' | 'T'))
                 && key.modifiers.contains(CrosstermKeyModifiers::CONTROL)
     )
-}
-
-fn is_key_event(event: &Event, code: CrosstermKeyCode, modifiers: CrosstermKeyModifiers) -> bool {
-    matches!(event, Event::Key(key) if key.code == code && key.modifiers == modifiers)
 }
 
 fn inserts_slash(commands: &[EditCommand]) -> bool {
@@ -1297,11 +1295,16 @@ mod completion_input_tests {
     }
 
     #[test]
-    fn enter_in_insert_mode_inserts_newline_and_enter_in_normal_mode_submits() {
+    fn enter_submits_and_iterm_shift_enter_inserts_newline_in_insert_mode() {
         let mut mode = agent_vi_mode();
 
+        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
         assert_eq!(
-            mode.parse_event(key(KeyCode::Enter)),
+            mode.parse_event(modified_key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+        assert_eq!(
+            mode.parse_event(modified_key(KeyCode::Enter, KeyModifiers::SHIFT)),
             ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
         );
 
