@@ -79,6 +79,7 @@ pub struct Args {
     #[arg(short = 'n', long, help = "Start a new session instead of resuming")]
     pub new: bool,
     #[arg(
+        short = 'i',
         long = "image",
         value_name = "PATH",
         action = clap::ArgAction::Append,
@@ -1306,7 +1307,7 @@ mod tests {
 
     #[test]
     fn talk_mode_accepts_image_argument() {
-        let args = Args::parse_from(["agent", "--talk", "--image", "photo.png"]);
+        let args = Args::parse_from(["agent", "--talk", "-i", "photo.png"]);
 
         assert!(args.talk);
         assert_eq!(args.images, vec![std::path::PathBuf::from("photo.png")]);
