@@ -269,6 +269,16 @@ fn conversation_items_for_message(message: &AgentMessage) -> Vec<Value> {
             "role": "user",
             "content": [{ "type": "input_text", "text": content }]
         })],
+        AgentMessage::UserWithImages { content, images } => vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": std::iter::once(json!({ "type": "input_text", "text": content }))
+                .chain(images.iter().map(|image| json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{};base64,{}", image.media_type, image.data)
+                })))
+                .collect::<Vec<_>>()
+        })],
         AgentMessage::Assistant(assistant) => {
             let mut items = Vec::new();
             if !assistant.content.trim().is_empty() {

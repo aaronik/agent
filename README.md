@@ -31,9 +31,10 @@ cargo run -- --model ollama:llava --single --image photo.jpg "Describe this imag
 ```
 
 `--image PATH` works in text, `--single`, and `--command` modes and may be repeated.
-In an interactive text chat, drag an image from Finder into the prompt, optionally add a
-question, and press Enter. This works on any turn, including resumed chats. PNG, JPEG,
-GIF, and WebP files are supported. The selected model must support vision.
+For a voice conversation, start with `--talk --image photo.jpg "What should I notice?"`,
+then discuss the image naturally. In an interactive text chat, drag an image from Finder into the
+prompt, optionally add a question, and press Enter. This works on any turn, including resumed
+chats. PNG, JPEG, GIF, and WebP files are supported. The selected model must support vision.
 
 Refresh cached LiteLLM pricing data:
 

@@ -50,9 +50,13 @@ enum InteractionMode {
 pub struct Args {
     #[arg(short, long, help = "Model id, optionally provider-prefixed")]
     pub model: Option<String>,
-    #[arg(long, help = "List available OpenAI and Ollama models")]
+    #[arg(short, long, help = "List available OpenAI and Ollama models")]
     pub list_models: bool,
-    #[arg(long, help = "Download and cache LiteLLM pricing data, then exit")]
+    #[arg(
+        short,
+        long,
+        help = "Download and cache LiteLLM pricing data, then exit"
+    )]
     pub update_pricing: bool,
     #[arg(short, long, help = "Run one turn and exit")]
     pub single: bool,
@@ -65,6 +69,7 @@ pub struct Args {
     )]
     pub command: bool,
     #[arg(
+        short,
         long,
         num_args = 0..=1,
         default_missing_value = "__LATEST__",
@@ -104,11 +109,8 @@ async fn run_with_args_and_prefill(
     if args.talk && (args.single || args.command) {
         return Err("--talk cannot be combined with --single or --command".into());
     }
-    if args.talk && !args.images.is_empty() {
-        return Err("--image is only supported in text mode".into());
-    }
-    if !args.images.is_empty() && args.query.is_empty() {
-        return Err("--image requires an initial query".into());
+    if !args.images.is_empty() && args.query.is_empty() && !args.talk {
+        return Err("--image requires an initial query outside talk mode".into());
     }
 
     if args.update_pricing {
@@ -137,13 +139,30 @@ async fn run_with_args_and_prefill(
     print_agent_header(&model_name);
     replay_session(&session, &display);
 
+    if args.talk && (!args.images.is_empty() || !args.query.is_empty()) {
+        let parsed_input = parse_user_input(&args.query.join(" "), &args.images)?;
+        let user_message = if parsed_input.images.is_empty() {
+            AgentMessage::User {
+                content: parsed_input.content,
+            }
+        } else {
+            AgentMessage::UserWithImages {
+                content: parsed_input.content,
+                images: parsed_input.images,
+            }
+        };
+        display.render_new_message(&user_message);
+        session.messages.push(user_message);
+        store.save(&session)?;
+    }
+
     let mut interaction_mode = if args.talk {
         InteractionMode::Talk
     } else {
         InteractionMode::Text
     };
 
-    let mut first_input = if args.query.is_empty() {
+    let mut first_input = if args.talk || args.query.is_empty() {
         None
     } else {
         Some(args.query.join(" "))
@@ -532,7 +551,9 @@ impl InputModeGuard {
         if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &input_mode) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        TERMINAL_MODE_ORIGINAL.with(|saved| saved.set(Some(original)));
+        *terminal_mode_original()
+            .lock()
+            .expect("terminal mode lock poisoned") = Some(original);
         Ok(())
     }
 }
@@ -540,18 +561,39 @@ impl InputModeGuard {
 #[cfg(unix)]
 impl Drop for InputModeGuard {
     fn drop(&mut self) {
-        TERMINAL_MODE_ORIGINAL.with(|saved| {
-            if let Some(original) = saved.take() {
-                // SAFETY: original was captured from tcgetattr for stdin in this thread.
-                let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
-            }
-        });
+        if let Some(original) = terminal_mode_original()
+            .lock()
+            .expect("terminal mode lock poisoned")
+            .take()
+        {
+            // SAFETY: original was captured from tcgetattr for stdin.
+            let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+        }
     }
 }
 
 #[cfg(unix)]
-thread_local! {
-    static TERMINAL_MODE_ORIGINAL: std::cell::Cell<Option<libc::termios>> = const { std::cell::Cell::new(None) };
+fn terminal_mode_original() -> &'static std::sync::Mutex<Option<libc::termios>> {
+    static ORIGINAL: std::sync::OnceLock<std::sync::Mutex<Option<libc::termios>>> =
+        std::sync::OnceLock::new();
+    ORIGINAL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(unix)]
+pub fn restore_terminal_mode() {
+    if let Some(original) = terminal_mode_original()
+        .lock()
+        .expect("terminal mode lock poisoned")
+        .take()
+    {
+        // SAFETY: original was captured from tcgetattr for stdin.
+        let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+    }
+}
+
+#[cfg(not(unix))]
+pub fn restore_terminal_mode() {
+    let _ = disable_raw_mode();
 }
 
 #[cfg(unix)]
@@ -1248,9 +1290,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_requested_short_flags() {
+        let args = Args::parse_from(["agent", "-l", "-u", "-r", "session-id"]);
+
+        assert!(args.list_models);
+        assert!(args.update_pricing);
+        assert_eq!(args.resume.as_deref(), Some("session-id"));
+    }
+
+    #[test]
     fn parses_new_short_flag() {
         let args = Args::parse_from(["agent", "-n"]);
         assert!(args.new);
+    }
+
+    #[test]
+    fn talk_mode_accepts_image_argument() {
+        let args = Args::parse_from(["agent", "--talk", "--image", "photo.png"]);
+
+        assert!(args.talk);
+        assert_eq!(args.images, vec![std::path::PathBuf::from("photo.png")]);
     }
 
     #[test]

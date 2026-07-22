@@ -25,6 +25,7 @@ const PLAYBACK_ECHO_SUPPRESSION_HANGOVER: Duration = Duration::from_millis(900);
 const DEFAULT_BARGE_IN_RMS_THRESHOLD: f64 = 900.0;
 const DEFAULT_BARGE_IN_VOLUME_SCALE: f64 = 2_400.0;
 const SYSTEM_VOLUME_CACHE_TTL: Duration = Duration::from_millis(500);
+const CTRL_C_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TalkSessionExit {
@@ -35,6 +36,7 @@ pub enum TalkSessionExit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VoiceControlEvent {
     ToggleText,
+    Exit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +62,7 @@ pub async fn run_talk_session(
 ) -> Result<TalkSessionExit, Box<dyn Error>> {
     let config =
         talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
+    let _ctrl_c_exit_trap = CtrlCExitTrap::spawn();
     println!(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
         config.model, config.voice, config.voice_speed
@@ -254,6 +257,11 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                     let _ = context.client.cancel_response().await;
                     TalkLoopAction::ToggleText
                 }
+                VoiceControlEvent::Exit => {
+                    println!("\nending voice session");
+                    context.audio.clear_playback();
+                    TalkLoopAction::Ended
+                }
             }
         }
         _ = context.cancellation_token.cancelled() => TalkLoopAction::Continue,
@@ -346,6 +354,37 @@ async fn handle_realtime_event(
     Ok(())
 }
 
+struct CtrlCExitTrap {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl CtrlCExitTrap {
+    fn spawn() -> Self {
+        let handle = tokio::spawn(async {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\nending voice session");
+
+            // The normal talk loop also handles Ctrl-C so it can close audio and the
+            // websocket cleanly. If a driver or tool is stuck, do not leave the user
+            // trapped in raw terminal mode indefinitely.
+            tokio::time::sleep(CTRL_C_FORCE_EXIT_TIMEOUT).await;
+            crate::cli::restore_terminal_mode();
+            std::process::exit(ctrl_c_exit_code());
+        });
+        Self { handle }
+    }
+}
+
+impl Drop for CtrlCExitTrap {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+const fn ctrl_c_exit_code() -> i32 {
+    130
+}
+
 struct VoiceControlWatcher {
     stop: Arc<AtomicBool>,
     handle: Option<tokio::task::JoinHandle<()>>,
@@ -360,6 +399,12 @@ impl VoiceControlWatcher {
                 while !stop_watcher.load(Ordering::SeqCst) {
                     match event::poll(Duration::from_millis(50)) {
                         Ok(true) => match event::read() {
+                            Ok(Event::Key(key))
+                                if is_exit_key(key.code, key.modifiers, key.kind) =>
+                            {
+                                let _ = tx.send(VoiceControlEvent::Exit);
+                                break;
+                            }
                             Ok(Event::Key(key))
                                 if is_toggle_text_key(key.code, key.modifiers, key.kind) =>
                             {
@@ -384,6 +429,12 @@ impl VoiceControlWatcher {
             let _ = handle.await;
         }
     }
+}
+
+fn is_exit_key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> bool {
+    matches!(code, KeyCode::Char('c' | 'C'))
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && kind == KeyEventKind::Press
 }
 
 fn is_toggle_text_key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> bool {
@@ -611,6 +662,30 @@ mod tests {
     #[test]
     fn talk_model_keeps_explicit_realtime_model() {
         assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
+    }
+
+    #[test]
+    fn ctrl_c_exit_code_matches_shell_interrupt_convention() {
+        assert_eq!(ctrl_c_exit_code(), 130);
+    }
+
+    #[test]
+    fn ctrl_c_is_voice_exit_key() {
+        assert!(is_exit_key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ));
+        assert!(is_exit_key(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        ));
+        assert!(!is_exit_key(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
     }
 
     #[test]

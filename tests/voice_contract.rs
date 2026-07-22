@@ -203,6 +203,27 @@ fn talk_mode_defaults_text_models_to_realtime_model() {
 }
 
 #[test]
+fn realtime_history_sends_image_input() {
+    let events = conversation_item_create_events(&[AgentMessage::UserWithImages {
+        content: "What is in this image?".to_string(),
+        images: vec![agent_rs::agent::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        }],
+    }]);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["item"]["content"][0]["type"], "input_text");
+    assert_eq!(
+        events[0]["item"]["content"][1],
+        json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,aGVsbG8="
+        })
+    );
+}
+
+#[test]
 fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
     let events = conversation_item_create_events(&[
         AgentMessage::System {
