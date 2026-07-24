@@ -282,5 +282,6 @@ fn test_config() -> agent_rs::voice::realtime::RealtimeConfig {
         transcription_model: "gpt-4o-mini-transcribe".to_string(),
         tools: Vec::new(),
         history: Vec::new(),
+        initial_response: false,
     }
 }

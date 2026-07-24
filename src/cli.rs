@@ -96,6 +96,22 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     run_with_args_and_prefill(args, prompt_prefill).await
 }
 
+fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
+    if args.new && args.resume.is_some() {
+        return Err("--new cannot be used with --resume".into());
+    }
+    if args.talk && args.command {
+        return Err("--talk cannot be combined with --command".into());
+    }
+    if args.talk && args.single && args.query.is_empty() {
+        return Err("--talk --single requires an initial query".into());
+    }
+    if !args.images.is_empty() && args.query.is_empty() && !args.talk {
+        return Err("--image requires an initial query outside talk mode".into());
+    }
+    Ok(())
+}
+
 pub async fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
     run_with_args_and_prefill(args, None).await
 }
@@ -104,15 +120,7 @@ async fn run_with_args_and_prefill(
     args: Args,
     mut prompt_prefill: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
-    if args.new && args.resume.is_some() {
-        return Err("--new cannot be used with --resume".into());
-    }
-    if args.talk && (args.single || args.command) {
-        return Err("--talk cannot be combined with --single or --command".into());
-    }
-    if !args.images.is_empty() && args.query.is_empty() && !args.talk {
-        return Err("--image requires an initial query outside talk mode".into());
-    }
+    validate_args(&args)?;
 
     if args.update_pricing {
         let store = SessionStore::new()?;
@@ -177,6 +185,7 @@ async fn run_with_args_and_prefill(
                 &mut session,
                 &model_name,
                 &system_prompt(),
+                args.single,
             )
             .await?
             {
@@ -1303,6 +1312,23 @@ mod tests {
     fn parses_new_short_flag() {
         let args = Args::parse_from(["agent", "-n"]);
         assert!(args.new);
+    }
+
+    #[test]
+    fn talk_single_accepts_an_initial_query() {
+        let args = Args::parse_from(["agent", "--talk", "--single", "hello"]);
+
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn talk_single_requires_an_initial_query() {
+        let args = Args::parse_from(["agent", "--talk", "--single"]);
+
+        assert_eq!(
+            validate_args(&args).unwrap_err().to_string(),
+            "--talk --single requires an initial query"
+        );
     }
 
     #[test]

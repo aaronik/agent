@@ -59,9 +59,13 @@ pub async fn run_talk_session(
     session: &mut Session,
     model_name: &str,
     base_system_prompt: &str,
+    single_response: bool,
 ) -> Result<TalkSessionExit, Box<dyn Error>> {
-    let config =
+    let mut config =
         talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
+    if single_response {
+        config = config.with_initial_response();
+    }
     let _ctrl_c_exit_trap = CtrlCExitTrap::spawn();
     println!(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
@@ -98,6 +102,7 @@ pub async fn run_talk_session(
             store,
             session,
             cancellation_token: &cancellation_token,
+            single_response,
         })
         .await
         {
@@ -179,7 +184,9 @@ pub fn talk_config(
 }
 
 fn reconnect_config(config: &RealtimeConfig, session: &Session) -> RealtimeConfig {
-    config.clone().with_history(session.messages.clone())
+    let mut config = config.clone().with_history(session.messages.clone());
+    config.initial_response = false;
+    config
 }
 
 struct TalkLoopTick<'a> {
@@ -195,6 +202,7 @@ struct TalkLoopTick<'a> {
     store: &'a SessionStore,
     session: &'a mut Session,
     cancellation_token: &'a CancellationToken,
+    single_response: bool,
 }
 
 async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
@@ -230,6 +238,8 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                 }
                 Err(err) => return TalkLoopAction::Error(err.into()),
             };
+            let response_completed = context.single_response
+                && matches!(&event, RealtimeEvent::ResponseDone { tool_calls, .. } if tool_calls.is_empty());
             let mut event_context = RealtimeEventContext {
                 client: context.client,
                 tools: context.tools,
@@ -242,6 +252,12 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                 cancellation_token: context.cancellation_token,
             };
             match handle_realtime_event(event, &mut event_context).await {
+                Ok(()) if response_completed => {
+                    while !context.playback.is_empty() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    TalkLoopAction::Ended
+                }
                 Ok(()) => TalkLoopAction::Continue,
                 Err(err) if boxed_error_is_recoverable_realtime_connection(err.as_ref()) => {
                     TalkLoopAction::Reconnect(RealtimeError::Connection(err.to_string()))

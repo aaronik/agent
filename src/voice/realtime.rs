@@ -34,6 +34,9 @@ impl RealtimeClient {
         for item in conversation_item_create_events(&config.history) {
             client.send_json(item).await?;
         }
+        if config.initial_response {
+            client.create_response().await?;
+        }
         Ok(client)
     }
 
@@ -102,6 +105,7 @@ pub struct RealtimeConfig {
     pub transcription_model: String,
     pub tools: Vec<ToolDefinition>,
     pub history: Vec<AgentMessage>,
+    pub initial_response: bool,
 }
 
 impl RealtimeConfig {
@@ -129,6 +133,7 @@ impl RealtimeConfig {
                 .unwrap_or_else(|| DEFAULT_TRANSCRIPTION_MODEL.to_string()),
             tools: Vec::new(),
             history: Vec::new(),
+            initial_response: false,
         }
     }
 
@@ -139,6 +144,11 @@ impl RealtimeConfig {
 
     pub fn with_history(mut self, history: Vec<AgentMessage>) -> Self {
         self.history = history;
+        self
+    }
+
+    pub fn with_initial_response(mut self) -> Self {
+        self.initial_response = true;
         self
     }
 }
@@ -471,6 +481,7 @@ mod tests {
             transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
             tools: Vec::new(),
             history: Vec::new(),
+            initial_response: false,
         }
     }
 
@@ -583,6 +594,14 @@ mod tests {
                 usage: None,
             }
         );
+    }
+
+    #[test]
+    fn initial_response_is_opt_in() {
+        let config = test_config().with_initial_response();
+
+        assert!(config.initial_response);
+        assert!(!test_config().initial_response);
     }
 
     #[test]
