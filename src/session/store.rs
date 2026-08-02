@@ -6,6 +6,12 @@ use uuid::Uuid;
 
 use super::types::{SESSION_SCHEMA_VERSION, Session};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSearchMatch {
+    pub session_id: String,
+    pub excerpt: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionStore {
     root: PathBuf,
@@ -146,15 +152,107 @@ impl SessionStore {
         Ok(labels)
     }
 
+    pub fn find_sessions(
+        &self,
+        query: &str,
+        max_excerpt_len: usize,
+    ) -> io::Result<Vec<SessionSearchMatch>> {
+        self.find_sessions_excluding(query, max_excerpt_len, None, usize::MAX)
+    }
+
+    pub fn find_sessions_excluding(
+        &self,
+        query: &str,
+        max_excerpt_len: usize,
+        excluded_session_id: Option<&str>,
+        limit: usize,
+    ) -> io::Result<Vec<SessionSearchMatch>> {
+        let query_terms = search_terms(query);
+        if query_terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut matches = Vec::new();
+        for (recency, id) in self.list_session_ids()?.into_iter().enumerate() {
+            if excluded_session_id == Some(id.as_str()) {
+                continue;
+            }
+            let Ok(session) = self.load(Some(&id)) else {
+                continue;
+            };
+            let mut best: Option<(usize, String)> = None;
+            for message in &session.messages {
+                let content = match message {
+                    crate::agent::AgentMessage::User { content }
+                    | crate::agent::AgentMessage::UserWithImages { content, .. } => content,
+                    crate::agent::AgentMessage::Assistant(message) => &message.content,
+                    crate::agent::AgentMessage::System { .. }
+                    | crate::agent::AgentMessage::Tool(_) => continue,
+                };
+                let content_terms = searchable_terms(content);
+                let score = query_terms
+                    .iter()
+                    .filter(|term| content_terms.binary_search(term).is_ok())
+                    .count();
+                if score == query_terms.len()
+                    && best
+                        .as_ref()
+                        .is_none_or(|(best_score, _)| score > *best_score)
+                {
+                    best = Some((score, collapse_preview(content, max_excerpt_len)));
+                }
+            }
+            if let Some((score, excerpt)) = best {
+                matches.push((
+                    score,
+                    recency,
+                    SessionSearchMatch {
+                        session_id: id,
+                        excerpt,
+                    },
+                ));
+            }
+        }
+        matches.sort_by_key(|(score, recency, _)| (std::cmp::Reverse(*score), *recency));
+        matches.truncate(limit);
+        Ok(matches.into_iter().map(|(_, _, found)| found).collect())
+    }
+
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(format!("{session_id}.json"))
     }
 }
 
+fn search_terms(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "and", "for", "in", "of", "on", "the", "to", "we", "when", "with", "work",
+        "worked", "working", "py",
+    ];
+    searchable_terms(query)
+        .into_iter()
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .collect()
+}
+
+fn searchable_terms(content: &str) -> Vec<String> {
+    let mut terms: Vec<String> = content
+        .split_whitespace()
+        .flat_map(|term| term.split(['_', '.', '-']))
+        .map(|term| {
+            term.trim_matches(|character: char| !character.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|term| !term.is_empty())
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
 fn collapse_preview(content: &str, max_len: usize) -> String {
     let mut preview = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if preview.len() > max_len {
-        preview.truncate(max_len.saturating_sub(1));
+    if preview.chars().count() > max_len {
+        preview = preview.chars().take(max_len.saturating_sub(1)).collect();
         preview.push_str("...");
     }
     preview

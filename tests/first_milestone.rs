@@ -380,6 +380,41 @@ fn slash_help_does_not_require_provider_configuration() {
 }
 
 #[test]
+fn slash_find_locates_conversation_without_provider_configuration() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
+    store
+        .save(&agent_rs::session::Session::new(
+            "shasta-session".to_string(),
+            vec![agent_rs::agent::AgentMessage::User {
+                content: "worked on shasta_private_land.py parcel filtering".to_string(),
+            }],
+        ))
+        .expect("save session");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["--single", "/find when we worked on shasta_private_land.py"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("shasta-session"))
+        .stdout(predicates::str::contains("shasta_private_land.py"))
+        .stdout(predicates::str::contains("/resume shasta-session"));
+}
+
+#[test]
+fn slash_find_requires_a_query() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args(["--single", "/find"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Usage: /find <query>"));
+}
+
+#[test]
 fn slash_new_aliases_clear_without_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 

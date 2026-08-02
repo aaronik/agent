@@ -847,6 +847,24 @@ async fn handle_slash_command(
             println!("cleared");
             println!("sessionId: {}", session.session_id);
         }
+        "/find" => {
+            if rest.is_empty() {
+                println!("Usage: /find <query>");
+            } else {
+                let matches =
+                    store.find_sessions_excluding(rest, 160, Some(&session.session_id), 10)?;
+                if matches.is_empty() {
+                    println!("No conversations found for: {rest}");
+                } else {
+                    for found in matches {
+                        println!(
+                            "{}\n  {}\n  /resume {}",
+                            found.session_id, found.excerpt, found.session_id
+                        );
+                    }
+                }
+            }
+        }
         "/models" => {
             if rest.is_empty() {
                 for model in list_models().await {
@@ -884,7 +902,7 @@ async fn handle_slash_command(
 }
 
 fn slash_help() -> &'static str {
-    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
+    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
@@ -971,6 +989,7 @@ fn spawn_model_completion_refresh(dynamic_models: Arc<RwLock<Vec<String>>>) {
 fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {
     let mut candidates = vec![
         "/clear".to_string(),
+        "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),
         "/new".to_string(),

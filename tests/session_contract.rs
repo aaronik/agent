@@ -81,6 +81,171 @@ fn session_labels_are_ordered_by_recently_saved_first() {
 }
 
 #[test]
+fn session_search_finds_subject_across_conversation_history() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+
+    store
+        .save(&Session::new(
+            "unrelated".to_string(),
+            vec![AgentMessage::User {
+                content: "discuss database migrations".to_string(),
+            }],
+        ))
+        .expect("save unrelated");
+    store
+        .save(&Session::new(
+            "shasta-session".to_string(),
+            vec![
+                AgentMessage::User {
+                    content: "Please update the private land data importer".to_string(),
+                },
+                AgentMessage::Assistant(AssistantMessage {
+                    content: "Updated shasta_private_land.py and added coverage".to_string(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    metadata: Default::default(),
+                }),
+            ],
+        ))
+        .expect("save matching");
+
+    let matches = store
+        .find_sessions("when we worked on shasta_private_land.py", 80)
+        .expect("search sessions");
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].session_id, "shasta-session");
+    assert!(matches[0].excerpt.contains("shasta_private_land.py"));
+}
+
+#[test]
+fn session_search_matches_filename_components_in_conversation_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    store
+        .save(&Session::new(
+            "shasta-map".to_string(),
+            vec![AgentMessage::User {
+                content: "map private land parcels around Shasta".to_string(),
+            }],
+        ))
+        .expect("save relevant");
+    store
+        .save(&Session::new(
+            "shasta-only".to_string(),
+            vec![AgentMessage::User {
+                content: "visit Mount Shasta".to_string(),
+            }],
+        ))
+        .expect("save weak match");
+
+    let matches = store
+        .find_sessions("working on shasta_private_land.py", 80)
+        .expect("search sessions");
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].session_id, "shasta-map");
+}
+
+#[test]
+fn session_search_ignores_tool_output_and_weak_generic_matches() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    store
+        .save(&Session::new(
+            "tool-noise".to_string(),
+            vec![AgentMessage::Tool(ToolResult {
+                tool_call_id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                status: ToolStatus::Success,
+                content: "source mentions shasta_private_land.py".to_string(),
+                elapsed_ms: None,
+            })],
+        ))
+        .expect("save tool noise");
+    store
+        .save(&Session::new(
+            "generic".to_string(),
+            vec![AgentMessage::User {
+                content: "working on an unrelated project".to_string(),
+            }],
+        ))
+        .expect("save generic");
+    store
+        .save(&Session::new(
+            "relevant".to_string(),
+            vec![AgentMessage::User {
+                content: "fix shasta_private_land.py parcel boundaries".to_string(),
+            }],
+        ))
+        .expect("save relevant");
+
+    let matches = store
+        .find_sessions_excluding(
+            "working on shasta_private_land.py",
+            80,
+            Some("current-session"),
+            10,
+        )
+        .expect("search sessions");
+
+    assert_eq!(
+        matches
+            .iter()
+            .map(|found| found.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["relevant"]
+    );
+}
+
+#[test]
+fn session_search_excludes_current_session_and_limits_results() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    for id in ["current", "one", "two", "three"] {
+        store
+            .save(&Session::new(
+                id.to_string(),
+                vec![AgentMessage::User {
+                    content: "discuss needle".to_string(),
+                }],
+            ))
+            .expect("save session");
+    }
+
+    let matches = store
+        .find_sessions_excluding("needle", 80, Some("current"), 2)
+        .expect("search sessions");
+
+    assert_eq!(matches.len(), 2);
+    assert!(matches.iter().all(|found| found.session_id != "current"));
+}
+
+#[test]
+fn session_search_truncates_unicode_excerpts_safely() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    let content = format!("needle {}é tail", "a".repeat(71));
+    store
+        .save(&Session::new(
+            "unicode-session".to_string(),
+            vec![AgentMessage::User { content }],
+        ))
+        .expect("save session");
+
+    let matches = store.find_sessions("needle", 80).expect("search sessions");
+
+    assert_eq!(matches.len(), 1);
+    assert!(matches[0].excerpt.ends_with("..."));
+    assert!(
+        matches[0]
+            .excerpt
+            .is_char_boundary(matches[0].excerpt.len())
+    );
+}
+
+#[test]
 fn new_session_ids_are_guids() {
     let temp = tempfile::tempdir().expect("temp dir");
     let store = SessionStore::with_root(temp.path().join(".agent"));
