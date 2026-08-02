@@ -228,7 +228,7 @@ async fn run_with_args_and_prefill(
         let image_paths = pending_images.take().unwrap_or_default();
         let parsed_input = parse_user_input(&user_input, image_paths)?;
         if parsed_input.images.is_empty() {
-            match handle_slash_command(&user_input, &args, &store, &mut session).await? {
+            match handle_slash_command(&user_input, &args, &store, &mut session, &display).await? {
                 SlashCommandResult::NotCommand => {}
                 SlashCommandResult::Handled => {
                     loop_runner = None;
@@ -810,6 +810,7 @@ async fn handle_slash_command(
     args: &Args,
     store: &SessionStore,
     session: &mut Session,
+    display: &TerminalDisplay,
 ) -> Result<SlashCommandResult, Box<dyn Error>> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -861,6 +862,7 @@ async fn handle_slash_command(
                 other => Some(other.split('\t').next().unwrap_or(other)),
             };
             *session = store.load(resume_id)?;
+            replay_session(session, display);
             println!("sessionId: {}", session.session_id);
         }
         "/pricing" => match rest {

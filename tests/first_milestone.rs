@@ -150,6 +150,27 @@ fn resume_replay_shows_tool_commands() {
 }
 
 #[test]
+fn slash_resume_replays_conversation_output() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut initial = Command::cargo_bin("agent").expect("agent binary");
+    initial
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .assert()
+        .success();
+
+    let mut resume = Command::cargo_bin("agent").expect("agent binary");
+    resume
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "/resume latest"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("run echo hi"))
+        .stdout(predicates::str::contains("Tool completed: hi"));
+}
+
+#[test]
 fn new_session_loads_agents_md_memory_file() {
     let temp_home = tempfile::tempdir().expect("temp home");
     let project = tempfile::tempdir().expect("project");
