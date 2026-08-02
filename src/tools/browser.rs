@@ -21,8 +21,9 @@ pub struct BrowserControlArgs {
     /// Use normal Playwright APIs, e.g. `await page.goto("https://example.com"); return await page.title();`.
     #[serde(default)]
     pub javascript: String,
-    /// Optional URL to open before running the JavaScript when the copied-profile browser starts on about:blank.
-    /// Omit this on follow-up calls to keep the browser exactly where the previous call left it.
+    /// Optional URL to open before running JavaScript. Initial navigation waits only for
+    /// DOMContentLoaded so signed-in SPAs with long-lived requests do not time out. Omit it
+    /// on follow-up calls to keep the browser exactly where the previous call left it.
     #[serde(default)]
     pub url: Option<String>,
     /// Optional Chrome profile selector: profile directory name (for example "Profile 8"),
@@ -720,6 +721,21 @@ mod tests {
         assert!(script.contains("const closeBrowser = false;"));
         assert!(script.contains("if (closeBrowser)"));
         assert!(!script.contains("await browser.close();\n}})().catch"));
+    }
+
+    #[test]
+    fn generated_playwright_script_uses_domcontentloaded_for_initial_navigation() {
+        let script = playwright_script(
+            Path::new("/usr/local/bin/playwright"),
+            9222,
+            Some("https://app.slack.com"),
+            "return page.url();",
+            false,
+        );
+
+        assert!(script.contains("await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });"));
+        assert!(!script.contains("waitUntil: 'networkidle'"));
+        assert!(!script.contains("waitUntil: 'load'"));
     }
 
     #[test]

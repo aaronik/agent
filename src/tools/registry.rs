@@ -67,7 +67,7 @@ impl ToolRegistry {
             ),
             definition::<BrowserControlArgs>(
                 "browser_control",
-                "Control a Chrome browser signed in as the user by copying a Chrome profile into a temporary user data directory, launching headless Chrome with DevTools enabled, and running Playwright JavaScript against it. The profile defaults to Default and can be selected with the profile argument, AGENT_BROWSER_CHROME_PROFILE, or AGENT_BROWSER_CHROME_PROFILE_DIR. The browser session persists across calls by default so exploration state can be reused; set close=true when the task is complete, or reset=true to start fresh. Set visible=true only if the user directly asks to see the browser. Requires global playwright in PATH.",
+                "Control a Chrome browser signed in as the user by copying a Chrome profile into a temporary user data directory, launching headless Chrome with DevTools enabled, and running Playwright JavaScript against it. Its initial URL navigation waits only for DOMContentLoaded—not full load or network idle—so it is safe for SPAs with long-lived requests. The profile defaults to Default and can be selected with the profile argument, AGENT_BROWSER_CHROME_PROFILE, or AGENT_BROWSER_CHROME_PROFILE_DIR. The browser session persists across calls by default so exploration state can be reused; set close=true when the task is complete, or reset=true to start fresh. Set visible=true only if the user directly asks to see the browser. Requires global playwright in PATH.",
             ),
         ];
         if include_spawn {

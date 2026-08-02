@@ -44,6 +44,10 @@ cargo test -- --list | grep ': test$' | wc -l
 ```
 Target test execution time: < 2 seconds for full suite
 
+## Browser Automation
+
+`browser_control` is appropriate for signed-in Chrome tasks. For Slack and other complex SPAs, do **not** wait for full page `load` or `networkidle`: long-lived requests can prevent those states indefinitely and cause a tool timeout. Navigate with `waitUntil: 'domcontentloaded'` (or use `waitUntil: 'commit'` when only the navigation response is needed), then interact with specific locators/readiness signals. Keep the browser session open across related calls and close it when done.
+
 ## Note on Interaction with the User
 
 The user is using MacOS native speech recognition. It is not great quality. So the input often ends up sounding similar to what I mean, but being written like something else. I hope you can interpret what is being said beyond the noise.
