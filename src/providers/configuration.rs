@@ -142,13 +142,27 @@ fn normalized_cost(cost: f64) -> f64 {
 }
 
 pub fn total_session_cost_usd(messages: &[AgentMessage], raw_model: &str) -> f64 {
+    total_session_cost_usd_with(messages, raw_model, usage_cost_usd)
+}
+
+pub fn total_session_cost_usd_with<F>(
+    messages: &[AgentMessage],
+    fallback_model: &str,
+    mut cost_for_usage: F,
+) -> f64
+where
+    F: FnMut(&Usage, &str) -> f64,
+{
     messages
         .iter()
         .filter_map(|message| match message {
-            AgentMessage::Assistant(assistant) => assistant.usage.as_ref(),
+            AgentMessage::Assistant(assistant) => assistant
+                .usage
+                .as_ref()
+                .map(|usage| (usage, assistant.model.as_deref().unwrap_or(fallback_model))),
             _ => None,
         })
-        .map(|usage| usage_cost_usd(usage, raw_model))
+        .map(|(usage, model)| cost_for_usage(usage, model))
         .sum()
 }
 

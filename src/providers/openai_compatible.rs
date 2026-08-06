@@ -142,6 +142,7 @@ impl OpenAiCompatibleProvider {
                 content,
                 tool_calls: final_tool_calls,
                 usage,
+                model: None,
                 metadata: Map::new(),
             },
         });
@@ -221,6 +222,7 @@ impl OpenAiCompatibleProvider {
             content,
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
             metadata: Map::new(),
         });
         events.push(ProviderEvent::FinalMessage { message });
@@ -404,6 +406,7 @@ fn parse_chat_response(value: Value) -> Result<AssistantMessage, ProviderError> 
         content,
         tool_calls,
         usage: parse_usage(value.get("usage")),
+        model: None,
         metadata: Map::new(),
     })
 }
@@ -520,6 +523,7 @@ fn parse_responses_response(value: Value) -> Result<AssistantMessage, ProviderEr
         content: content_parts.join("\n"),
         tool_calls,
         usage: parse_usage(value.get("usage")),
+        model: None,
         metadata: Map::new(),
     })
 }

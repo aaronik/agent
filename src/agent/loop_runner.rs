@@ -94,7 +94,8 @@ where
                 _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
             };
             check_cancelled(cancellation_token)?;
-            let assistant = assistant_from_events(events)?;
+            let mut assistant = assistant_from_events(events)?;
+            assistant.model = Some(self.config.model.clone());
             usage = assistant.usage.clone().or(usage);
 
             let tool_calls = assistant.tool_calls.clone();

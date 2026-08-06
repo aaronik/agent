@@ -345,10 +345,11 @@ async fn handle_realtime_event(
         RealtimeEvent::AssistantTranscript(transcript) => {
             if !transcript.trim().is_empty() {
                 println!("Agent: {}", transcript.trim());
-                context
-                    .session
-                    .messages
-                    .push(assistant_message(transcript, None));
+                context.session.messages.push(assistant_message(
+                    transcript,
+                    None,
+                    context.model_name,
+                ));
                 context.store.save(context.session)?;
             }
         }
@@ -358,7 +359,7 @@ async fn handle_realtime_event(
         RealtimeEvent::Error(message) => return Err(RealtimeError::Connection(message).into()),
         RealtimeEvent::ResponseDone { tool_calls, usage } => {
             if tool_calls.is_empty() {
-                attach_usage_to_latest_voice_assistant(context.session, usage);
+                attach_usage_to_latest_voice_assistant(context.session, usage, context.model_name);
                 context.store.save(context.session)?;
             } else {
                 handle_tool_calls(tool_calls, usage, context).await?;
@@ -463,11 +464,16 @@ fn print_status(status: &str) {
     println!("\n[{status}]");
 }
 
-fn assistant_message(content: String, usage: Option<crate::agent::Usage>) -> AgentMessage {
+fn assistant_message(
+    content: String,
+    usage: Option<crate::agent::Usage>,
+    model_name: &str,
+) -> AgentMessage {
     AgentMessage::Assistant(AssistantMessage {
         content,
         tool_calls: Vec::new(),
         usage,
+        model: Some(model_name.to_string()),
         metadata: serde_json::Map::new(),
     })
 }
@@ -475,6 +481,7 @@ fn assistant_message(content: String, usage: Option<crate::agent::Usage>) -> Age
 fn attach_usage_to_latest_voice_assistant(
     session: &mut Session,
     usage: Option<crate::agent::Usage>,
+    model_name: &str,
 ) {
     let Some(usage) = usage else {
         return;
@@ -488,12 +495,13 @@ fn attach_usage_to_latest_voice_assistant(
         && assistant.usage.is_none()
     {
         assistant.usage = Some(usage);
+        assistant.model = Some(model_name.to_string());
         return;
     }
 
     session
         .messages
-        .push(assistant_message(String::new(), Some(usage)));
+        .push(assistant_message(String::new(), Some(usage), model_name));
 }
 
 fn print_cost_and_context(session: &Session, model_name: &str) {
@@ -525,6 +533,7 @@ async fn handle_tool_calls(
             content: String::new(),
             tool_calls: assistant_tool_calls,
             usage,
+            model: Some(context.model_name.to_string()),
             metadata: serde_json::Map::new(),
         }));
 
@@ -736,6 +745,7 @@ mod tests {
                 content: "hello".to_string(),
                 tool_calls: Vec::new(),
                 usage: None,
+                model: None,
                 metadata: serde_json::Map::new(),
             })],
         );
@@ -747,12 +757,14 @@ mod tests {
                 output_tokens: 3,
                 raw: Some(serde_json::json!({"total_cost": 0.0123})),
             }),
+            "gpt-realtime",
         );
 
         let AgentMessage::Assistant(assistant) = &session.messages[0] else {
             panic!("expected assistant message");
         };
         assert_eq!(assistant.usage.as_ref().expect("usage").input_tokens, 10);
+        assert_eq!(assistant.model.as_deref(), Some("gpt-realtime"));
     }
 
     #[test]
@@ -766,6 +778,7 @@ mod tests {
                 output_tokens: 3,
                 raw: Some(serde_json::json!({"total_cost": 0.0123})),
             }),
+            "gpt-realtime",
         );
 
         let AgentMessage::Assistant(assistant) = &session.messages[0] else {
@@ -773,6 +786,7 @@ mod tests {
         };
         assert_eq!(assistant.content, "");
         assert_eq!(assistant.usage.as_ref().expect("usage").output_tokens, 3);
+        assert_eq!(assistant.model.as_deref(), Some("gpt-realtime"));
     }
 
     #[test]

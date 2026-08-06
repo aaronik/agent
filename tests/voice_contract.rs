@@ -147,6 +147,7 @@ fn realtime_response_done_usage_contributes_to_cost_line() {
             content: "hello".to_string(),
             tool_calls: Vec::new(),
             usage,
+            model: None,
             metadata: Default::default(),
         },
     )];
@@ -240,6 +241,7 @@ fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
                 arguments: json!({ "cmd": "echo blue", "intent": "recall color", "timeout": 30 }),
             }],
             usage: None,
+            model: None,
             metadata: Default::default(),
         }),
         AgentMessage::Tool(ToolResult {

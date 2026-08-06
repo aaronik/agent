@@ -47,6 +47,7 @@ impl Provider for MockProvider {
                 content,
                 tool_calls: Vec::new(),
                 usage: None,
+                model: None,
                 metadata: Default::default(),
             });
         }
@@ -67,6 +68,7 @@ impl Provider for MockProvider {
                 content: format!("Tool completed: {output}"),
                 tool_calls: Vec::new(),
                 usage: None,
+                model: None,
                 metadata: Default::default(),
             });
         }
@@ -83,6 +85,7 @@ impl Provider for MockProvider {
                 }),
             }],
             usage: None,
+            model: None,
             metadata: Default::default(),
         })
     }

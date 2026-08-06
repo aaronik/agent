@@ -379,6 +379,7 @@ fn slash_compact_summarizes_old_turns_and_archives_full_session() {
             content: format!("assistant turn {turn}"),
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
             metadata: Default::default(),
         }));
     }

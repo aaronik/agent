@@ -425,6 +425,50 @@ fn sse_body(chunks: Vec<serde_json::Value>) -> String {
 }
 
 #[tokio::test]
+async fn agent_loop_records_model_on_assistant_responses() {
+    #[derive(Clone, Debug)]
+    struct FinalProvider;
+
+    #[async_trait]
+    impl Provider for FinalProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            Ok(AssistantMessage {
+                content: "done".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let loop_runner = AgentLoop::new(
+        FinalProvider,
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 1,
+            max_context_tokens: 16_384,
+            model: "openai:gpt-5.6-sol".to_string(),
+        },
+    );
+    let result = loop_runner
+        .run_turn(&[AgentMessage::User {
+            content: "finish".to_string(),
+        }])
+        .await
+        .expect("turn succeeds");
+
+    let AgentMessage::Assistant(assistant) = &result.new_messages[0] else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(assistant.model.as_deref(), Some("openai:gpt-5.6-sol"));
+}
+
+#[tokio::test]
 async fn agent_loop_errors_on_max_turn_exhaustion() {
     #[derive(Clone, Debug)]
     struct LoopingProvider;
@@ -444,6 +488,7 @@ async fn agent_loop_errors_on_max_turn_exhaustion() {
                     arguments: json!({"intent": "keep user updated", "message": "still working"}),
                 }],
                 usage: None,
+                model: None,
                 metadata: Default::default(),
             })
         }
@@ -531,6 +576,7 @@ async fn agent_loop_aborts_in_flight_shell_tool_when_token_is_cancelled() {
                     }]
                 },
                 usage: None,
+                model: None,
                 metadata: Default::default(),
             })
         }
@@ -581,6 +627,7 @@ async fn agent_loop_aborts_in_flight_provider_request_when_token_is_cancelled() 
                 content: "too late".to_string(),
                 tool_calls: Vec::new(),
                 usage: None,
+                model: None,
                 metadata: Default::default(),
             })
         }

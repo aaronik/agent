@@ -28,6 +28,7 @@ fn session_schema_v1_round_trip() {
                     output_tokens: 12,
                     raw: None,
                 }),
+                model: None,
                 metadata: Default::default(),
             }),
             AgentMessage::Tool(ToolResult {
@@ -104,6 +105,7 @@ fn session_search_finds_subject_across_conversation_history() {
                     content: "Updated shasta_private_land.py and added coverage".to_string(),
                     tool_calls: Vec::new(),
                     usage: None,
+                    model: None,
                     metadata: Default::default(),
                 }),
             ],
@@ -259,6 +261,39 @@ fn new_session_ids_are_guids() {
 }
 
 #[test]
+fn prompt_metadata_uses_each_response_model_for_mixed_model_costs() {
+    let assistant = |model: &str, input_tokens| {
+        AgentMessage::Assistant(AssistantMessage {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            usage: Some(Usage {
+                input_tokens,
+                output_tokens: 0,
+                raw: None,
+            }),
+            model: Some(model.to_string()),
+            metadata: Default::default(),
+        })
+    };
+    let messages = vec![
+        assistant("openai:gpt-5.6-sol", 50),
+        assistant("openai:gpt-5.6-terra", 25),
+    ];
+
+    let costs = agent_rs::providers::total_session_cost_usd_with(
+        &messages,
+        "openai:gpt-5.6-terra",
+        |usage, model| match model {
+            "openai:gpt-5.6-sol" => usage.input_tokens as f64,
+            "openai:gpt-5.6-terra" => usage.input_tokens as f64 / 2.0,
+            _ => 0.0,
+        },
+    );
+
+    assert_eq!(costs, 62.5);
+}
+
+#[test]
 fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
     let messages = vec![AgentMessage::Assistant(AssistantMessage {
         content: String::new(),
@@ -268,6 +303,7 @@ fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
             output_tokens: 12,
             raw: Some(json!({"total_cost": 1.2345})),
         }),
+        model: None,
         metadata: Default::default(),
     })];
 
