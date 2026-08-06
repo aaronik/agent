@@ -836,6 +836,9 @@ async fn handle_slash_command(
         "/help" => {
             println!("{}", slash_help());
         }
+        "/session" => {
+            println!("{}", format_session_info(session, model_name));
+        }
         "/compact" => {
             compact_session(store, session, model_name, rest).await?;
         }
@@ -1026,8 +1029,19 @@ fn compaction_message_text(message: &AgentMessage) -> String {
     }
 }
 
+fn format_session_info(session: &Session, model_name: &str) -> String {
+    format!(
+        "Session ID: {}\nCreated: {}\nUpdated: {}\nMessages: {}\n{}",
+        session.session_id,
+        session.created_at.to_rfc3339(),
+        session.updated_at.to_rfc3339(),
+        session.messages.len(),
+        format_cost_and_context_line(&session.messages, model_name),
+    )
+}
+
 fn slash_help() -> &'static str {
-    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
+    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n"
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
@@ -1121,6 +1135,7 @@ fn completion_candidates(store: &SessionStore, available_models: &[String]) -> V
         "/new".to_string(),
         "/pricing refresh".to_string(),
         "/resume".to_string(),
+        "/session".to_string(),
     ];
 
     candidates.extend(

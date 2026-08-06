@@ -436,6 +436,42 @@ fn slash_compact_summarizes_old_turns_and_archives_full_session() {
 }
 
 #[test]
+fn slash_session_shows_current_session_information_without_provider_configuration() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
+    let session = agent_rs::session::Session::new(
+        "session-under-test".to_string(),
+        vec![agent_rs::agent::AgentMessage::User {
+            content: "hello".to_string(),
+        }],
+    );
+    let created_at = session.created_at.to_rfc3339();
+    let updated_at = session.updated_at.to_rfc3339();
+    store.save(&session).expect("save session");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args([
+            "--model",
+            "mock",
+            "--resume",
+            "session-under-test",
+            "--single",
+            "/session",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Session ID: session-under-test"))
+        .stdout(predicates::str::contains(format!("Created: {created_at}")))
+        .stdout(predicates::str::contains(format!("Updated: {updated_at}")))
+        .stdout(predicates::str::contains("Messages: 1"))
+        .stdout(predicates::str::contains("Model: mock"))
+        .stdout(predicates::str::contains("Context"))
+        .stdout(predicates::str::contains("Cost:"));
+}
+
+#[test]
 fn slash_help_does_not_require_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
@@ -449,7 +485,8 @@ fn slash_help_does_not_require_provider_configuration() {
         .stdout(predicates::str::contains("/new"))
         .stdout(predicates::str::contains("/models"))
         .stdout(predicates::str::contains("/pricing refresh"))
-        .stdout(predicates::str::contains("/resume"));
+        .stdout(predicates::str::contains("/resume"))
+        .stdout(predicates::str::contains("/session"));
 }
 
 #[test]
@@ -515,6 +552,12 @@ fn slash_completion_includes_models_command_and_model_ids() {
 
     let new_command_values = completion_values_for_line(&store, "/new", 4);
     assert_eq!(new_command_values.first(), Some(&"/new".to_string()));
+
+    let session_command_values = completion_values_for_line(&store, "/ses", 4);
+    assert_eq!(
+        session_command_values.first(),
+        Some(&"/session".to_string())
+    );
 
     let model_values = completion_values_for_line(&store, "/models ", 8);
     assert!(!model_values.contains(&"/models mock".to_string()));
