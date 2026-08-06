@@ -363,6 +363,78 @@ fn interactive_without_tty_returns_actionable_error() {
 }
 
 #[test]
+fn slash_compact_summarizes_old_turns_and_archives_full_session() {
+    use agent_rs::agent::{AgentMessage, AssistantMessage};
+
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
+    let mut messages = vec![AgentMessage::System {
+        content: "system instructions".to_string(),
+    }];
+    for turn in 1..=6 {
+        messages.push(AgentMessage::User {
+            content: format!("user turn {turn}"),
+        });
+        messages.push(AgentMessage::Assistant(AssistantMessage {
+            content: format!("assistant turn {turn}"),
+            tool_calls: Vec::new(),
+            usage: None,
+            metadata: Default::default(),
+        }));
+    }
+    let original = agent_rs::session::Session::new("compact-session".to_string(), messages);
+    store.save(&original).expect("save session");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args([
+            "--model",
+            "mock",
+            "--single",
+            "--resume",
+            "compact-session",
+            "/compact focus on tests",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Compacted context:"));
+
+    let compacted = store
+        .load(Some("compact-session"))
+        .expect("load compacted session");
+    assert!(compacted.messages.iter().any(|message| {
+        matches!(message, AgentMessage::System { content } if content.starts_with("[COMPACTED CONTEXT]"))
+    }));
+    assert!(
+        !compacted
+            .messages
+            .iter()
+            .any(|message| message.content() == "user turn 1")
+    );
+    assert!(
+        compacted
+            .messages
+            .iter()
+            .any(|message| message.content() == "user turn 6")
+    );
+
+    let archive_dir = temp_home
+        .path()
+        .join(".agent")
+        .join("compactions")
+        .join("compact-session");
+    let archives = std::fs::read_dir(archive_dir)
+        .expect("compaction archive")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("archive entries");
+    assert_eq!(archives.len(), 1);
+    let archived: agent_rs::session::Session =
+        serde_json::from_slice(&std::fs::read(archives[0].path()).expect("archive payload"))
+            .expect("archived session");
+    assert_eq!(archived.messages, original.messages);
+}
+
+#[test]
 fn slash_help_does_not_require_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 

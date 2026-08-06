@@ -77,6 +77,17 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn archive_before_compaction(&self, session: &Session) -> io::Result<PathBuf> {
+        let archive_dir = self.root.join("compactions").join(&session.session_id);
+        fs::create_dir_all(&archive_dir)?;
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%6fZ");
+        let path = archive_dir.join(format!("{timestamp}.json"));
+        let payload = serde_json::to_string_pretty(session)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        fs::write(&path, format!("{payload}\n"))?;
+        Ok(path)
+    }
+
     pub fn load(&self, session_id: Option<&str>) -> io::Result<Session> {
         self.ensure_dirs()?;
         let id = match session_id {

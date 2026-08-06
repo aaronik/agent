@@ -228,7 +228,16 @@ async fn run_with_args_and_prefill(
         let image_paths = pending_images.take().unwrap_or_default();
         let parsed_input = parse_user_input(&user_input, image_paths)?;
         if parsed_input.images.is_empty() {
-            match handle_slash_command(&user_input, &args, &store, &mut session, &display).await? {
+            match handle_slash_command(
+                &user_input,
+                &args,
+                &store,
+                &mut session,
+                &display,
+                &model_name,
+            )
+            .await?
+            {
                 SlashCommandResult::NotCommand => {}
                 SlashCommandResult::Handled => {
                     loop_runner = None;
@@ -811,6 +820,7 @@ async fn handle_slash_command(
     store: &SessionStore,
     session: &mut Session,
     display: &TerminalDisplay,
+    model_name: &str,
 ) -> Result<SlashCommandResult, Box<dyn Error>> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -825,6 +835,9 @@ async fn handle_slash_command(
     match command {
         "/help" => {
             println!("{}", slash_help());
+        }
+        "/compact" => {
+            compact_session(store, session, model_name, rest).await?;
         }
         "/clear" | "/new" => {
             let new_session = load_or_create_session(
@@ -901,8 +914,120 @@ async fn handle_slash_command(
     Ok(SlashCommandResult::Handled)
 }
 
+async fn compact_session(
+    store: &SessionStore,
+    session: &mut Session,
+    model_name: &str,
+    focus: &str,
+) -> Result<(), Box<dyn Error>> {
+    const RECENT_USER_TURNS: usize = 2;
+
+    let system_messages = session
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(message, AgentMessage::System { content } if !content.starts_with("[COMPACTED CONTEXT]"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let user_starts = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            matches!(
+                message,
+                AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if user_starts.len() <= RECENT_USER_TURNS {
+        println!("Nothing to compact; fewer than three user turns are present.");
+        return Ok(());
+    }
+
+    let recent_start = user_starts[user_starts.len() - RECENT_USER_TURNS];
+    let old_messages = &session.messages[..recent_start];
+    let recent_messages = session.messages[recent_start..].to_vec();
+    let transcript = old_messages
+        .iter()
+        .filter(|message| !matches!(message, AgentMessage::System { content } if !content.starts_with("[COMPACTED CONTEXT]")))
+        .map(compaction_message_text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if transcript.trim().is_empty() {
+        println!("Nothing to compact.");
+        return Ok(());
+    }
+
+    let focus_instruction = if focus.is_empty() {
+        String::new()
+    } else {
+        format!("\nUser-requested focus: {focus}")
+    };
+    let summary_request = vec![
+        AgentMessage::System {
+            content: "Summarize conversation history into durable working memory for another AI agent. Preserve goals, requirements, decisions, verified facts, files changed, command/test results, unresolved issues, and next steps. Distinguish facts from assumptions. Be concise and do not include hidden reasoning. Return only the structured summary.".to_string(),
+        },
+        AgentMessage::User {
+            content: format!(
+                "Create a structured compacted context from this older transcript:{focus_instruction}\n\n{transcript}"
+            ),
+        },
+    ];
+    let summary = build_provider(model_name)?
+        .complete(&summary_request, &[])
+        .await?
+        .content;
+    if summary.trim().is_empty() {
+        return Err("provider returned an empty compacted context".into());
+    }
+
+    let old_tokens = crate::agent::count_tokens(&session.messages, model_name);
+    store.archive_before_compaction(session)?;
+    let mut compacted = system_messages;
+    compacted.push(AgentMessage::System {
+        content: format!("[COMPACTED CONTEXT]\n{}", summary.trim()),
+    });
+    compacted.extend(recent_messages);
+    let new_tokens = crate::agent::count_tokens(&compacted, model_name);
+    let removed_messages = session.messages.len().saturating_sub(compacted.len());
+    session.replace_messages(compacted);
+    store.save(session)?;
+    println!(
+        "Compacted context: removed {removed_messages} messages; reclaimed approximately {} tokens ({old_tokens} -> {new_tokens}).",
+        old_tokens.saturating_sub(new_tokens)
+    );
+    Ok(())
+}
+
+fn compaction_message_text(message: &AgentMessage) -> String {
+    match message {
+        AgentMessage::System { content } => format!("SYSTEM MEMORY:\n{content}"),
+        AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
+            format!("USER:\n{content}")
+        }
+        AgentMessage::Assistant(assistant) => {
+            let calls = assistant
+                .tool_calls
+                .iter()
+                .map(|call| format!("tool call {}: {}", call.name, call.arguments))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("ASSISTANT:\n{}\n{calls}", assistant.content)
+        }
+        AgentMessage::Tool(result) => {
+            format!(
+                "TOOL {} ({:?}):\n{}",
+                result.name, result.status, result.content
+            )
+        }
+    }
+}
+
 fn slash_help() -> &'static str {
-    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
+    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n"
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
@@ -989,6 +1114,7 @@ fn spawn_model_completion_refresh(dynamic_models: Arc<RwLock<Vec<String>>>) {
 fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {
     let mut candidates = vec![
         "/clear".to_string(),
+        "/compact".to_string(),
         "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),
