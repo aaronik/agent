@@ -18,7 +18,7 @@ pub fn trim_messages(
     max_context_tokens: usize,
 ) -> Vec<AgentMessage> {
     if count_tokens(messages, model) <= max_context_tokens {
-        return messages.to_vec();
+        return valid_tool_history(messages.to_vec());
     }
 
     let system_messages = messages
@@ -44,7 +44,39 @@ pub fn trim_messages(
 
     let mut selected = system_messages;
     selected.extend(recent_messages.into_iter().rev());
-    selected
+    valid_tool_history(selected)
+}
+
+fn valid_tool_history(mut messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    let output_call_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Tool(result) => Some(result.tool_call_id.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    for message in &mut messages {
+        if let AgentMessage::Assistant(assistant) = message {
+            assistant
+                .tool_calls
+                .retain(|call| output_call_ids.contains(&call.id));
+        }
+    }
+
+    let retained_call_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Assistant(assistant) => Some(&assistant.tool_calls),
+            _ => None,
+        })
+        .flatten()
+        .map(|call| call.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    messages.retain(|message| match message {
+        AgentMessage::Tool(result) => retained_call_ids.contains(result.tool_call_id.as_str()),
+        _ => true,
+    });
+    messages
 }
 
 fn message_to_text(message: &AgentMessage) -> String {
@@ -96,6 +128,70 @@ mod tests {
                 |message| matches!(message, AgentMessage::User { content } if content == "new")
             )
         );
+    }
+
+    #[test]
+    fn trim_drops_orphaned_tool_outputs() {
+        let messages = vec![
+            AgentMessage::System {
+                content: "system".to_string(),
+            },
+            AgentMessage::Assistant(crate::agent::AssistantMessage {
+                content: String::new(),
+                tool_calls: vec![crate::agent::ToolCall {
+                    id: "call_old".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "large ".repeat(200)}),
+                }],
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            }),
+            AgentMessage::Tool(crate::agent::ToolResult {
+                tool_call_id: "call_old".to_string(),
+                name: "read_file".to_string(),
+                status: crate::agent::ToolStatus::Success,
+                content: "ok".to_string(),
+                elapsed_ms: None,
+            }),
+            AgentMessage::User {
+                content: "newest".to_string(),
+            },
+        ];
+
+        let trimmed = trim_messages(&messages, "unknown-local-model", 30);
+
+        assert!(!trimmed.iter().any(|message| matches!(
+            message,
+            AgentMessage::Tool(result) if result.tool_call_id == "call_old"
+        )));
+    }
+
+    #[test]
+    fn trim_drops_function_calls_without_outputs() {
+        let messages = vec![
+            AgentMessage::Assistant(crate::agent::AssistantMessage {
+                content: "working".to_string(),
+                tool_calls: vec![crate::agent::ToolCall {
+                    id: "call_incomplete".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                }],
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            }),
+            AgentMessage::User {
+                content: "continue".to_string(),
+            },
+        ];
+
+        let trimmed = trim_messages(&messages, "unknown-local-model", 16_384);
+        let AgentMessage::Assistant(assistant) = &trimmed[0] else {
+            panic!("expected assistant message");
+        };
+        assert!(assistant.tool_calls.is_empty());
+        assert_eq!(assistant.content, "working");
     }
 
     #[test]

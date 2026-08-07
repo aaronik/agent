@@ -469,6 +469,70 @@ async fn agent_loop_records_model_on_assistant_responses() {
 }
 
 #[tokio::test]
+async fn agent_loop_bounces_provider_request_error_back_to_agent() {
+    #[derive(Clone, Debug)]
+    struct RecoveringProvider {
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for RecoveringProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(ProviderError::Request(
+                    "400 malformed tool history".to_string(),
+                ));
+            }
+            assert!(messages.iter().any(|message| {
+                matches!(message, AgentMessage::System { content } if content.contains("400 malformed tool history"))
+            }));
+            Ok(AssistantMessage {
+                content: "recovered".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let loop_runner = AgentLoop::new(
+        RecoveringProvider {
+            attempts: Default::default(),
+        },
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 2,
+            max_context_tokens: 16_384,
+            model: "mock".to_string(),
+        },
+    );
+    let mut observed = Vec::new();
+    let result = loop_runner
+        .run_turn_cancellable_with_observer(
+            &[AgentMessage::User {
+                content: "continue".to_string(),
+            }],
+            &CancellationToken::new(),
+            |message| observed.push(message.clone()),
+            |_| {},
+        )
+        .await
+        .expect("turn recovers");
+
+    assert_eq!(result.final_text, "recovered");
+    assert!(matches!(observed[0], AgentMessage::System { .. }));
+    assert_eq!(result.new_messages, observed);
+}
+
+#[tokio::test]
 async fn agent_loop_errors_on_max_turn_exhaustion() {
     #[derive(Clone, Debug)]
     struct LoopingProvider;

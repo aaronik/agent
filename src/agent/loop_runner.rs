@@ -90,8 +90,25 @@ where
                     .events(
                         &provider_messages,
                         self.tools.definitions(),
-                    ) => events?,
+                    ) => events,
                 _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+            };
+            let events = match events {
+                Ok(events) => events,
+                Err(ProviderError::Request(error)) => {
+                    let recovery_message = AgentMessage::System {
+                        content: format!(
+                            "[HARNESS ERROR] The provider rejected the previous request: {error}. \
+                             Recover from this error and continue the task. Do not repeat an invalid \
+                             tool call or tool output."
+                        ),
+                    };
+                    on_message(&recovery_message);
+                    messages.push(recovery_message.clone());
+                    new_messages.push(recovery_message);
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             check_cancelled(cancellation_token)?;
             let mut assistant = assistant_from_events(events)?;

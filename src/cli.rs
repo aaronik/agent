@@ -11,6 +11,7 @@ use reedline::{
     ReedlineMenu, ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
     default_vi_normal_keybindings,
 };
+use std::cell::RefCell;
 use std::error::Error;
 use std::io::{IsTerminal, Read};
 use std::sync::{
@@ -281,6 +282,8 @@ async fn run_with_args_and_prefill(
         } else {
             EscAbortWatcher::spawn(cancellation_token.clone())
         };
+        let observed_messages = RefCell::new(Vec::new());
+        let persistence_error = RefCell::new(None);
         let result = tokio::select! {
             result = loop_runner
                 .as_ref()
@@ -293,6 +296,16 @@ async fn run_with_args_and_prefill(
                             display.render_tool_result(result);
                         }
                         display.render_new_message(message);
+                        observed_messages.borrow_mut().push(message.clone());
+                        let can_save = persistence_error.borrow().is_none();
+                        if can_save {
+                            let mut checkpoint = session.clone();
+                            checkpoint.messages.extend(observed_messages.borrow().iter().cloned());
+                            checkpoint.replace_messages(checkpoint.messages.clone());
+                            if let Err(error) = store.save(&checkpoint) {
+                                *persistence_error.borrow_mut() = Some(error);
+                            }
+                        }
                     },
                     |call| display.render_tool_start(call),
                 ) => result,
@@ -305,11 +318,19 @@ async fn run_with_args_and_prefill(
         };
         esc_abort.stop().await;
 
+        if let Some(error) = persistence_error.into_inner() {
+            return Err(error.into());
+        }
+        let observed_messages = observed_messages.into_inner();
+        session.messages.extend(observed_messages.iter().cloned());
+        if !observed_messages.is_empty() {
+            session.replace_messages(session.messages.clone());
+            store.save(&session)?;
+        }
+
         match result {
             Ok(result) => {
-                session.messages.extend(result.new_messages);
-                session.replace_messages(session.messages.clone());
-                store.save(&session)?;
+                debug_assert_eq!(result.new_messages, observed_messages);
                 play_turn_completed_sound();
             }
             Err(crate::providers::ProviderError::Cancelled)
