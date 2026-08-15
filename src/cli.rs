@@ -227,7 +227,7 @@ async fn run_with_args_and_prefill(
         };
 
         let image_paths = pending_images.take().unwrap_or_default();
-        let parsed_input = parse_user_input(&user_input, image_paths)?;
+        let mut parsed_input = parse_user_input(&user_input, image_paths)?;
         if parsed_input.images.is_empty() {
             match handle_slash_command(
                 &user_input,
@@ -240,6 +240,9 @@ async fn run_with_args_and_prefill(
             .await?
             {
                 SlashCommandResult::NotCommand => {}
+                SlashCommandResult::InvokeSkill(content) => {
+                    parsed_input.content = content;
+                }
                 SlashCommandResult::Handled => {
                     loop_runner = None;
                     if args.single {
@@ -831,6 +834,7 @@ fn seed_line_editor_prefill(line_editor: &mut Reedline, prefill: Option<&str>) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SlashCommandResult {
     NotCommand,
+    InvokeSkill(String),
     Handled,
     SwitchModel(String),
 }
@@ -932,6 +936,13 @@ async fn handle_slash_command(
             }
         },
         _ => {
+            let skill_name = command.trim_start_matches('/');
+            let project_dir = std::env::current_dir()?;
+            if let Some(skill) = crate::skills::find(store.root(), &project_dir, skill_name)? {
+                return Ok(SlashCommandResult::InvokeSkill(
+                    crate::skills::invocation_prompt(&skill, rest),
+                ));
+            }
             println!("Unknown command: {command}. Try /help");
         }
     }
@@ -1062,7 +1073,7 @@ fn format_session_info(session: &Session, model_name: &str) -> String {
 }
 
 fn slash_help() -> &'static str {
-    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n"
+    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n"
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
@@ -1128,7 +1139,7 @@ async fn list_models() -> Vec<String> {
 }
 
 fn system_prompt() -> String {
-    "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented.".to_string()
+    "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented. You may create reusable skills as SKILL.md files under ~/.agent/skills/<name>/ for the user or .agent/skills/<name>/ for the current project. A skill may start with YAML-like frontmatter containing name and description, followed by its instructions; users invoke it as /<name> [arguments].".to_string()
 }
 
 fn command_mode_system_prompt() -> String {
@@ -1147,6 +1158,18 @@ fn spawn_model_completion_refresh(dynamic_models: Arc<RwLock<Vec<String>>>) {
 }
 
 fn completion_candidates(store: &SessionStore, available_models: &[String]) -> Vec<String> {
+    completion_candidates_in_dir(
+        store,
+        available_models,
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    )
+}
+
+fn completion_candidates_in_dir(
+    store: &SessionStore,
+    available_models: &[String],
+    project_dir: &std::path::Path,
+) -> Vec<String> {
     let mut candidates = vec![
         "/clear".to_string(),
         "/compact".to_string(),
@@ -1169,6 +1192,9 @@ fn completion_candidates(store: &SessionStore, available_models: &[String]) -> V
         candidates.extend(labels.into_iter().map(|label| format!("/resume {label}")));
     }
     candidates.push("/resume latest".to_string());
+    if let Ok(skills) = crate::skills::discover(store.root(), project_dir) {
+        candidates.extend(skills.into_iter().map(|skill| format!("/{}", skill.name)));
+    }
     candidates
 }
 
@@ -1201,6 +1227,19 @@ fn model_completion_values(store: &SessionStore, available_models: &[String]) ->
 
 pub fn completion_values_for_line(store: &SessionStore, line: &str, pos: usize) -> Vec<String> {
     completion_values_for_line_with_models(store, line, pos, &[])
+}
+
+pub fn completion_values_for_line_in_dir(
+    store: &SessionStore,
+    project_dir: &std::path::Path,
+    line: &str,
+    pos: usize,
+) -> Vec<String> {
+    AgentCompleter::new(completion_candidates_in_dir(store, &[], project_dir))
+        .complete(line, pos)
+        .into_iter()
+        .map(|suggestion| suggestion.value)
+        .collect()
 }
 
 pub fn completion_values_for_line_with_models(

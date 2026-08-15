@@ -5,5 +5,6 @@ pub mod memory;
 pub mod pricing;
 pub mod providers;
 pub mod session;
+pub mod skills;
 pub mod tools;
 pub mod voice;

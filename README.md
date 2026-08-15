@@ -46,3 +46,18 @@ cargo run -- --update-pricing
 Agent state is stored under `$HOME/.agent`.
 Pricing data is cached under `$HOME/.agent/pricing`.
 User-level instructions are read from `$HOME/.agent/AGENTS.md`.
+
+## Skills
+
+Create user skills at `~/.agent/skills/<name>/SKILL.md` or project skills at
+`.agent/skills/<name>/SKILL.md`. Project skills override user skills with the same name.
+The agent can author these files using its normal file tools. Invoke a skill with
+`/<name> [arguments]`; discovered skills also appear in slash completion.
+
+```md
+---
+name: review
+description: Review code for correctness
+---
+Review the requested code, run relevant tests, and report concrete issues.
+```

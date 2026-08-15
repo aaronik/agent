@@ -539,6 +539,98 @@ fn slash_new_aliases_clear_without_provider_configuration() {
 }
 
 #[test]
+fn user_skills_are_invocable_and_receive_arguments() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let skill_dir = temp_home.path().join(".agent/skills/review");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code carefully\n---\nCheck correctness and tests.\n",
+    )
+    .expect("write skill");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "/review src/main.rs"])
+        .assert()
+        .success();
+
+    let sessions = temp_home.path().join(".agent/sessions");
+    let path = std::fs::read_dir(sessions)
+        .expect("sessions")
+        .next()
+        .expect("session")
+        .expect("entry")
+        .path();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("payload")).expect("json");
+    let user = payload["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "user")
+        .expect("user message")["content"]
+        .as_str()
+        .expect("content");
+    assert!(user.contains("Check correctness and tests."));
+    assert!(user.contains("src/main.rs"));
+}
+
+#[test]
+fn project_skills_override_user_skills_and_appear_in_completion() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("project");
+    for (root, body) in [
+        (temp_home.path().join(".agent/skills/deploy"), "user deploy"),
+        (
+            project.path().join(".agent/skills/deploy"),
+            "project deploy",
+        ),
+    ] {
+        std::fs::create_dir_all(&root).expect("skill dir");
+        std::fs::write(
+            root.join("SKILL.md"),
+            format!("---\nname: deploy\ndescription: Deploy safely\n---\n{body}\n"),
+        )
+        .expect("write skill");
+    }
+    let store = SessionStore::with_root(temp_home.path().join(".agent"));
+    let values =
+        agent_rs::cli::completion_values_for_line_in_dir(&store, project.path(), "/dep", 4);
+    assert_eq!(values.first(), Some(&"/deploy".to_string()));
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.current_dir(project.path())
+        .env("HOME", temp_home.path())
+        .args(["--model", "mock", "--single", "/deploy production"])
+        .assert()
+        .success();
+    let latest =
+        std::fs::read_to_string(temp_home.path().join(".agent/latest_session")).expect("latest");
+    let payload = std::fs::read_to_string(
+        temp_home
+            .path()
+            .join(".agent/sessions")
+            .join(format!("{}.json", latest.trim())),
+    )
+    .expect("payload");
+    assert!(payload.contains("project deploy"));
+    assert!(!payload.contains("user deploy"));
+}
+
+#[test]
+fn slash_help_explains_how_users_and_agents_create_skills() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .args(["--single", "/help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("~/.agent/skills/<name>/SKILL.md"))
+        .stdout(predicates::str::contains("/<skill-name> [arguments]"));
+}
+
+#[test]
 fn slash_completion_includes_models_command_and_model_ids() {
     let temp_home = tempfile::tempdir().expect("temp home");
     let store = SessionStore::with_root(temp_home.path().join(".agent"));
