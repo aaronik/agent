@@ -11,6 +11,7 @@ use crate::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
 };
 use crate::tools::image::{GenImageArgs, gen_image};
+use crate::tools::output::truncate_tool_output;
 use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
 use crate::tools::spawn::{SpawnArgs, spawn};
 
@@ -158,10 +159,11 @@ impl ToolRegistry {
             _ => Err(format!("unknown tool: {name}")),
         };
 
-        match content {
-            Ok(content) => tool_result(tool_call_id, name, ToolStatus::Success, content, started),
-            Err(content) => tool_result(tool_call_id, name, ToolStatus::Error, content, started),
-        }
+        let (status, content) = match content {
+            Ok(content) => (ToolStatus::Success, content),
+            Err(content) => (ToolStatus::Error, content),
+        };
+        tool_result(tool_call_id, name, status, content, started)
     }
 }
 
@@ -172,6 +174,7 @@ fn tool_result(
     content: String,
     started: Instant,
 ) -> ToolResult {
+    let content = truncate_tool_output(content, &status);
     ToolResult {
         tool_call_id,
         name: name.to_string(),

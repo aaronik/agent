@@ -130,6 +130,33 @@ async fn registry_exposes_and_executes_active_tool_surface() {
 }
 
 #[tokio::test]
+async fn registry_truncates_all_large_tool_results_with_guidance() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let registry = ToolRegistry::without_spawn();
+    let result = registry
+        .execute(
+            "call_shell".to_string(),
+            "run_shell_command",
+            json!({
+                "intent": "produce test output",
+                "cmd": "head -c 40000 /dev/zero | tr '\\0' x",
+                "timeout": 30
+            }),
+        )
+        .await;
+
+    assert_eq!(result.status, agent_rs::agent::ToolStatus::Success);
+    assert!(result.content.starts_with(&"x".repeat(100)));
+    assert!(
+        result
+            .content
+            .contains("[Output trimmed by the harness to avoid overwhelming the context.]")
+    );
+    assert!(result.content.contains("The tool completed successfully."));
+    assert!(result.content.contains("make a more selective tool call"));
+}
+
+#[tokio::test]
 async fn registry_records_elapsed_time_for_tool_results() {
     let registry = ToolRegistry::new();
     let result = registry
@@ -162,6 +189,28 @@ async fn run_shell_command_reports_stdout_and_exit_code() {
     .expect("error command output");
     assert!(err.contains("nope"));
     assert!(err.contains("(exit code: 7)"));
+}
+
+#[tokio::test]
+async fn run_shell_command_truncates_large_completed_output_with_guidance() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let output = ToolRegistry::without_spawn()
+        .execute(
+            "call_shell".to_string(),
+            "run_shell_command",
+            json!({
+                "intent": "produce test output",
+                "cmd": "head -c 40000 /dev/zero | tr '\\0' x",
+                "timeout": 30
+            }),
+        )
+        .await
+        .content;
+
+    assert!(output.starts_with(&"x".repeat(100)));
+    assert!(output.contains("[Output trimmed by the harness to avoid overwhelming the context.]"));
+    assert!(output.contains("The tool completed successfully."));
+    assert!(output.contains("make a more selective tool call"));
 }
 
 #[tokio::test]
@@ -282,6 +331,30 @@ async fn file_tools_read_write_and_search_replace_with_diffs() {
     assert!(replaced.contains("Successfully replaced 1 occurrence(s)"));
     assert!(replaced.contains("-two"));
     assert!(replaced.contains("+three"));
+}
+
+#[tokio::test]
+async fn read_file_truncates_large_content_with_guidance() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("large.txt");
+    std::fs::write(&path, "a".repeat(40_000)).expect("large file");
+
+    let output = ToolRegistry::without_spawn()
+        .execute(
+            "call_read".to_string(),
+            "read_file",
+            json!({
+                "intent": "read large test file",
+                "path": path.to_string_lossy()
+            }),
+        )
+        .await
+        .content;
+
+    assert!(output.starts_with("[FILE]:"));
+    assert!(output.contains("[Output trimmed by the harness to avoid overwhelming the context.]"));
+    assert!(output.contains("The tool completed successfully."));
+    assert!(output.contains("make a more selective tool call"));
 }
 
 #[tokio::test]

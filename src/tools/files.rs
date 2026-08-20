@@ -26,7 +26,7 @@ pub struct SearchReplaceArgs {
 pub async fn read_file(args: ReadFileArgs) -> Result<String, String> {
     let path = sanitize_path(&args.path);
     match fs::read_to_string(&path) {
-        Ok(content) => Ok(format!("[FILE]: {}\n{}", path.display(), content)),
+        Ok(content) => Ok(format!("[FILE]: {}\n{content}", path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             Ok(format!("file not found: {}", path.display()))
         }
