@@ -1,6 +1,7 @@
 use agent_rs::cli::{completion_values_for_line, completion_values_for_line_with_models};
 use agent_rs::session::SessionStore;
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -616,6 +617,42 @@ fn project_skills_override_user_skills_and_appear_in_completion() {
     .expect("payload");
     assert!(payload.contains("project deploy"));
     assert!(!payload.contains("user deploy"));
+}
+
+#[test]
+fn slash_help_lists_visible_skills_with_project_precedence() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("project");
+    for (root, contents) in [
+        (
+            temp_home.path().join(".agent/skills/review"),
+            "---\nname: review\ndescription: User review\n---\nuser instructions\n",
+        ),
+        (
+            project.path().join(".agent/skills/review"),
+            "---\nname: review\ndescription: Project review\n---\nproject instructions\n",
+        ),
+        (
+            temp_home.path().join(".agent/skills/deploy"),
+            "---\nname: deploy\ndescription: Deploy safely\n---\ndeploy instructions\n",
+        ),
+    ] {
+        std::fs::create_dir_all(&root).expect("skill dir");
+        std::fs::write(root.join("SKILL.md"), contents).expect("write skill");
+    }
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.current_dir(project.path())
+        .env("HOME", temp_home.path())
+        .args(["--single", "/help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("  /deploy\n      Deploy safely"))
+        .stdout(predicates::str::contains(
+            "\n\n  /deploy\n      Deploy safely",
+        ))
+        .stdout(predicates::str::contains("  /review\n      Project review"))
+        .stdout(predicates::str::contains("User review").not());
 }
 
 #[test]

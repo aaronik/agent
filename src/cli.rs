@@ -859,7 +859,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            println!("{}", slash_help());
+            println!("{}", slash_help(store)?);
         }
         "/session" => {
             println!("{}", format_session_info(session, model_name));
@@ -1072,8 +1072,17 @@ fn format_session_info(session: &Session, model_name: &str) -> String {
     )
 }
 
-fn slash_help() -> &'static str {
-    "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n"
+fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
+    let mut help = "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+        .to_string();
+    let project_dir = std::env::current_dir()?;
+    for skill in crate::skills::discover(store.root(), &project_dir)? {
+        help.push_str(&format!("  /{}\n", skill.name));
+        if !skill.description.is_empty() {
+            help.push_str(&format!("      {}\n", skill.description));
+        }
+    }
+    Ok(help)
 }
 
 fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
