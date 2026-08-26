@@ -22,22 +22,20 @@ pub struct BrowserControlArgs {
     #[serde(default)]
     pub javascript: String,
     /// Optional URL to open before running JavaScript. Initial navigation waits only for
-    /// DOMContentLoaded so signed-in SPAs with long-lived requests do not time out. Omit it
+    /// DOMContentLoaded so complex SPAs with long-lived requests do not time out. Omit it
     /// on follow-up calls to keep the browser exactly where the previous call left it.
     #[serde(default)]
     pub url: Option<String>,
-    /// Optional Chrome profile selector: profile directory name (for example "Profile 8"),
-    /// signed-in email from Chrome Local State, or an explicit profile directory path.
-    /// Defaults to "Default". AGENT_BROWSER_CHROME_PROFILE can also set this.
+    /// Use the user’s signed-in Chrome profile. Set this only when the user explicitly requests it.
     #[serde(default)]
-    pub profile: Option<String>,
+    pub signed_in: bool,
     /// Maximum time in seconds for the Playwright script.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     /// Close the persistent browser session after this script runs. Set this to true once the task is complete.
     #[serde(default)]
     pub close: bool,
-    /// Discard any existing persistent browser session and start from a fresh copy of the Chrome Default profile.
+    /// Discard any existing persistent browser session and start a fresh session.
     #[serde(default)]
     pub reset: bool,
     /// Show the browser window. Leave false unless the user directly asks to see it.
@@ -65,7 +63,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     let needs_start = match session_guard.as_mut() {
         Some(session) => {
             session.visible != args.visible
-                || session.profile_selector != normalized_profile_selector(args.profile.as_deref())
+                || session.signed_in != args.signed_in
                 || session
                     .child
                     .try_wait()
@@ -80,7 +78,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
             close_session(session).await;
         }
         *session_guard =
-            Some(start_session(args.url.as_deref(), args.visible, args.profile.as_deref()).await?);
+            Some(start_session(args.url.as_deref(), args.visible, args.signed_in).await?);
     }
 
     let Some(session) = session_guard.as_ref() else {
@@ -161,29 +159,33 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
 async fn start_session(
     url: Option<&str>,
     visible: bool,
-    profile_selector: Option<&str>,
+    signed_in: bool,
 ) -> Result<BrowserSession, String> {
     let chrome = chrome_path()?;
-    let profile = chrome_profile_dir(profile_selector)?;
-    let profile_directory = profile
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            format!(
-                "Chrome profile path has no directory name: {}",
-                profile.display()
-            )
-        })?
-        .to_string();
-
     let temp = TempDirGuard::new()?;
     let user_data_dir = temp.path.join("chrome-user-data");
-    let copied_profile = user_data_dir.join(&profile_directory);
     fs::create_dir_all(&user_data_dir)
         .map_err(|err| format!("failed to create temporary Chrome profile: {err}"))?;
-    copy_dir_recursive(&profile, &copied_profile)
-        .map_err(|err| format!("failed to copy Chrome profile {}: {err}", profile.display()))?;
-    copy_local_state(&profile, &user_data_dir)?;
+
+    let profile_directory = if signed_in {
+        let profile = chrome_profile_dir(None)?;
+        let profile_directory = profile
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "Chrome profile path has no directory name: {}",
+                    profile.display()
+                )
+            })?
+            .to_string();
+        copy_dir_recursive(&profile, &user_data_dir.join(&profile_directory))
+            .map_err(|err| format!("failed to copy Chrome profile {}: {err}", profile.display()))?;
+        copy_local_state(&profile, &user_data_dir)?;
+        profile_directory
+    } else {
+        "Default".to_string()
+    };
 
     let port = available_port()?;
     let mut child = launch_chrome(
@@ -205,7 +207,7 @@ async fn start_session(
         child,
         temp,
         visible,
-        profile_selector: normalized_profile_selector(profile_selector),
+        signed_in,
     })
 }
 
@@ -531,17 +533,6 @@ fn matching_profiles_from_local_state(user_data_dir: &Path, selector: &str) -> V
         .collect()
 }
 
-fn normalized_profile_selector(selector: Option<&str>) -> Option<String> {
-    if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
-        return Some(selector.to_string());
-    }
-
-    std::env::var("AGENT_BROWSER_CHROME_PROFILE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn copy_local_state(profile: &Path, user_data_dir: &Path) -> Result<(), String> {
     let Some(parent) = profile.parent() else {
         return Ok(());
@@ -607,7 +598,7 @@ struct BrowserSession {
     child: Child,
     temp: TempDirGuard,
     visible: bool,
-    profile_selector: Option<String>,
+    signed_in: bool,
 }
 
 struct TempDirGuard {
@@ -653,59 +644,6 @@ mod tests {
 
         assert!(!args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"https://example.com".to_string()));
-    }
-
-    #[test]
-    fn profile_selector_can_resolve_chrome_profile_directory_name() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let user_data_dir = temp.path();
-        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
-        fs::create_dir(user_data_dir.join("Profile 8")).expect("profile 8");
-
-        let profile = resolve_profile_in_user_data_dir(user_data_dir, Some("Profile 8"))
-            .expect("profile selected by directory name");
-
-        assert_eq!(profile, user_data_dir.join("Profile 8"));
-    }
-
-    #[test]
-    fn profile_selector_can_resolve_chrome_profile_by_email_from_local_state() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let user_data_dir = temp.path();
-        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
-        fs::create_dir(user_data_dir.join("Profile 8")).expect("profile 8");
-        fs::write(
-            user_data_dir.join("Local State"),
-            r#"{
-              "profile": {
-                "info_cache": {
-                  "Default": {"user_name": "default@example.com", "gaia_name": "Default User"},
-                  "Profile 8": {"user_name": "aaronsullivanfishbowl@gmail.com", "gaia_name": "Aaron Sullivan Fishbowl"}
-                }
-              }
-            }"#,
-        )
-        .expect("local state");
-
-        let profile = resolve_profile_in_user_data_dir(
-            user_data_dir,
-            Some("aaronsullivanfishbowl@gmail.com"),
-        )
-        .expect("profile selected by email");
-
-        assert_eq!(profile, user_data_dir.join("Profile 8"));
-    }
-
-    #[test]
-    fn profile_selector_defaults_to_default_directory() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let user_data_dir = temp.path();
-        fs::create_dir(user_data_dir.join("Default")).expect("default profile");
-
-        let profile = resolve_profile_in_user_data_dir(user_data_dir, None)
-            .expect("default profile selected");
-
-        assert_eq!(profile, user_data_dir.join("Default"));
     }
 
     #[test]

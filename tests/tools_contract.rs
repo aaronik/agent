@@ -59,6 +59,33 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     assert!(search_replace_description.contains("Prefer this over `write_file`"));
     assert!(search_replace_description.contains("original text can be matched exactly"));
 
+    let browser_definition = registry
+        .definitions()
+        .iter()
+        .find(|definition| definition.name == "browser_control")
+        .expect("browser_control definition");
+    assert!(browser_definition.description.contains("anonymous"));
+    assert!(
+        browser_definition
+            .description
+            .contains("only when the user explicitly requests")
+    );
+    assert!(
+        browser_definition
+            .description
+            .contains("waitUntil: 'domcontentloaded'")
+    );
+    assert!(
+        browser_definition
+            .parameters
+            .pointer("/properties/profile")
+            .is_none()
+    );
+    assert_eq!(
+        browser_definition.parameters["properties"]["signed_in"]["type"],
+        "boolean"
+    );
+
     for definition in registry.definitions() {
         let parameters = &definition.parameters;
         let intent = parameters
@@ -406,7 +433,7 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     let output = browser_control(BrowserControlArgs {
         javascript: "return await page.title();".to_string(),
         url: Some("https://example.com".to_string()),
-        profile: None,
+        signed_in: false,
         timeout: 1,
         close: false,
         reset: false,
