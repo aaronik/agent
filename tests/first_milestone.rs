@@ -663,6 +663,7 @@ fn slash_help_explains_how_users_and_agents_create_skills() {
         .args(["--single", "/help"])
         .assert()
         .success()
+        .stdout(predicates::str::contains("/allow-git"))
         .stdout(predicates::str::contains("~/.agent/skills/<name>/SKILL.md"))
         .stdout(predicates::str::contains("/<skill-name> [arguments]"));
 }

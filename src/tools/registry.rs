@@ -25,6 +25,7 @@ pub struct ToolDefinition {
 #[derive(Clone, Debug)]
 pub struct ToolRegistry {
     definitions: Vec<ToolDefinition>,
+    allow_git_writes: bool,
 }
 
 impl Default for ToolRegistry {
@@ -35,14 +36,18 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self::with_spawn(true)
+        Self::with_spawn_and_git_write_access(true, false)
+    }
+
+    pub fn new_with_git_write_access() -> Self {
+        Self::with_spawn_and_git_write_access(true, true)
     }
 
     pub fn without_spawn() -> Self {
-        Self::with_spawn(false)
+        Self::with_spawn_and_git_write_access(false, false)
     }
 
-    fn with_spawn(include_spawn: bool) -> Self {
+    fn with_spawn_and_git_write_access(include_spawn: bool, allow_git_writes: bool) -> Self {
         let mut definitions = vec![
             definition::<RunShellCommandArgs>(
                 "run_shell_command",
@@ -78,7 +83,10 @@ impl ToolRegistry {
             ));
         }
 
-        Self { definitions }
+        Self {
+            definitions,
+            allow_git_writes,
+        }
     }
 
     pub fn definitions(&self) -> &[ToolDefinition] {
@@ -121,7 +129,10 @@ impl ToolRegistry {
 
         let content = match name {
             "run_shell_command" => match serde_json::from_value::<RunShellCommandArgs>(arguments) {
-                Ok(args) => run_shell_command_cancellable(args, cancellation_token).await,
+                Ok(args) => {
+                    run_shell_command_cancellable(args, cancellation_token, self.allow_git_writes)
+                        .await
+                }
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "fetch" => match serde_json::from_value::<FetchArgs>(arguments) {

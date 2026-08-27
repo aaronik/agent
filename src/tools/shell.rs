@@ -17,14 +17,15 @@ pub struct RunShellCommandArgs {
 }
 
 pub async fn run_shell_command(args: RunShellCommandArgs) -> Result<String, String> {
-    run_shell_command_cancellable(args, &CancellationToken::new()).await
+    run_shell_command_cancellable(args, &CancellationToken::new(), false).await
 }
 
 pub async fn run_shell_command_cancellable(
     args: RunShellCommandArgs,
     cancellation_token: &CancellationToken,
+    allow_git_writes: bool,
 ) -> Result<String, String> {
-    if let Some(blocked) = blocked_git_write_operation(&args.cmd) {
+    if !allow_git_writes && let Some(blocked) = blocked_git_write_operation(&args.cmd) {
         return Err(format!(
             "blocked git write operation: `{blocked}`. Read-only git commands such as log, reflog, status, diff, show, and branch --list are allowed."
         ));

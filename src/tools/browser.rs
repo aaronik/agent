@@ -212,7 +212,60 @@ async fn start_session(
 }
 
 async fn close_session(mut session: BrowserSession) {
+    // Chrome has a multi-process architecture. Killing only its root process can leave
+    // helpers alive, which in turn prevents TempDirGuard from reclaiming the profile.
+    if let Some(pid) = session.child.id() {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        time::sleep(Duration::from_millis(500)).await;
+        if session.child.try_wait().ok().flatten().is_none() {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+    }
     let _ = session.child.kill().await;
+    let _ = session.child.wait().await;
+    cleanup_stale_chrome_code_sign_clones();
+}
+
+/// Removes only inactive macOS Chrome code-sign clone workspaces.
+///
+/// Chrome/Playwright can leak these under the per-user temporary directory on macOS.
+/// An entry is never removed if `lsof` reports an open file below it, so a normal Chrome
+/// instance that is presently executing from a clone is left alone.
+fn cleanup_stale_chrome_code_sign_clones() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let Some(temp_parent) = std::env::temp_dir().parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let clone_root = temp_parent.join("X/com.google.Chrome.code_sign_clone");
+    let Ok(entries) = fs::read_dir(&clone_root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let in_use = std::process::Command::new("lsof")
+            .arg("+D")
+            .arg(&path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map(|output| !output.stdout.is_empty())
+            // Do not delete when we cannot positively establish that it is unused.
+            .unwrap_or(true);
+        if !in_use {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 }
 
 fn append_session_status(mut output: String, closed: bool) -> String {
@@ -248,6 +301,9 @@ fn launch_chrome(
         ))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        // Put Chrome and its helpers in their own process group so shutdown cannot
+        // affect the agent process and can reap the full browser tree.
+        .process_group(0)
         .kill_on_drop(true);
     command
         .spawn()

@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use clap::Parser;
+
 use agent_rs::tools::browser::{BrowserControlArgs, browser_control};
 use agent_rs::tools::fetch::{FetchArgs, fetch};
 use agent_rs::tools::files::{
@@ -238,6 +240,40 @@ async fn run_shell_command_truncates_large_completed_output_with_guidance() {
     assert!(output.contains("[Output trimmed by the harness to avoid overwhelming the context.]"));
     assert!(output.contains("The tool completed successfully."));
     assert!(output.contains("make a more selective tool call"));
+}
+
+#[tokio::test]
+async fn registry_allows_git_writes_only_when_enabled() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo = temp.path().join("repo");
+    let arguments = json!({
+        "intent": "initialize test repository",
+        "cmd": format!("git init {}", repo.display()),
+        "timeout": 30
+    });
+
+    let blocked = ToolRegistry::new()
+        .execute(
+            "call_git".to_string(),
+            "run_shell_command",
+            arguments.clone(),
+        )
+        .await;
+    assert_eq!(blocked.status, agent_rs::agent::ToolStatus::Error);
+    assert!(blocked.content.contains("blocked git write operation"));
+
+    let allowed = ToolRegistry::new_with_git_write_access()
+        .execute("call_git".to_string(), "run_shell_command", arguments)
+        .await;
+    assert_eq!(allowed.status, agent_rs::agent::ToolStatus::Success);
+    assert!(repo.join(".git").is_dir());
+}
+
+#[test]
+fn allow_git_cli_flag_enables_git_write_access() {
+    let args = agent_rs::cli::Args::try_parse_from(["agent", "--allow-git"])
+        .expect("allow-git should parse");
+    assert!(args.allow_git);
 }
 
 #[tokio::test]

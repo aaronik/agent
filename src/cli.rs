@@ -87,6 +87,8 @@ pub struct Args {
         help = "Attach an image to the initial text message (repeatable)"
     )]
     pub images: Vec<std::path::PathBuf>,
+    #[arg(long, help = "Allow git commands that modify repositories")]
+    pub allow_git: bool,
     #[arg(help = "Initial user message")]
     pub query: Vec<String>,
 }
@@ -144,6 +146,7 @@ async fn run_with_args_and_prefill(
     let display = TerminalDisplay::new();
     let mut model_name = effective_model_name(args.model.as_deref());
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
+    let mut allow_git_writes = args.allow_git;
 
     let mut session = load_or_create_session(&args, &store)?;
     print_agent_header(&model_name);
@@ -187,6 +190,7 @@ async fn run_with_args_and_prefill(
                 &model_name,
                 &system_prompt(),
                 args.single,
+                allow_git_writes,
             )
             .await?
             {
@@ -236,6 +240,7 @@ async fn run_with_args_and_prefill(
                 &mut session,
                 &display,
                 &model_name,
+                &mut allow_git_writes,
             )
             .await?
             {
@@ -277,7 +282,7 @@ async fn run_with_args_and_prefill(
         display.render_turn_submitted();
 
         if loop_runner.is_none() {
-            loop_runner = Some(build_loop_runner(&model_name)?);
+            loop_runner = Some(build_loop_runner(&model_name, allow_git_writes)?);
         }
         let cancellation_token = CancellationToken::new();
         let esc_abort = if args.single {
@@ -491,6 +496,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             resume: None,
             new: true,
             images: Vec::new(),
+            allow_git: args.allow_git,
             query: Vec::new(),
         },
         &store,
@@ -846,6 +852,7 @@ async fn handle_slash_command(
     session: &mut Session,
     display: &TerminalDisplay,
     model_name: &str,
+    allow_git_writes: &mut bool,
 ) -> Result<SlashCommandResult, Box<dyn Error>> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -867,6 +874,10 @@ async fn handle_slash_command(
         "/compact" => {
             compact_session(store, session, model_name, rest).await?;
         }
+        "/allow-git" => {
+            *allow_git_writes = true;
+            println!("git write commands allowed for this session");
+        }
         "/clear" | "/new" => {
             let new_session = load_or_create_session(
                 &Args {
@@ -880,6 +891,7 @@ async fn handle_slash_command(
                     update_pricing: false,
                     talk: false,
                     command: false,
+                    allow_git: *allow_git_writes,
                 },
                 store,
             )?;
@@ -1073,7 +1085,7 @@ fn format_session_info(session: &Session, model_name: &str) -> String {
 }
 
 fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
-    let mut help = "Available commands:\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+    let mut help = "Available commands:\n  /allow-git\n      Allow git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
         .to_string();
     let project_dir = std::env::current_dir()?;
     for skill in crate::skills::discover(store.root(), &project_dir)? {
@@ -1085,10 +1097,18 @@ fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
     Ok(help)
 }
 
-fn build_loop_runner(model_name: &str) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
+fn build_loop_runner(
+    model_name: &str,
+    allow_git_writes: bool,
+) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
+    let tools = if allow_git_writes {
+        ToolRegistry::new_with_git_write_access()
+    } else {
+        ToolRegistry::new()
+    };
     Ok(AgentLoop::new(
         build_provider(model_name)?,
-        ToolRegistry::new(),
+        tools,
         AgentLoopConfig {
             model: model_name.to_string(),
             max_context_tokens: context_window_tokens(model_name),
@@ -1171,6 +1191,7 @@ fn spawn_completion_refresh(dynamic_candidates: Arc<RwLock<Vec<String>>>, store:
 
 fn prompt_completion_candidates(store: &SessionStore) -> Vec<String> {
     let mut candidates = vec![
+        "/allow-git".to_string(),
         "/clear".to_string(),
         "/compact".to_string(),
         "/find".to_string(),
@@ -1203,6 +1224,7 @@ fn completion_candidates_in_dir(
     project_dir: &std::path::Path,
 ) -> Vec<String> {
     let mut candidates = vec![
+        "/allow-git".to_string(),
         "/clear".to_string(),
         "/compact".to_string(),
         "/find".to_string(),

@@ -60,6 +60,7 @@ pub async fn run_talk_session(
     model_name: &str,
     base_system_prompt: &str,
     single_response: bool,
+    allow_git_writes: bool,
 ) -> Result<TalkSessionExit, Box<dyn Error>> {
     let mut config =
         talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
@@ -80,7 +81,11 @@ pub async fn run_talk_session(
     audio.keepalive();
     let playback = audio.playback();
     let mut client = RealtimeClient::connect(&config).await?;
-    let tools = ToolRegistry::new();
+    let tools = if allow_git_writes {
+        ToolRegistry::new_with_git_write_access()
+    } else {
+        ToolRegistry::new()
+    };
     let display = TerminalDisplay::new();
     let mut input_gate = InputAudioGate::default();
     let mut cancellation_token = CancellationToken::new();
