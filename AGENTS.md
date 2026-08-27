@@ -27,9 +27,10 @@ When adding or modifying Rust functionality:
    ```sh
    cargo fmt --check && cargo build && cargo clippy -- -D warnings && cargo test
    ```
-4. Manually test the changed feature or bug fix in a realistic scenario
-5. Present a brief manual testing report to the user upon completion
-6. Only then is the work considered complete
+4. Validate every new feature through interactive testing of the harness. Follow `INTERACTIVE_TESTING.md` for the PTY-based procedure, using the mock provider where appropriate.
+5. Manually test the changed feature or bug fix in a realistic scenario.
+6. Present a brief manual testing report to the user upon completion.
+7. Only then is the work considered complete.
 
 Test guidelines:
 - Prefer high-level integration tests over unit tests
