@@ -14,6 +14,7 @@ const RED: &str = "\x1b[31m";
 const PANEL_MIN_WIDTH: usize = 42;
 const PANEL_MAX_WIDTH: usize = 120;
 const PANEL_PADDING: usize = 2;
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Debug)]
 struct ActiveToolCall {
@@ -25,6 +26,7 @@ struct ActiveToolCall {
 pub struct TerminalDisplay {
     live_enabled: bool,
     active_calls: Mutex<HashMap<String, ActiveToolCall>>,
+    working_footer_height: Mutex<Option<u16>>,
 }
 
 impl Default for TerminalDisplay {
@@ -38,6 +40,7 @@ impl TerminalDisplay {
         Self {
             live_enabled: std::env::var("AGENT_NO_LIVE").ok().as_deref() != Some("1"),
             active_calls: Mutex::new(HashMap::new()),
+            working_footer_height: Mutex::new(None),
         }
     }
 
@@ -45,9 +48,140 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
-    pub fn render_turn_submitted(&self) {
-        println!("{DIM}{ITALIC}Working... Press Esc to abort.{RESET}");
+    pub fn render_turn_submitted(&self, status_line: &str) {
+        if self.live_enabled
+            && io::stdout().is_terminal()
+            && let Ok((width, height)) = crossterm::terminal::size()
+            && height >= 3
+        {
+            let status_line = truncate_to_width(status_line, width as usize);
+            print!(
+                "{}",
+                Self::format_working_footer_start(&status_line, height)
+            );
+            if let Ok(mut footer_height) = self.working_footer_height.lock() {
+                *footer_height = Some(height);
+            }
+        }
         flush_stdout();
+    }
+
+    pub fn update_working_footer(&self, status_line: &str) {
+        let height = self
+            .working_footer_height
+            .lock()
+            .ok()
+            .and_then(|height| *height);
+        if let Some(height) = height {
+            let status_line = crossterm::terminal::size()
+                .ok()
+                .map(|(width, _)| truncate_to_width(status_line, width as usize))
+                .unwrap_or_else(|| status_line.to_string());
+            print!(
+                "{}",
+                Self::format_working_footer_update(&status_line, height)
+            );
+            flush_stdout();
+        }
+    }
+
+    pub fn update_working_input(&self, input: &str, cursor: usize, mode: &str) {
+        let height = self
+            .working_footer_height
+            .lock()
+            .ok()
+            .and_then(|height| *height);
+        if let Some(height) = height {
+            let prompt = working_directory_prompt();
+            let available_width = crossterm::terminal::size()
+                .ok()
+                .map(|(width, _)| (width as usize).saturating_sub(prompt.chars().count() + 5))
+                .unwrap_or(usize::MAX);
+            let total = input.chars().count();
+            let window_start = cursor.saturating_sub(available_width);
+            let visible = input
+                .chars()
+                .skip(window_start)
+                .take(available_width)
+                .collect::<String>();
+            let visible_cursor = cursor
+                .saturating_sub(window_start)
+                .min(visible.chars().count());
+            print!(
+                "{}",
+                Self::format_working_input_update(&visible, visible_cursor, mode, &prompt, height,)
+            );
+            flush_stdout();
+            debug_assert!(cursor <= total);
+        }
+    }
+
+    pub fn update_spinner(&self, frame_index: usize) {
+        let height = self
+            .working_footer_height
+            .lock()
+            .ok()
+            .and_then(|height| *height);
+        if let Some(height) = height {
+            let frame = SPINNER_FRAMES[frame_index % SPINNER_FRAMES.len()];
+            print!("{}", Self::format_spinner_update(frame, height));
+            flush_stdout();
+        }
+    }
+
+    pub fn finish_turn(&self) {
+        let height = self
+            .working_footer_height
+            .lock()
+            .ok()
+            .and_then(|mut height| height.take());
+        if let Some(height) = height {
+            print!("{}", Self::format_working_footer_finish(height));
+            flush_stdout();
+        }
+    }
+
+    pub fn format_working_footer_start(status_line: &str, height: u16) -> String {
+        let output_bottom = height.saturating_sub(2).max(1);
+        format!(
+            "\x1b[?25l\x1b[r\x1b[2S\x1b[1;{output_bottom}r{}{}\x1b[{output_bottom};1H\n",
+            Self::format_working_footer_update(status_line, height),
+            Self::format_working_input_update("", 0, "INSERT", &working_directory_prompt(), height,)
+        )
+    }
+
+    pub fn format_working_footer_update(status_line: &str, height: u16) -> String {
+        let status_row = height.saturating_sub(1).max(1);
+        format!("\x1b[s\x1b[{status_row};1H\x1b[2K{status_line}\x1b[u")
+    }
+
+    pub fn format_working_input_update(
+        input: &str,
+        cursor: usize,
+        mode: &str,
+        prompt: &str,
+        height: u16,
+    ) -> String {
+        let split = char_byte_index(input, cursor);
+        let (before, after) = input.split_at(split);
+        let indicator = if mode == "NORMAL" { "〉" } else { ": " };
+        format!(
+            "\x1b[s\x1b[{height};1H\x1b[2K\x1b[38;5;14m{} \x1b[38;5;10m{prompt}\x1b[38;5;14m{indicator}\x1b[38;5;7m{before}│{after}{RESET}\x1b[u",
+            SPINNER_FRAMES[0]
+        )
+    }
+
+    pub fn format_spinner_update(frame: &str, height: u16) -> String {
+        format!("\x1b[s\x1b[{height};1H\x1b[38;5;14m{frame}{RESET}\x1b[u")
+    }
+
+    pub fn format_clear_submitted_prompt_status() -> &'static str {
+        ""
+    }
+
+    pub fn format_working_footer_finish(height: u16) -> String {
+        let status_row = height.saturating_sub(1).max(1);
+        format!("\x1b[s\x1b[r\x1b[{status_row};1H\x1b[2K\x1b[{height};1H\x1b[2K\x1b[u\x1b[?25h")
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {
@@ -418,6 +552,33 @@ fn strip_ansi(text: &str) -> String {
         }
     }
     out
+}
+
+fn working_directory_prompt() -> String {
+    let path = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "no path".to_string());
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home).display().to_string();
+        if path == home {
+            return "~".to_string();
+        }
+        if let Some(suffix) = path.strip_prefix(&format!("{home}/")) {
+            return format!("~/{suffix}");
+        }
+    }
+    path
+}
+
+fn char_byte_index(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn truncate_to_width(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
 }
 
 fn flush_stdout() {

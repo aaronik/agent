@@ -143,7 +143,7 @@ async fn run_with_args_and_prefill(
     }
 
     let store = SessionStore::new()?;
-    let display = TerminalDisplay::new();
+    let display = Arc::new(TerminalDisplay::new());
     let mut model_name = effective_model_name(args.model.as_deref());
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
     let mut allow_git_writes = args.allow_git;
@@ -204,8 +204,8 @@ async fn run_with_args_and_prefill(
             }
         }
 
-        let user_input = match first_input.take() {
-            Some(input) => input,
+        let (user_input, rendered_by_reedline) = match first_input.take() {
+            Some(input) => (input, false),
             None => {
                 if args.single && !session.messages.is_empty() {
                     break;
@@ -218,7 +218,7 @@ async fn run_with_args_and_prefill(
                 )
                 .await
                 {
-                    Ok(PromptInput::Text(input)) => input,
+                    Ok(PromptInput::Text(input)) => (input, true),
                     Ok(PromptInput::ToggleTalk) => {
                         interaction_mode = InteractionMode::Talk;
                         loop_runner = None;
@@ -277,18 +277,25 @@ async fn run_with_args_and_prefill(
                 images: parsed_input.images,
             }
         };
+        if !rendered_by_reedline {
+            display.render_new_message(&user_message);
+        }
         session.messages.push(user_message);
         store.save(&session)?;
-        display.render_turn_submitted();
 
         if loop_runner.is_none() {
             loop_runner = Some(build_loop_runner(&model_name, allow_git_writes)?);
         }
+        let status_line = format_cost_and_context_line(&session.messages, &model_name);
+        display.render_turn_submitted(&status_line);
         let cancellation_token = CancellationToken::new();
         let esc_abort = if args.single {
             EscAbortWatcher::disabled()
         } else {
-            EscAbortWatcher::spawn(cancellation_token.clone())
+            EscAbortWatcher::spawn_with_display(
+                cancellation_token.clone(),
+                Some(Arc::clone(&display)),
+            )
         };
         let observed_messages = RefCell::new(Vec::new());
         let persistence_error = RefCell::new(None);
@@ -305,6 +312,12 @@ async fn run_with_args_and_prefill(
                         }
                         display.render_new_message(message);
                         observed_messages.borrow_mut().push(message.clone());
+                        let mut status_messages = session.messages.clone();
+                        status_messages.extend(observed_messages.borrow().iter().cloned());
+                        display.update_working_footer(&format_cost_and_context_line(
+                            &status_messages,
+                            &model_name,
+                        ));
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
                             let mut checkpoint = session.clone();
@@ -320,11 +333,16 @@ async fn run_with_args_and_prefill(
             _ = cancellation_token.cancelled() => Err(crate::providers::ProviderError::Cancelled),
             _ = tokio::signal::ctrl_c() => {
                 cancellation_token.cancel();
-                esc_abort.stop().await;
+                let _ = esc_abort.stop().await;
+                display.finish_turn();
                 return Err("cancelled".into());
             }
         };
-        esc_abort.stop().await;
+        let typed_ahead = esc_abort.stop().await;
+        if !typed_ahead.is_empty() {
+            prompt_prefill = Some(typed_ahead);
+        }
+        display.finish_turn();
 
         if let Some(error) = persistence_error.into_inner() {
             return Err(error.into());
@@ -525,8 +543,290 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WorkingVimMode {
+    #[default]
+    Insert,
+    Normal,
+}
+
+impl WorkingVimMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Insert => "INSERT",
+            Self::Normal => "NORMAL",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkingInputAction {
+    Redraw,
+    Abort,
+    Ignored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FindDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FindMotion {
+    direction: FindDirection,
+    till: bool,
+    character: char,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingFind {
+    direction: FindDirection,
+    till: bool,
+}
+
+#[derive(Debug, Default)]
+struct WorkingVimEditor {
+    characters: Vec<char>,
+    cursor: usize,
+    mode: WorkingVimMode,
+    pending_find: Option<PendingFind>,
+    last_find: Option<FindMotion>,
+}
+
+impl WorkingVimEditor {
+    fn text(&self) -> String {
+        self.characters.iter().collect()
+    }
+
+    fn apply(&mut self, event: Event) -> WorkingInputAction {
+        if let Event::Paste(text) = event {
+            if self.mode == WorkingVimMode::Insert {
+                for character in text.chars() {
+                    self.characters.insert(self.cursor, character);
+                    self.cursor += 1;
+                }
+                return WorkingInputAction::Redraw;
+            }
+            return WorkingInputAction::Ignored;
+        }
+        let Event::Key(key) = event else {
+            return WorkingInputAction::Ignored;
+        };
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return WorkingInputAction::Ignored;
+        }
+        if key.modifiers != CrosstermKeyModifiers::NONE
+            && key.modifiers != CrosstermKeyModifiers::SHIFT
+        {
+            return WorkingInputAction::Ignored;
+        }
+        match self.mode {
+            WorkingVimMode::Insert => self.apply_insert(key.code),
+            WorkingVimMode::Normal => self.apply_normal(key.code),
+        }
+    }
+
+    fn apply_insert(&mut self, code: CrosstermKeyCode) -> WorkingInputAction {
+        match code {
+            CrosstermKeyCode::Esc => self.mode = WorkingVimMode::Normal,
+            CrosstermKeyCode::Char(character) => {
+                self.characters.insert(self.cursor, character);
+                self.cursor += 1;
+            }
+            CrosstermKeyCode::Backspace if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.characters.remove(self.cursor);
+            }
+            CrosstermKeyCode::Left if self.cursor > 0 => self.cursor -= 1,
+            CrosstermKeyCode::Right if self.cursor < self.characters.len() => self.cursor += 1,
+            CrosstermKeyCode::Home => self.cursor = 0,
+            CrosstermKeyCode::End => self.cursor = self.characters.len(),
+            CrosstermKeyCode::Tab => {
+                self.characters.insert(self.cursor, '\t');
+                self.cursor += 1;
+            }
+            _ => return WorkingInputAction::Ignored,
+        }
+        WorkingInputAction::Redraw
+    }
+
+    fn apply_normal(&mut self, code: CrosstermKeyCode) -> WorkingInputAction {
+        if let Some(pending) = self.pending_find.take() {
+            return match code {
+                CrosstermKeyCode::Esc => WorkingInputAction::Redraw,
+                CrosstermKeyCode::Char(character) => {
+                    let motion = FindMotion {
+                        direction: pending.direction,
+                        till: pending.till,
+                        character,
+                    };
+                    self.apply_find(motion);
+                    self.last_find = Some(motion);
+                    WorkingInputAction::Redraw
+                }
+                _ => WorkingInputAction::Ignored,
+            };
+        }
+        match code {
+            CrosstermKeyCode::Esc => return WorkingInputAction::Abort,
+            CrosstermKeyCode::Char('h') | CrosstermKeyCode::Left if self.cursor > 0 => {
+                self.cursor -= 1
+            }
+            CrosstermKeyCode::Char('l') | CrosstermKeyCode::Right
+                if self.cursor < self.characters.len() =>
+            {
+                self.cursor += 1
+            }
+            CrosstermKeyCode::Char('0') | CrosstermKeyCode::Home => self.cursor = 0,
+            CrosstermKeyCode::Char('$') | CrosstermKeyCode::End => {
+                self.cursor = self.characters.len()
+            }
+            CrosstermKeyCode::Char('w') => self.move_word_forward(false),
+            CrosstermKeyCode::Char('W') => self.move_word_forward(true),
+            CrosstermKeyCode::Char('b') => self.move_word_backward(false),
+            CrosstermKeyCode::Char('B') => self.move_word_backward(true),
+            CrosstermKeyCode::Char('e') => self.move_word_end(false),
+            CrosstermKeyCode::Char('E') => self.move_word_end(true),
+            CrosstermKeyCode::Char('f') => self.begin_find(FindDirection::Forward, false),
+            CrosstermKeyCode::Char('F') => self.begin_find(FindDirection::Backward, false),
+            CrosstermKeyCode::Char('t') => self.begin_find(FindDirection::Forward, true),
+            CrosstermKeyCode::Char('T') => self.begin_find(FindDirection::Backward, true),
+            CrosstermKeyCode::Char(';') => {
+                if let Some(motion) = self.last_find {
+                    self.apply_find(motion);
+                }
+            }
+            CrosstermKeyCode::Char(',') => {
+                if let Some(mut motion) = self.last_find {
+                    motion.direction = reverse_find_direction(motion.direction);
+                    self.apply_find(motion);
+                }
+            }
+            CrosstermKeyCode::Char('i') => self.mode = WorkingVimMode::Insert,
+            CrosstermKeyCode::Char('a') => {
+                self.cursor = (self.cursor + 1).min(self.characters.len());
+                self.mode = WorkingVimMode::Insert;
+            }
+            CrosstermKeyCode::Char('I') => {
+                self.cursor = 0;
+                self.mode = WorkingVimMode::Insert;
+            }
+            CrosstermKeyCode::Char('A') => {
+                self.cursor = self.characters.len();
+                self.mode = WorkingVimMode::Insert;
+            }
+            CrosstermKeyCode::Char('x') if self.cursor < self.characters.len() => {
+                self.characters.remove(self.cursor);
+            }
+            _ => return WorkingInputAction::Ignored,
+        }
+        WorkingInputAction::Redraw
+    }
+
+    fn begin_find(&mut self, direction: FindDirection, till: bool) {
+        self.pending_find = Some(PendingFind { direction, till });
+    }
+
+    fn apply_find(&mut self, motion: FindMotion) {
+        let found = match motion.direction {
+            FindDirection::Forward => ((self.cursor + 1)..self.characters.len())
+                .find(|&index| self.characters[index] == motion.character),
+            FindDirection::Backward => (0..self.cursor)
+                .rev()
+                .find(|&index| self.characters[index] == motion.character),
+        };
+        if let Some(index) = found {
+            self.cursor = match (motion.direction, motion.till) {
+                (FindDirection::Forward, true) => index.saturating_sub(1),
+                (FindDirection::Backward, true) => (index + 1).min(self.characters.len()),
+                _ => index,
+            };
+        }
+    }
+
+    fn move_word_forward(&mut self, big_word: bool) {
+        let len = self.characters.len();
+        if self.cursor >= len {
+            return;
+        }
+        let class = word_class(self.characters[self.cursor], big_word);
+        let mut index = self.cursor + 1;
+        while index < len && word_class(self.characters[index], big_word) == class {
+            index += 1;
+        }
+        while index < len && self.characters[index].is_whitespace() {
+            index += 1;
+        }
+        self.cursor = index.min(len);
+    }
+
+    fn move_word_backward(&mut self, big_word: bool) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut index = self.cursor - 1;
+        while index > 0 && self.characters[index].is_whitespace() {
+            index -= 1;
+        }
+        let class = word_class(self.characters[index], big_word);
+        while index > 0 && word_class(self.characters[index - 1], big_word) == class {
+            index -= 1;
+        }
+        self.cursor = index;
+    }
+
+    fn move_word_end(&mut self, big_word: bool) {
+        let len = self.characters.len();
+        if self.cursor >= len {
+            return;
+        }
+        let mut index = self.cursor;
+        if !self.characters[index].is_whitespace() {
+            index += 1;
+        }
+        while index < len && self.characters[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= len {
+            self.cursor = len.saturating_sub(1);
+            return;
+        }
+        let class = word_class(self.characters[index], big_word);
+        while index + 1 < len && word_class(self.characters[index + 1], big_word) == class {
+            index += 1;
+        }
+        self.cursor = index;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WordClass {
+    Whitespace,
+    Keyword,
+    Punctuation,
+}
+
+fn word_class(character: char, big_word: bool) -> WordClass {
+    if character.is_whitespace() {
+        WordClass::Whitespace
+    } else if big_word || character.is_alphanumeric() || character == '_' {
+        WordClass::Keyword
+    } else {
+        WordClass::Punctuation
+    }
+}
+
+fn reverse_find_direction(direction: FindDirection) -> FindDirection {
+    match direction {
+        FindDirection::Forward => FindDirection::Backward,
+        FindDirection::Backward => FindDirection::Forward,
+    }
+}
+
 pub struct EscAbortWatcher {
     stop: Arc<AtomicBool>,
+    editor: Arc<std::sync::Mutex<WorkingVimEditor>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -534,31 +834,61 @@ impl EscAbortWatcher {
     pub fn disabled() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(true)),
+            editor: Arc::new(std::sync::Mutex::new(WorkingVimEditor::default())),
             handle: None,
         }
     }
 
     pub fn spawn(cancellation_token: CancellationToken) -> Self {
+        Self::spawn_with_display(cancellation_token, None)
+    }
+
+    pub fn spawn_with_display(
+        cancellation_token: CancellationToken,
+        display: Option<Arc<TerminalDisplay>>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let editor = Arc::new(std::sync::Mutex::new(WorkingVimEditor::default()));
         let handle = std::io::stdin().is_terminal().then(|| {
             let stop_watcher = Arc::clone(&stop);
+            let watcher_editor = Arc::clone(&editor);
             tokio::task::spawn_blocking(move || {
                 if InputModeGuard::enable().is_err() {
                     return;
                 }
                 let _input_mode = InputModeGuard;
+                let mut spinner_frame = 0;
+                let mut last_spinner_update = std::time::Instant::now();
                 while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
-                    match event::poll(Duration::from_millis(50)) {
+                    if last_spinner_update.elapsed() >= Duration::from_millis(80) {
+                        spinner_frame += 1;
+                        if let Some(display) = &display {
+                            display.update_spinner(spinner_frame);
+                        }
+                        last_spinner_update = std::time::Instant::now();
+                    }
+                    match event::poll(Duration::from_millis(20)) {
                         Ok(true) => match event::read() {
-                            Ok(Event::Key(key))
-                                if key.code == CrosstermKeyCode::Esc
-                                    && key.kind == KeyEventKind::Press
-                                    && key.modifiers == CrosstermKeyModifiers::NONE =>
-                            {
-                                cancellation_token.cancel();
-                                break;
+                            Ok(event) => {
+                                if let Ok(mut editor) = watcher_editor.lock() {
+                                    match editor.apply(event) {
+                                        WorkingInputAction::Abort => {
+                                            cancellation_token.cancel();
+                                            break;
+                                        }
+                                        WorkingInputAction::Redraw => {
+                                            if let Some(display) = &display {
+                                                display.update_working_input(
+                                                    &editor.text(),
+                                                    editor.cursor,
+                                                    editor.mode.label(),
+                                                );
+                                            }
+                                        }
+                                        WorkingInputAction::Ignored => {}
+                                    }
+                                }
                             }
-                            Ok(_) => {}
                             Err(_) => break,
                         },
                         Ok(false) => {}
@@ -567,14 +897,22 @@ impl EscAbortWatcher {
                 }
             })
         });
-        Self { stop, handle }
+        Self {
+            stop,
+            editor,
+            handle,
+        }
     }
 
-    pub async fn stop(self) {
+    pub async fn stop(self) -> String {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle {
             let _ = handle.await;
         }
+        self.editor
+            .lock()
+            .map(|editor| editor.text())
+            .unwrap_or_default()
     }
 }
 
@@ -1726,7 +2064,144 @@ mod tests {
         assert_eq!(session.messages[0].content(), "prior voice turn");
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn working_vim_insert_esc_enters_normal_then_normal_esc_aborts() {
+        let mut editor = WorkingVimEditor::default();
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Char('h'))),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.text(), "h");
+        assert_eq!(editor.mode, WorkingVimMode::Insert);
+
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Esc)),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.mode, WorkingVimMode::Normal);
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Esc)),
+            WorkingInputAction::Abort
+        );
+    }
+
+    #[test]
+    fn working_vim_normal_mode_supports_navigation_editing_and_insert() {
+        let mut editor = WorkingVimEditor::default();
+        for character in "helo".chars() {
+            editor.apply(key_event(CrosstermKeyCode::Char(character)));
+        }
+        editor.apply(key_event(CrosstermKeyCode::Esc));
+        editor.apply(key_event(CrosstermKeyCode::Char('h')));
+        editor.apply(key_event(CrosstermKeyCode::Char('i')));
+        editor.apply(key_event(CrosstermKeyCode::Char('l')));
+
+        assert_eq!(editor.text(), "hello");
+        assert_eq!(editor.cursor, 4);
+        assert_eq!(editor.mode, WorkingVimMode::Insert);
+    }
+
+    #[test]
+    fn working_vim_supports_word_motions() {
+        let mut editor = editor_in_normal_mode("one two-three FOUR");
+
+        editor.apply(key_event(CrosstermKeyCode::Char('w')));
+        assert_eq!(editor.cursor, 4);
+        editor.apply(key_event(CrosstermKeyCode::Char('e')));
+        assert_eq!(editor.cursor, 6);
+        editor.apply(key_event(CrosstermKeyCode::Char('w')));
+        assert_eq!(editor.cursor, 7);
+        editor.apply(key_event(CrosstermKeyCode::Char('W')));
+        assert_eq!(editor.cursor, 14);
+        editor.apply(key_event(CrosstermKeyCode::Char('B')));
+        assert_eq!(editor.cursor, 4);
+        editor.apply(key_event(CrosstermKeyCode::Char('b')));
+        assert_eq!(editor.cursor, 0);
+        editor.apply(key_event(CrosstermKeyCode::Char('E')));
+        assert_eq!(editor.cursor, 2);
+    }
+
+    #[test]
+    fn working_vim_supports_find_till_and_repeat_motions() {
+        let mut editor = editor_in_normal_mode("abc def ghi def");
+
+        editor.apply(key_event(CrosstermKeyCode::Char('f')));
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Char('d'))),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.cursor, 4);
+        editor.apply(key_event(CrosstermKeyCode::Char(';')));
+        assert_eq!(editor.cursor, 12);
+        editor.apply(key_event(CrosstermKeyCode::Char(',')));
+        assert_eq!(editor.cursor, 4);
+
+        editor.apply(key_event(CrosstermKeyCode::Char('t')));
+        editor.apply(key_event(CrosstermKeyCode::Char('g')));
+        assert_eq!(editor.cursor, 7);
+        editor.apply(key_event(CrosstermKeyCode::Char('F')));
+        editor.apply(key_event(CrosstermKeyCode::Char('a')));
+        assert_eq!(editor.cursor, 0);
+        editor.cursor = 4;
+        editor.apply(key_event(CrosstermKeyCode::Char('T')));
+        editor.apply(key_event(CrosstermKeyCode::Char('a')));
+        assert_eq!(editor.cursor, 1);
+    }
+
+    #[test]
+    fn working_vim_esc_cancels_pending_find_before_aborting() {
+        let mut editor = editor_in_normal_mode("abc");
+        editor.apply(key_event(CrosstermKeyCode::Char('f')));
+
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Esc)),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Esc)),
+            WorkingInputAction::Abort
+        );
+    }
+
+    fn editor_in_normal_mode(text: &str) -> WorkingVimEditor {
+        let mut editor = WorkingVimEditor::default();
+        editor.apply(Event::Paste(text.to_string()));
+        editor.apply(key_event(CrosstermKeyCode::Esc));
+        editor.cursor = 0;
+        editor
+    }
+
+    #[test]
+    fn working_vim_accepts_paste_and_backspace_in_insert_mode() {
+        let mut editor = WorkingVimEditor::default();
+        assert_eq!(
+            editor.apply(Event::Paste("hello".to_string())),
+            WorkingInputAction::Redraw
+        );
+        editor.apply(key_event(CrosstermKeyCode::Backspace));
+        assert_eq!(editor.text(), "hell");
+    }
+
+    #[test]
+    fn working_vim_ignores_control_shortcuts() {
+        let mut editor = WorkingVimEditor::default();
+        assert_eq!(
+            editor.apply(Event::Key(crossterm::event::KeyEvent::new(
+                CrosstermKeyCode::Char('c'),
+                CrosstermKeyModifiers::CONTROL,
+            ))),
+            WorkingInputAction::Ignored
+        );
+        assert!(editor.text().is_empty());
+    }
+
+    fn key_event(code: CrosstermKeyCode) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            CrosstermKeyModifiers::NONE,
+        ))
+    }
+
     #[test]
     fn esc_abort_input_mode_preserves_output_processing() {
         // SAFETY: the test fills the fields it asserts against before reading them.

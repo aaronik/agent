@@ -220,6 +220,98 @@ fn shell_command_exit_code_marker_still_renders_error() {
     assert!(!rendered.contains("(exit code: 7)"));
 }
 
+#[test]
+fn working_footer_reserves_bottom_rows_and_renders_status_and_input() {
+    let rendered = TerminalDisplay::format_working_footer_start(
+        "cost: $0.01 | context: 90% (900/1,000) | model: mock",
+        24,
+    );
+
+    assert!(rendered.contains("\x1b[1;22r"));
+    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
+    assert!(rendered.contains("cost: $0.01"));
+    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
+    assert!(rendered.contains("\x1b[38;5;14m: \x1b[38;5;7m│"));
+    assert!(!rendered.contains("Working..."));
+    assert!(!rendered.contains("-- INSERT --"));
+    assert!(rendered.starts_with("\x1b[?25l\x1b[r\x1b[2S\x1b[1;22r"));
+    assert!(rendered.ends_with("\x1b[22;1H\n"));
+    assert!(!rendered.contains("\x1b[s\x1b[1;22r"));
+}
+
+#[test]
+fn working_input_update_renders_typed_text_and_preserves_output_cursor() {
+    let insert = TerminalDisplay::format_working_input_update(
+        "next question",
+        13,
+        "INSERT",
+        "~/projects/agent",
+        24,
+    );
+    let normal = TerminalDisplay::format_working_input_update(
+        "next question",
+        13,
+        "NORMAL",
+        "~/projects/agent",
+        24,
+    );
+
+    assert!(insert.starts_with("\x1b[s"));
+    assert!(insert.contains("\x1b[38;5;14m⠋ \x1b[38;5;10m~/projects/agent"));
+    assert!(
+        insert.contains("\x1b[38;5;10m~/projects/agent\x1b[38;5;14m: \x1b[38;5;7mnext question│")
+    );
+    assert!(!insert.contains("-- INSERT --"));
+    assert!(
+        normal.contains("\x1b[38;5;10m~/projects/agent\x1b[38;5;14m〉\x1b[38;5;7mnext question│")
+    );
+    assert!(!normal.contains("-- NORMAL --"));
+    assert!(insert.ends_with("\x1b[u"));
+}
+
+#[test]
+fn spinner_update_redraws_only_the_indicator_before_folder() {
+    assert_eq!(
+        TerminalDisplay::format_spinner_update("⠹", 24),
+        "\x1b[s\x1b[24;1H\x1b[38;5;14m⠹\x1b[0m\x1b[u"
+    );
+}
+
+#[test]
+fn working_footer_hides_real_cursor_and_finish_restores_it() {
+    let start = TerminalDisplay::format_working_footer_start("status", 24);
+    let finish = TerminalDisplay::format_working_footer_finish(24);
+
+    assert!(start.starts_with("\x1b[?25l"));
+    assert!(finish.ends_with("\x1b[u\x1b[?25h"));
+}
+
+#[test]
+fn submitted_prompt_status_can_be_cleared_before_footer_starts() {
+    assert_eq!(TerminalDisplay::format_clear_submitted_prompt_status(), "");
+}
+
+#[test]
+fn working_footer_update_preserves_output_cursor() {
+    let rendered = TerminalDisplay::format_working_footer_update("updated", 24);
+
+    assert!(rendered.starts_with("\x1b[s"));
+    assert!(rendered.contains("\x1b[23;1H\x1b[2Kupdated"));
+    assert!(!rendered.contains("\x1b[24;1H"));
+    assert!(!rendered.contains("Working..."));
+    assert!(rendered.ends_with("\x1b[u"));
+}
+
+#[test]
+fn working_footer_finish_restores_scroll_region_and_clears_footer() {
+    let rendered = TerminalDisplay::format_working_footer_finish(24);
+
+    assert!(rendered.contains("\x1b[r"));
+    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
+    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
+    assert!(rendered.ends_with("\x1b[u\x1b[?25h"));
+}
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<String>,
