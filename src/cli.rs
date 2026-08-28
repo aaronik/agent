@@ -1542,17 +1542,37 @@ fn command_mode_system_prompt() -> String {
 }
 
 fn spawn_completion_refresh(dynamic_candidates: Arc<RwLock<Vec<String>>>, store: SessionStore) {
-    tokio::spawn(async move {
-        let local_refresh = tokio::task::spawn_blocking(move || completion_candidates(&store, &[]));
-        let models = list_models().await;
-        let mut candidates = local_refresh.await.unwrap_or_default();
-        candidates.extend(models.into_iter().map(|model| format!("/models {model}")));
-        if !candidates.is_empty()
-            && let Ok(mut refreshed) = dynamic_candidates.write()
-        {
-            *refreshed = candidates;
-        }
+    spawn_detached_completion_refresh(Arc::clone(&dynamic_candidates), move || {
+        completion_candidates(&store, &[])
     });
+    tokio::spawn(async move {
+        merge_completion_candidates(
+            &dynamic_candidates,
+            list_models()
+                .await
+                .into_iter()
+                .map(|model| format!("/models {model}")),
+        );
+    });
+}
+
+fn spawn_detached_completion_refresh<F>(dynamic_candidates: Arc<RwLock<Vec<String>>>, refresh: F)
+where
+    F: FnOnce() -> Vec<String> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        merge_completion_candidates(&dynamic_candidates, refresh());
+    });
+}
+
+fn merge_completion_candidates(
+    dynamic_candidates: &RwLock<Vec<String>>,
+    candidates: impl IntoIterator<Item = String>,
+) {
+    if let Ok(mut refreshed) = dynamic_candidates.write() {
+        refreshed.extend(candidates);
+        *refreshed = dedup_preserving_order(std::mem::take(&mut *refreshed));
+    }
 }
 
 fn prompt_completion_candidates(store: &SessionStore) -> Vec<String> {
@@ -1944,6 +1964,34 @@ mod tests {
     #[test]
     fn spinner_animation_advances_at_a_relaxed_cadence() {
         assert_eq!(SPINNER_UPDATE_INTERVAL, Duration::from_millis(128));
+    }
+
+    #[test]
+    fn detached_completion_work_does_not_delay_tokio_shutdown() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let candidates = Arc::new(RwLock::new(Vec::new()));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        spawn_detached_completion_refresh(Arc::clone(&candidates), move || {
+            started_tx.send(()).expect("signal start");
+            release_rx.recv().expect("wait for release");
+            vec!["/resume refreshed".to_string()]
+        });
+        started_rx.recv().expect("refresh started");
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            release_tx.send(()).expect("release refresh");
+        });
+        let shutdown_started = std::time::Instant::now();
+        drop(runtime);
+        assert!(
+            shutdown_started.elapsed() < Duration::from_millis(100),
+            "runtime shutdown waited for completion refresh"
+        );
+
+        releaser.join().expect("releaser");
     }
 
     #[test]
