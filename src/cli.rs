@@ -33,6 +33,7 @@ use crate::tools::ToolRegistry;
 
 const COMPLETION_MENU_NAME: &str = "completion_menu";
 const TOGGLE_TALK_HOST_COMMAND: &str = "agent:toggle-talk";
+const SPINNER_UPDATE_INTERVAL: Duration = Duration::from_millis(128);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PromptInput {
@@ -860,7 +861,7 @@ impl EscAbortWatcher {
                 let mut spinner_frame = 0;
                 let mut last_spinner_update = std::time::Instant::now();
                 while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
-                    if last_spinner_update.elapsed() >= Duration::from_millis(80) {
+                    if last_spinner_update.elapsed() >= SPINNER_UPDATE_INTERVAL {
                         spinner_frame += 1;
                         if let Some(display) = &display {
                             display.update_spinner(spinner_frame);
@@ -1912,6 +1913,11 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_animation_advances_at_a_relaxed_cadence() {
+        assert_eq!(SPINNER_UPDATE_INTERVAL, Duration::from_millis(128));
+    }
 
     #[test]
     fn prompt_completion_candidates_defer_saved_session_labels() {
