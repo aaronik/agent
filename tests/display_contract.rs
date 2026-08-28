@@ -240,6 +240,39 @@ fn working_footer_reserves_bottom_rows_and_renders_status_and_input() {
 }
 
 #[test]
+fn working_input_update_renders_multiline_text_on_multiple_footer_rows() {
+    let rendered = TerminalDisplay::format_working_input_update(
+        "first line\nsecond line",
+        22,
+        "INSERT",
+        "~/projects/agent",
+        24,
+    );
+
+    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
+    assert!(rendered.contains("first line"));
+    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
+    assert!(rendered.contains("second line│"));
+    assert!(!rendered.contains("first line↵second line"));
+}
+
+#[test]
+fn working_footer_resize_grows_reserved_input_rows() {
+    let rendered = TerminalDisplay::format_working_footer_resize(1, 2, 24);
+
+    assert!(rendered.contains("\x1b[r\x1b[1S\x1b[1;21r"));
+    assert!(rendered.ends_with("\x1b[u\x1b[1A"));
+}
+
+#[test]
+fn working_footer_resize_shrinks_reserved_input_rows() {
+    let rendered = TerminalDisplay::format_working_footer_resize(3, 1, 24);
+
+    assert!(rendered.contains("\x1b[r\x1b[2T\x1b[1;22r"));
+    assert!(rendered.ends_with("\x1b[u\x1b[2B"));
+}
+
+#[test]
 fn working_input_update_renders_typed_text_and_preserves_output_cursor() {
     let insert = TerminalDisplay::format_working_input_update(
         "next question",
@@ -280,7 +313,7 @@ fn spinner_update_redraws_only_the_indicator_before_folder() {
 #[test]
 fn working_footer_hides_real_cursor_and_finish_restores_it() {
     let start = TerminalDisplay::format_working_footer_start("status", 24);
-    let finish = TerminalDisplay::format_working_footer_finish(24);
+    let finish = TerminalDisplay::format_working_footer_finish(24, 1);
 
     assert!(start.starts_with("\x1b[?25l"));
     assert!(finish.ends_with("\x1b[u\x1b[?25h"));
@@ -304,7 +337,7 @@ fn working_footer_update_preserves_output_cursor() {
 
 #[test]
 fn working_footer_finish_restores_scroll_region_and_clears_footer() {
-    let rendered = TerminalDisplay::format_working_footer_finish(24);
+    let rendered = TerminalDisplay::format_working_footer_finish(24, 1);
 
     assert!(rendered.contains("\x1b[r"));
     assert!(rendered.contains("\x1b[23;1H\x1b[2K"));

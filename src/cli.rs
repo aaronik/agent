@@ -6,10 +6,10 @@ use crossterm::event::{
 #[cfg(not(unix))]
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reedline::{
-    Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, KeyCode, KeyModifiers,
-    Keybindings, ListMenu, MenuBuilder, PromptEditMode, PromptViMode, Reedline, ReedlineEvent,
-    ReedlineMenu, ReedlineRawEvent, Signal, Span, Suggestion, Vi, default_vi_insert_keybindings,
-    default_vi_normal_keybindings,
+    Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, History, KeyCode,
+    KeyModifiers, Keybindings, ListMenu, MenuBuilder, PromptEditMode, PromptViMode, Reedline,
+    ReedlineEvent, ReedlineMenu, ReedlineRawEvent, SearchDirection, SearchQuery, Signal, Span,
+    Suggestion, Vi, default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
 use std::cell::RefCell;
 use std::error::Error;
@@ -296,6 +296,7 @@ async fn run_with_args_and_prefill(
             EscAbortWatcher::spawn_with_display(
                 cancellation_token.clone(),
                 Some(Arc::clone(&display)),
+                load_prompt_history(&store).unwrap_or_default(),
             )
         };
         let observed_messages = RefCell::new(Vec::new());
@@ -593,9 +594,19 @@ struct WorkingVimEditor {
     mode: WorkingVimMode,
     pending_find: Option<PendingFind>,
     last_find: Option<FindMotion>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Option<Vec<char>>,
 }
 
 impl WorkingVimEditor {
+    fn with_history(history: Vec<String>) -> Self {
+        Self {
+            history,
+            ..Self::default()
+        }
+    }
+
     fn text(&self) -> String {
         self.characters.iter().collect()
     }
@@ -641,6 +652,8 @@ impl WorkingVimEditor {
     fn apply_insert(&mut self, code: CrosstermKeyCode) -> WorkingInputAction {
         match code {
             CrosstermKeyCode::Esc => self.mode = WorkingVimMode::Normal,
+            CrosstermKeyCode::Up => self.history_previous(),
+            CrosstermKeyCode::Down => self.history_next(),
             CrosstermKeyCode::Char(character) => {
                 self.characters.insert(self.cursor, character);
                 self.cursor += 1;
@@ -681,6 +694,8 @@ impl WorkingVimEditor {
         }
         match code {
             CrosstermKeyCode::Esc => return WorkingInputAction::Abort,
+            CrosstermKeyCode::Up => self.history_previous(),
+            CrosstermKeyCode::Down => self.history_next(),
             CrosstermKeyCode::Char('h') | CrosstermKeyCode::Left if self.cursor > 0 => {
                 self.cursor -= 1
             }
@@ -738,6 +753,40 @@ impl WorkingVimEditor {
             _ => return WorkingInputAction::Ignored,
         }
         WorkingInputAction::Redraw
+    }
+
+    fn history_previous(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let index = match self.history_index {
+            Some(0) => 0,
+            Some(index) => index - 1,
+            None => {
+                self.history_draft = Some(self.characters.clone());
+                self.history.len() - 1
+            }
+        };
+        self.set_history_entry(index);
+    }
+
+    fn history_next(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.history.len() {
+            self.set_history_entry(index + 1);
+        } else {
+            self.characters = self.history_draft.take().unwrap_or_default();
+            self.cursor = self.characters.len();
+            self.history_index = None;
+        }
+    }
+
+    fn set_history_entry(&mut self, index: usize) {
+        self.characters = self.history[index].chars().collect();
+        self.cursor = self.characters.len();
+        self.history_index = Some(index);
     }
 
     fn delete_previous_word(&mut self) {
@@ -868,15 +917,18 @@ impl EscAbortWatcher {
     }
 
     pub fn spawn(cancellation_token: CancellationToken) -> Self {
-        Self::spawn_with_display(cancellation_token, None)
+        Self::spawn_with_display(cancellation_token, None, Vec::new())
     }
 
     pub fn spawn_with_display(
         cancellation_token: CancellationToken,
         display: Option<Arc<TerminalDisplay>>,
+        history: Vec<String>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let editor = Arc::new(std::sync::Mutex::new(WorkingVimEditor::default()));
+        let editor = Arc::new(std::sync::Mutex::new(WorkingVimEditor::with_history(
+            history,
+        )));
         let handle = std::io::stdin().is_terminal().then(|| {
             let stop_watcher = Arc::clone(&stop);
             let watcher_editor = Arc::clone(&editor);
@@ -1136,6 +1188,15 @@ fn replay_session(session: &Session, display: &TerminalDisplay) {
             _ => {}
         }
     }
+}
+
+fn load_prompt_history(store: &SessionStore) -> reedline::Result<Vec<String>> {
+    let history = FileBackedHistory::with_file(10_000, store.prompt_history_path())?;
+    Ok(history
+        .search(SearchQuery::everything(SearchDirection::Forward, None))?
+        .into_iter()
+        .map(|item| item.command_line)
+        .collect())
 }
 
 async fn prompt_for_input(
@@ -2143,6 +2204,41 @@ mod tests {
 
         assert_eq!(session.session_id, "latest-voice-session");
         assert_eq!(session.messages[0].content(), "prior voice turn");
+    }
+
+    #[test]
+    fn working_vim_arrows_navigate_prompt_history_and_restore_draft() {
+        let mut editor = WorkingVimEditor::with_history(vec![
+            "first prompt".to_string(),
+            "second prompt".to_string(),
+        ]);
+        editor.apply(Event::Paste("draft".to_string()));
+
+        editor.apply(key_event(CrosstermKeyCode::Up));
+        assert_eq!(editor.text(), "second prompt");
+        editor.apply(key_event(CrosstermKeyCode::Up));
+        assert_eq!(editor.text(), "first prompt");
+        editor.apply(key_event(CrosstermKeyCode::Up));
+        assert_eq!(editor.text(), "first prompt");
+
+        editor.apply(key_event(CrosstermKeyCode::Down));
+        assert_eq!(editor.text(), "second prompt");
+        editor.apply(key_event(CrosstermKeyCode::Down));
+        assert_eq!(editor.text(), "draft");
+    }
+
+    #[test]
+    fn working_vim_normal_mode_arrows_navigate_prompt_history() {
+        let mut editor = WorkingVimEditor::with_history(vec!["previous".to_string()]);
+        editor.apply(key_event(CrosstermKeyCode::Esc));
+
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Up)),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.text(), "previous");
+        assert_eq!(editor.cursor, "previous".chars().count());
+        assert_eq!(editor.mode, WorkingVimMode::Normal);
     }
 
     #[test]

@@ -26,7 +26,13 @@ struct ActiveToolCall {
 pub struct TerminalDisplay {
     live_enabled: bool,
     active_calls: Mutex<HashMap<String, ActiveToolCall>>,
-    working_footer_height: Mutex<Option<u16>>,
+    working_footer: Mutex<Option<WorkingFooter>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkingFooter {
+    terminal_height: u16,
+    input_rows: u16,
 }
 
 impl Default for TerminalDisplay {
@@ -40,7 +46,7 @@ impl TerminalDisplay {
         Self {
             live_enabled: std::env::var("AGENT_NO_LIVE").ok().as_deref() != Some("1"),
             active_calls: Mutex::new(HashMap::new()),
-            working_footer_height: Mutex::new(None),
+            working_footer: Mutex::new(None),
         }
     }
 
@@ -59,84 +65,91 @@ impl TerminalDisplay {
                 "{}",
                 Self::format_working_footer_start(&status_line, height)
             );
-            if let Ok(mut footer_height) = self.working_footer_height.lock() {
-                *footer_height = Some(height);
+            if let Ok(mut footer) = self.working_footer.lock() {
+                *footer = Some(WorkingFooter {
+                    terminal_height: height,
+                    input_rows: 1,
+                });
             }
         }
         flush_stdout();
     }
 
     pub fn update_working_footer(&self, status_line: &str) {
-        let height = self
-            .working_footer_height
-            .lock()
-            .ok()
-            .and_then(|height| *height);
-        if let Some(height) = height {
+        let footer = self.working_footer.lock().ok().and_then(|footer| *footer);
+        if let Some(footer) = footer {
             let status_line = crossterm::terminal::size()
                 .ok()
                 .map(|(width, _)| truncate_to_width(status_line, width as usize))
                 .unwrap_or_else(|| status_line.to_string());
             print!(
                 "{}",
-                Self::format_working_footer_update(&status_line, height)
+                Self::format_working_footer_update_rows(
+                    &status_line,
+                    footer.terminal_height,
+                    footer.input_rows,
+                )
             );
             flush_stdout();
         }
     }
 
     pub fn update_working_input(&self, input: &str, cursor: usize, mode: &str) {
-        let height = self
-            .working_footer_height
-            .lock()
-            .ok()
-            .and_then(|height| *height);
-        if let Some(height) = height {
-            let prompt = working_directory_prompt();
-            let available_width = crossterm::terminal::size()
-                .ok()
-                .map(|(width, _)| (width as usize).saturating_sub(prompt.chars().count() + 5))
-                .unwrap_or(usize::MAX);
-            let total = input.chars().count();
-            let window_start = cursor.saturating_sub(available_width);
-            let visible = input
-                .chars()
-                .skip(window_start)
-                .take(available_width)
-                .collect::<String>();
-            let visible_cursor = cursor
-                .saturating_sub(window_start)
-                .min(visible.chars().count());
+        let Ok(mut footer_guard) = self.working_footer.lock() else {
+            return;
+        };
+        let Some(mut footer) = *footer_guard else {
+            return;
+        };
+        let max_input_rows = footer.terminal_height.saturating_sub(2).max(1);
+        let input_rows = (input.split('\n').count().max(1) as u16).min(max_input_rows);
+        if input_rows != footer.input_rows {
             print!(
                 "{}",
-                Self::format_working_input_update(&visible, visible_cursor, mode, &prompt, height,)
+                Self::format_working_footer_resize(
+                    footer.input_rows,
+                    input_rows,
+                    footer.terminal_height,
+                )
             );
-            flush_stdout();
-            debug_assert!(cursor <= total);
+            footer.input_rows = input_rows;
+            *footer_guard = Some(footer);
         }
+        print!(
+            "{}",
+            Self::format_working_input_update(
+                input,
+                cursor,
+                mode,
+                &working_directory_prompt(),
+                footer.terminal_height,
+            )
+        );
+        flush_stdout();
+        debug_assert!(cursor <= input.chars().count());
     }
 
     pub fn update_spinner(&self, frame_index: usize) {
-        let height = self
-            .working_footer_height
-            .lock()
-            .ok()
-            .and_then(|height| *height);
-        if let Some(height) = height {
+        let footer = self.working_footer.lock().ok().and_then(|footer| *footer);
+        if let Some(footer) = footer {
             let frame = SPINNER_FRAMES[frame_index % SPINNER_FRAMES.len()];
-            print!("{}", Self::format_spinner_update(frame, height));
+            let input_start = footer.terminal_height - footer.input_rows + 1;
+            print!("{}", Self::format_spinner_update(frame, input_start));
             flush_stdout();
         }
     }
 
     pub fn finish_turn(&self) {
-        let height = self
-            .working_footer_height
+        let footer = self
+            .working_footer
             .lock()
             .ok()
-            .and_then(|mut height| height.take());
-        if let Some(height) = height {
-            print!("{}", Self::format_working_footer_finish(height));
+            .and_then(|mut footer| footer.take());
+        if let Some(footer) = footer {
+            print!(
+                "{}",
+                Self::format_working_footer_finish(footer.terminal_height, footer.input_rows,)
+            );
             flush_stdout();
         }
     }
@@ -151,8 +164,31 @@ impl TerminalDisplay {
     }
 
     pub fn format_working_footer_update(status_line: &str, height: u16) -> String {
-        let status_row = height.saturating_sub(1).max(1);
+        Self::format_working_footer_update_rows(status_line, height, 1)
+    }
+
+    fn format_working_footer_update_rows(
+        status_line: &str,
+        height: u16,
+        input_rows: u16,
+    ) -> String {
+        let status_row = height.saturating_sub(input_rows).max(1);
         format!("\x1b[s\x1b[{status_row};1H\x1b[2K{status_line}\x1b[u")
+    }
+
+    pub fn format_working_footer_resize(old_rows: u16, new_rows: u16, height: u16) -> String {
+        let old_rows = old_rows.max(1);
+        let new_rows = new_rows.max(1);
+        let output_bottom = height.saturating_sub(new_rows + 1).max(1);
+        if new_rows > old_rows {
+            let growth = new_rows - old_rows;
+            format!("\x1b[s\x1b[r\x1b[{growth}S\x1b[1;{output_bottom}r\x1b[u\x1b[{growth}A")
+        } else if old_rows > new_rows {
+            let shrink = old_rows - new_rows;
+            format!("\x1b[s\x1b[r\x1b[{shrink}T\x1b[1;{output_bottom}r\x1b[u\x1b[{shrink}B")
+        } else {
+            String::new()
+        }
     }
 
     pub fn format_working_input_update(
@@ -163,12 +199,35 @@ impl TerminalDisplay {
         height: u16,
     ) -> String {
         let split = char_byte_index(input, cursor);
-        let (before, after) = input.split_at(split);
+        let mut marked = String::with_capacity(input.len() + 3);
+        marked.push_str(&input[..split]);
+        marked.push('│');
+        marked.push_str(&input[split..]);
+        let lines = marked.split('\n').collect::<Vec<_>>();
+        let max_rows = height.saturating_sub(2).max(1) as usize;
+        let first_line = lines.len().saturating_sub(max_rows);
+        let visible = &lines[first_line..];
+        let start_row = height
+            .saturating_sub(visible.len() as u16)
+            .saturating_add(1);
         let indicator = if mode == "NORMAL" { "〉" } else { ": " };
-        format!(
-            "\x1b[s\x1b[{height};1H\x1b[2K\x1b[38;5;14m{} \x1b[38;5;10m{prompt}\x1b[38;5;14m{indicator}\x1b[38;5;7m{before}│{after}{RESET}\x1b[u",
-            SPINNER_FRAMES[0]
-        )
+        let mut rendered = String::from("\x1b[s");
+        for (index, line) in visible.iter().enumerate() {
+            let row = start_row + index as u16;
+            rendered.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            if index == 0 {
+                rendered.push_str(&format!(
+                    "\x1b[38;5;14m{} \x1b[38;5;10m{prompt}\x1b[38;5;14m{indicator}\x1b[38;5;7m",
+                    SPINNER_FRAMES[0]
+                ));
+            } else {
+                rendered.push_str("\x1b[38;5;14m  · \x1b[38;5;7m");
+            }
+            rendered.push_str(&working_input_preview(line));
+            rendered.push_str(RESET);
+        }
+        rendered.push_str("\x1b[u");
+        rendered
     }
 
     pub fn format_spinner_update(frame: &str, height: u16) -> String {
@@ -179,9 +238,14 @@ impl TerminalDisplay {
         ""
     }
 
-    pub fn format_working_footer_finish(height: u16) -> String {
-        let status_row = height.saturating_sub(1).max(1);
-        format!("\x1b[s\x1b[r\x1b[{status_row};1H\x1b[2K\x1b[{height};1H\x1b[2K\x1b[u\x1b[?25h")
+    pub fn format_working_footer_finish(height: u16, input_rows: u16) -> String {
+        let status_row = height.saturating_sub(input_rows).max(1);
+        let mut rendered = String::from("\x1b[s\x1b[r");
+        for row in status_row..=height {
+            rendered.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+        }
+        rendered.push_str("\x1b[u\x1b[?25h");
+        rendered
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {
@@ -568,6 +632,18 @@ fn working_directory_prompt() -> String {
         }
     }
     path
+}
+
+fn working_input_preview(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\n' => '↵',
+            '\r' => '↵',
+            '\t' => '→',
+            character if character.is_control() => '�',
+            character => character,
+        })
+        .collect()
 }
 
 fn char_byte_index(text: &str, character_index: usize) -> usize {
