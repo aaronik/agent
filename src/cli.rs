@@ -617,6 +617,16 @@ impl WorkingVimEditor {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return WorkingInputAction::Ignored;
         }
+        if key.modifiers == CrosstermKeyModifiers::CONTROL
+            && self.mode == WorkingVimMode::Insert
+            && matches!(
+                key.code,
+                CrosstermKeyCode::Char('w') | CrosstermKeyCode::Char('W')
+            )
+        {
+            self.delete_previous_word();
+            return WorkingInputAction::Redraw;
+        }
         if key.modifiers != CrosstermKeyModifiers::NONE
             && key.modifiers != CrosstermKeyModifiers::SHIFT
         {
@@ -717,12 +727,29 @@ impl WorkingVimEditor {
                 self.cursor = self.characters.len();
                 self.mode = WorkingVimMode::Insert;
             }
+            CrosstermKeyCode::Char('D') => self.characters.truncate(self.cursor),
+            CrosstermKeyCode::Char('C') => {
+                self.characters.truncate(self.cursor);
+                self.mode = WorkingVimMode::Insert;
+            }
             CrosstermKeyCode::Char('x') if self.cursor < self.characters.len() => {
                 self.characters.remove(self.cursor);
             }
             _ => return WorkingInputAction::Ignored,
         }
         WorkingInputAction::Redraw
+    }
+
+    fn delete_previous_word(&mut self) {
+        let mut start = self.cursor;
+        while start > 0 && self.characters[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !self.characters[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        self.characters.drain(start..self.cursor);
+        self.cursor = start;
     }
 
     fn begin_find(&mut self, direction: FindDirection, till: bool) {
@@ -2105,6 +2132,47 @@ mod tests {
         assert_eq!(editor.text(), "hello");
         assert_eq!(editor.cursor, 4);
         assert_eq!(editor.mode, WorkingVimMode::Insert);
+    }
+
+    #[test]
+    fn working_vim_normal_mode_supports_change_and_delete_to_line_end() {
+        let mut editor = editor_in_normal_mode("hello world");
+        editor.cursor = 6;
+
+        editor.apply(key_event(CrosstermKeyCode::Char('D')));
+        assert_eq!(editor.text(), "hello ");
+        assert_eq!(editor.cursor, 6);
+        assert_eq!(editor.mode, WorkingVimMode::Normal);
+
+        editor = editor_in_normal_mode("hello world");
+        editor.cursor = 6;
+        editor.apply(key_event(CrosstermKeyCode::Char('C')));
+        assert_eq!(editor.text(), "hello ");
+        assert_eq!(editor.cursor, 6);
+        assert_eq!(editor.mode, WorkingVimMode::Insert);
+    }
+
+    #[test]
+    fn working_vim_insert_mode_ctrl_w_deletes_the_previous_word() {
+        let mut editor = WorkingVimEditor::default();
+        editor.apply(Event::Paste("hello, world".to_string()));
+
+        assert_eq!(
+            editor.apply(Event::Key(crossterm::event::KeyEvent::new(
+                CrosstermKeyCode::Char('w'),
+                CrosstermKeyModifiers::CONTROL,
+            ))),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.text(), "hello, ");
+        assert_eq!(editor.cursor, 7);
+
+        editor.apply(Event::Key(crossterm::event::KeyEvent::new(
+            CrosstermKeyCode::Char('w'),
+            CrosstermKeyModifiers::CONTROL,
+        )));
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.cursor, 0);
     }
 
     #[test]
