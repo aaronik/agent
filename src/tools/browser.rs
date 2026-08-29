@@ -156,6 +156,16 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     }
 }
 
+pub async fn shutdown_browser_session() {
+    let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
+    let session = session_mutex.lock().await.take();
+    if let Some(session) = session {
+        close_session(session).await;
+    } else {
+        cleanup_stale_chrome_code_sign_clones();
+    }
+}
+
 async fn start_session(
     url: Option<&str>,
     visible: bool,
@@ -679,6 +689,37 @@ impl Drop for TempDirGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_browser_session_stops_chrome_and_removes_its_profile() {
+        let temp = TempDirGuard::new().expect("temporary browser directory");
+        let profile_path = temp.path.clone();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .kill_on_drop(true);
+        let child = command.spawn().expect("sleeping browser stand-in");
+
+        let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
+        let mut session_guard = session_mutex.lock().await;
+        assert!(
+            session_guard.is_none(),
+            "test requires no active browser session"
+        );
+        *session_guard = Some(BrowserSession {
+            port: 0,
+            child,
+            temp,
+            visible: false,
+            signed_in: false,
+        });
+        drop(session_guard);
+
+        shutdown_browser_session().await;
+
+        assert!(!profile_path.exists());
+    }
 
     #[test]
     fn chrome_launch_args_default_to_headless() {

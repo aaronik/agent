@@ -1,8 +1,11 @@
 use agent_rs::cli;
+use agent_rs::tools::browser::shutdown_browser_session;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match cli::run().await {
+    let result = cli::run().await;
+    shutdown_browser_session().await;
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
