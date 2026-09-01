@@ -14,6 +14,7 @@ use reedline::{
 use std::cell::RefCell;
 use std::error::Error;
 use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -1219,9 +1220,10 @@ async fn prompt_for_input(
     )?);
     let dynamic_candidates = Arc::new(RwLock::new(Vec::new()));
     spawn_completion_refresh(Arc::clone(&dynamic_candidates), store.clone());
-    let completer = Box::new(AgentCompleter::with_dynamic_candidates(
+    let completer = Box::new(AgentCompleter::with_dynamic_candidates_and_dir(
         prompt_completion_candidates(store),
         dynamic_candidates,
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     ));
     let mut line_editor = Reedline::create()
         .use_bracketed_paste(true)
@@ -1760,27 +1762,44 @@ pub fn completion_values_for_line_with_models(
 struct AgentCompleter {
     candidates: Vec<String>,
     dynamic_candidates: Option<Arc<RwLock<Vec<String>>>>,
+    working_dir: PathBuf,
 }
 
 impl AgentCompleter {
     fn new(candidates: Vec<String>) -> Self {
-        Self::from_parts(candidates, None)
+        Self::from_parts(candidates, None, current_working_dir())
     }
 
+    #[cfg(test)]
+    fn with_dir(candidates: Vec<String>, working_dir: PathBuf) -> Self {
+        Self::from_parts(candidates, None, working_dir)
+    }
+
+    #[cfg(test)]
     fn with_dynamic_candidates(
         candidates: Vec<String>,
         dynamic_candidates: Arc<RwLock<Vec<String>>>,
     ) -> Self {
-        Self::from_parts(candidates, Some(dynamic_candidates))
+        Self::from_parts(candidates, Some(dynamic_candidates), current_working_dir())
+    }
+
+    fn with_dynamic_candidates_and_dir(
+        candidates: Vec<String>,
+        dynamic_candidates: Arc<RwLock<Vec<String>>>,
+        working_dir: PathBuf,
+    ) -> Self {
+        Self::from_parts(candidates, Some(dynamic_candidates), working_dir)
     }
 
     fn from_parts(
         candidates: Vec<String>,
         dynamic_candidates: Option<Arc<RwLock<Vec<String>>>>,
+        working_dir: PathBuf,
     ) -> Self {
         Self {
             candidates: dedup_preserving_order(candidates),
             dynamic_candidates,
+            working_dir,
         }
     }
 
@@ -1803,15 +1822,8 @@ fn dedup_preserving_order(candidates: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-impl Completer for AgentCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let Some(prefix) = line.get(..pos) else {
-            return Vec::new();
-        };
-        if !prefix.starts_with('/') {
-            return Vec::new();
-        }
-
+impl AgentCompleter {
+    fn complete_command(&self, prefix: &str, pos: usize) -> Vec<Suggestion> {
         let span = Span::new(0, pos);
         let candidates = self.candidates();
         let mut matches = candidates
@@ -1839,6 +1851,86 @@ impl Completer for AgentCompleter {
                 ..Default::default()
             })
             .collect()
+    }
+
+    fn complete_filename(&self, prefix: &str, pos: usize) -> Vec<Suggestion> {
+        let token_start = prefix
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        let token = &prefix[token_start..];
+        if token.is_empty() {
+            return Vec::new();
+        }
+        let token = token.trim_end_matches('/');
+        let token = if prefix[token_start..].ends_with('/') {
+            format!("{token}/")
+        } else {
+            token.to_string()
+        };
+
+        let path = Path::new(&token);
+        let (parent, name_prefix) = if token.ends_with('/') {
+            (path, "")
+        } else {
+            (
+                path.parent().unwrap_or_else(|| Path::new("")),
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(""),
+            )
+        };
+        let search_dir = self.working_dir.join(parent);
+        let Ok(entries) = std::fs::read_dir(search_dir) else {
+            return Vec::new();
+        };
+
+        let mut values = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                if name.starts_with('.') && !name_prefix.starts_with('.') {
+                    return None;
+                }
+                if !name.to_lowercase().starts_with(&name_prefix.to_lowercase()) {
+                    return None;
+                }
+                let mut value = parent.join(&name).to_string_lossy().into_owned();
+                if entry.file_type().ok()?.is_dir() {
+                    value.push('/');
+                }
+                Some(value)
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+
+        values
+            .into_iter()
+            .map(|value| Suggestion {
+                value,
+                span: Span::new(token_start, pos),
+                append_whitespace: false,
+                ..Default::default()
+            })
+            .collect()
+    }
+}
+
+fn current_working_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+impl Completer for AgentCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let Some(prefix) = line.get(..pos) else {
+            return Vec::new();
+        };
+        if prefix.starts_with('/') {
+            self.complete_command(prefix, pos)
+        } else {
+            self.complete_filename(prefix, pos)
+        }
     }
 }
 
@@ -1894,7 +1986,7 @@ impl SlashCompletionVi {
             }
             ReedlineEvent::Enter | ReedlineEvent::Submit if self.slash_completion_active => {
                 self.slash_completion_active = false;
-                ReedlineEvent::Multiple(vec![ReedlineEvent::Enter, ReedlineEvent::Enter])
+                ReedlineEvent::Enter
             }
             ReedlineEvent::Esc => {
                 self.slash_completion_active = false;
@@ -2555,7 +2647,7 @@ mod completion_input_tests {
     }
 
     #[test]
-    fn enter_after_auto_opened_slash_completion_accepts_and_submits() {
+    fn enter_after_auto_opened_slash_completion_accepts_without_submitting() {
         let mut mode = agent_vi_mode();
 
         assert!(matches!(
@@ -2567,11 +2659,7 @@ mod completion_input_tests {
                 ]
         ));
 
-        assert!(matches!(
-            mode.parse_event(key(KeyCode::Enter)),
-            ReedlineEvent::Multiple(events)
-                if events == vec![ReedlineEvent::Enter, ReedlineEvent::Enter]
-        ));
+        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
     }
 
     #[test]
