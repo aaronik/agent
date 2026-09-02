@@ -1336,8 +1336,15 @@ async fn handle_slash_command(
             compact_session(store, session, model_name, rest).await?;
         }
         "/allow-git" => {
-            *allow_git_writes = true;
-            println!("git write commands allowed for this session");
+            *allow_git_writes = !*allow_git_writes;
+            println!(
+                "git write commands {} for this session",
+                if *allow_git_writes {
+                    "allowed"
+                } else {
+                    "blocked"
+                }
+            );
         }
         "/clear" | "/new" => {
             let new_session = load_or_create_session(
@@ -1546,7 +1553,7 @@ fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bo
 }
 
 fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
-    let mut help = "Available commands:\n  /allow-git\n      Allow git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
         .to_string();
     let project_dir = std::env::current_dir()?;
     for skill in crate::skills::discover(store.root(), &project_dir)? {
@@ -2145,6 +2152,45 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn allow_git_slash_command_toggles_git_write_access() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SessionStore::with_root(temp.path().join(".agent"));
+        let args = Args::parse_from(["agent"]);
+        let display = TerminalDisplay::new();
+        let mut session = Session::new("test-session".to_string(), Vec::new());
+        let mut allow_git_writes = false;
+
+        assert_eq!(
+            handle_slash_command(
+                "/allow-git",
+                &args,
+                &store,
+                &mut session,
+                &display,
+                "mock",
+                &mut allow_git_writes,
+            )
+            .await
+            .expect("enable command"),
+            SlashCommandResult::Handled
+        );
+        assert!(allow_git_writes);
+
+        handle_slash_command(
+            "/allow-git",
+            &args,
+            &store,
+            &mut session,
+            &display,
+            "mock",
+            &mut allow_git_writes,
+        )
+        .await
+        .expect("disable command");
+        assert!(!allow_git_writes);
+    }
 
     #[test]
     fn spinner_animation_advances_at_a_relaxed_cadence() {
