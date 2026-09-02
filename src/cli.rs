@@ -301,19 +301,40 @@ async fn run_with_args_and_prefill(
             )
         };
         let observed_messages = RefCell::new(Vec::new());
+        let streamed_assistant_content = Arc::new(std::sync::Mutex::new(String::new()));
         let persistence_error = RefCell::new(None);
+        let streamed_assistant_content_for_events = Arc::clone(&streamed_assistant_content);
         let result = tokio::select! {
             result = loop_runner
                 .as_ref()
                 .expect("loop runner initialized")
-                .run_turn_cancellable_with_observer(
+                .run_turn_cancellable_with_event_observer(
                     &session.messages,
                     &cancellation_token,
-                    |message| {
-                        if let AgentMessage::Tool(result) = message {
-                            display.render_tool_result(result);
+                    |event| {
+                        if let crate::agent::ProviderEvent::TextDelta { text } = event {
+                            display.render_assistant_delta(text);
+                            if let Ok(mut content) = streamed_assistant_content_for_events.lock() {
+                                content.push_str(text);
+                            }
                         }
-                        display.render_new_message(message);
+                    },
+                    |message| {
+                        let streamed_content = streamed_assistant_content
+                            .lock()
+                            .map(|content| content.clone())
+                            .unwrap_or_default();
+                        let render_message = !matches!(
+                            message,
+                            AgentMessage::Assistant(assistant)
+                                if !streamed_content.is_empty() && assistant.content == streamed_content
+                        );
+                        if render_message {
+                            if let AgentMessage::Tool(result) = message {
+                                display.render_tool_result(result);
+                            }
+                            display.render_new_message(message);
+                        }
                         observed_messages.borrow_mut().push(message.clone());
                         let mut status_messages = session.messages.clone();
                         status_messages.extend(observed_messages.borrow().iter().cloned());
@@ -1241,9 +1262,12 @@ async fn prompt_for_input(
         .with_edit_mode(Box::new(agent_vi_mode()));
     set_cursor_style_for_mode(PromptEditMode::Vi(PromptViMode::Insert));
     let prompt = DefaultPrompt::default();
-    println!(
-        "\n{}",
-        format_cost_and_context_line(&session.messages, model_name)
+    print!(
+        "{}",
+        TerminalDisplay::format_standalone_footer(&format_cost_and_context_line(
+            &session.messages,
+            model_name
+        ))
     );
     seed_line_editor_prefill(&mut line_editor, prefill);
 

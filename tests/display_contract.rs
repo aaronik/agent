@@ -45,6 +45,22 @@ fn assistant_markdown_renders_common_markdown_features() {
 }
 
 #[test]
+fn standalone_footer_keeps_a_blank_separator_above_status() {
+    assert_eq!(
+        TerminalDisplay::format_standalone_footer("Cost: $0"),
+        "\n\nCost: $0"
+    );
+}
+
+#[test]
+fn working_footer_reserves_a_blank_separator_above_status() {
+    let rendered = TerminalDisplay::format_working_footer_start("Cost: $0", 24);
+    assert!(rendered.contains("\x1b[1;21r"));
+    assert!(rendered.contains("\x1b[22;1H\x1b[2K"));
+    assert!(rendered.contains("\x1b[23;1H\x1b[2KCost: $0"));
+}
+
+#[test]
 fn assistant_plain_text_content_is_preserved() {
     let display = TerminalDisplay::new();
     let rendered = display.format_assistant_content("Plain text");
@@ -227,16 +243,16 @@ fn working_footer_reserves_bottom_rows_and_renders_status_and_input() {
         24,
     );
 
-    assert!(rendered.contains("\x1b[1;22r"));
+    assert!(rendered.contains("\x1b[1;21r"));
     assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
     assert!(rendered.contains("cost: $0.01"));
     assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
     assert!(rendered.contains("\x1b[38;5;14m: \x1b[38;5;7m│"));
     assert!(!rendered.contains("Working..."));
     assert!(!rendered.contains("-- INSERT --"));
-    assert!(rendered.starts_with("\x1b[?25l\x1b[r\x1b[2S\x1b[1;22r"));
-    assert!(rendered.ends_with("\x1b[22;1H\n"));
-    assert!(!rendered.contains("\x1b[s\x1b[1;22r"));
+    assert!(rendered.starts_with("\x1b[?25l\x1b[r\x1b[3S\x1b[1;21r"));
+    assert!(rendered.ends_with("\x1b[21;1H\n"));
+    assert!(!rendered.contains("\x1b[s\x1b[1;21r"));
 }
 
 #[test]
@@ -260,7 +276,7 @@ fn working_input_update_renders_multiline_text_on_multiple_footer_rows() {
 fn working_footer_resize_grows_reserved_input_rows() {
     let rendered = TerminalDisplay::format_working_footer_resize(1, 2, 24);
 
-    assert!(rendered.contains("\x1b[r\x1b[1S\x1b[1;21r"));
+    assert!(rendered.contains("\x1b[r\x1b[1S\x1b[1;20r"));
     assert!(rendered.ends_with("\x1b[u\x1b[1A"));
 }
 
@@ -268,7 +284,7 @@ fn working_footer_resize_grows_reserved_input_rows() {
 fn working_footer_resize_shrinks_reserved_input_rows() {
     let rendered = TerminalDisplay::format_working_footer_resize(3, 1, 24);
 
-    assert!(rendered.contains("\x1b[r\x1b[2T\x1b[1;22r"));
+    assert!(rendered.contains("\x1b[r\x1b[2T\x1b[1;21r"));
     assert!(rendered.ends_with("\x1b[u\x1b[2B"));
 }
 

@@ -81,11 +81,27 @@ impl OpenAiCompatibleProvider {
         parse_responses_response(value)
     }
 
+    async fn emit_stream_events(
+        &self,
+        messages: &[AgentMessage],
+        tools: &[ToolDefinition],
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
+        match self.config.flavor {
+            ProviderFlavor::OpenAiChat => self.stream_chat_events(messages, tools, on_event).await,
+            ProviderFlavor::OpenAiResponses => {
+                self.stream_responses_events(messages, tools, on_event)
+                    .await
+            }
+        }
+    }
+
     async fn stream_chat_events(
         &self,
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
-    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
         let mut stream = self
             .client
             .chat()
@@ -102,7 +118,6 @@ impl OpenAiCompatibleProvider {
             .await
             .map_err(|err| ProviderError::Request(err.to_string()))?;
 
-        let mut events = Vec::new();
         let mut content = String::new();
         let mut tool_calls = BTreeMap::new();
         let mut usage = None;
@@ -111,7 +126,7 @@ impl OpenAiCompatibleProvider {
             let chunk: Value = chunk.map_err(|err| ProviderError::Request(err.to_string()))?;
             if let Some(chunk_usage) = parse_usage(chunk.get("usage")) {
                 usage = Some(chunk_usage.clone());
-                events.push(ProviderEvent::Usage { usage: chunk_usage });
+                on_event(ProviderEvent::Usage { usage: chunk_usage });
             }
 
             let Some(choices) = chunk.get("choices").and_then(Value::as_array) else {
@@ -123,21 +138,21 @@ impl OpenAiCompatibleProvider {
                 };
                 if let Some(text) = delta.get("content").and_then(Value::as_str) {
                     content.push_str(text);
-                    events.push(ProviderEvent::TextDelta {
+                    on_event(ProviderEvent::TextDelta {
                         text: text.to_string(),
                     });
                 }
                 if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                    ingest_tool_call_deltas(calls, &mut tool_calls, &mut events);
+                    ingest_tool_call_deltas(calls, &mut tool_calls, on_event);
                 }
             }
         }
 
         let final_tool_calls = finalize_tool_calls(tool_calls);
         for call in &final_tool_calls {
-            events.push(ProviderEvent::ToolCall { call: call.clone() });
+            on_event(ProviderEvent::ToolCall { call: call.clone() });
         }
-        events.push(ProviderEvent::FinalMessage {
+        on_event(ProviderEvent::FinalMessage {
             message: AssistantMessage {
                 content,
                 tool_calls: final_tool_calls,
@@ -146,14 +161,15 @@ impl OpenAiCompatibleProvider {
                 metadata: Map::new(),
             },
         });
-        Ok(events)
+        Ok(())
     }
 
     async fn stream_responses_events(
         &self,
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
-    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
         let mut stream = self
             .client
             .responses()
@@ -169,7 +185,6 @@ impl OpenAiCompatibleProvider {
             .await
             .map_err(|err| ProviderError::Request(err.to_string()))?;
 
-        let mut events = Vec::new();
         let mut content = String::new();
         let mut final_message = None;
 
@@ -179,14 +194,14 @@ impl OpenAiCompatibleProvider {
                 Some("response.output_text.delta") => {
                     if let Some(delta) = chunk.get("delta").and_then(Value::as_str) {
                         content.push_str(delta);
-                        events.push(ProviderEvent::TextDelta {
+                        on_event(ProviderEvent::TextDelta {
                             text: delta.to_string(),
                         });
                     }
                 }
                 Some("response.function_call_arguments.delta") => {
                     if let Some(delta) = chunk.get("delta").and_then(Value::as_str) {
-                        events.push(ProviderEvent::ToolCallDelta {
+                        on_event(ProviderEvent::ToolCallDelta {
                             id: chunk
                                 .get("call_id")
                                 .or_else(|| chunk.get("item_id"))
@@ -204,10 +219,10 @@ impl OpenAiCompatibleProvider {
                     };
                     let message = parse_responses_response(response.clone())?;
                     if let Some(usage) = message.usage.clone() {
-                        events.push(ProviderEvent::Usage { usage });
+                        on_event(ProviderEvent::Usage { usage });
                     }
                     for call in &message.tool_calls {
-                        events.push(ProviderEvent::ToolCall { call: call.clone() });
+                        on_event(ProviderEvent::ToolCall { call: call.clone() });
                     }
                     final_message = Some(message);
                 }
@@ -225,8 +240,8 @@ impl OpenAiCompatibleProvider {
             model: None,
             metadata: Map::new(),
         });
-        events.push(ProviderEvent::FinalMessage { message });
-        Ok(events)
+        on_event(ProviderEvent::FinalMessage { message });
+        Ok(())
     }
 }
 
@@ -243,15 +258,13 @@ impl Provider for OpenAiCompatibleProvider {
         }
     }
 
-    async fn events(
+    async fn stream_events(
         &self,
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
-    ) -> Result<Vec<ProviderEvent>, ProviderError> {
-        match self.config.flavor {
-            ProviderFlavor::OpenAiChat => self.stream_chat_events(messages, tools).await,
-            ProviderFlavor::OpenAiResponses => self.stream_responses_events(messages, tools).await,
-        }
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
+        self.emit_stream_events(messages, tools, on_event).await
     }
 }
 
@@ -430,7 +443,7 @@ fn parse_chat_tool_call(value: &Value) -> Option<ToolCall> {
 fn ingest_tool_call_deltas(
     calls: &[Value],
     tool_calls: &mut BTreeMap<u64, StreamingToolCall>,
-    events: &mut Vec<ProviderEvent>,
+    on_event: &mut (dyn FnMut(ProviderEvent) + Send),
 ) {
     for call in calls {
         let index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -451,7 +464,7 @@ fn ingest_tool_call_deltas(
             }
         }
         if !arguments_delta.is_empty() || name.is_some() {
-            events.push(ProviderEvent::ToolCallDelta {
+            on_event(ProviderEvent::ToolCallDelta {
                 id: entry.id.clone().unwrap_or_else(|| format!("call_{index}")),
                 name,
                 arguments_delta,

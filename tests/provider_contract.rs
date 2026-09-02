@@ -425,6 +425,81 @@ fn sse_body(chunks: Vec<serde_json::Value>) -> String {
 }
 
 #[tokio::test]
+async fn agent_loop_observes_text_deltas_before_the_final_message() {
+    #[derive(Clone, Debug)]
+    struct StreamingProvider;
+
+    #[async_trait]
+    impl Provider for StreamingProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            unreachable!("the loop must use stream_events")
+        }
+
+        async fn stream_events(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+            on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+        ) -> Result<(), ProviderError> {
+            on_event(ProviderEvent::TextDelta {
+                text: "hel".to_string(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            on_event(ProviderEvent::TextDelta {
+                text: "lo".to_string(),
+            });
+            on_event(ProviderEvent::FinalMessage {
+                message: AssistantMessage {
+                    content: "hello".to_string(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    model: None,
+                    metadata: Default::default(),
+                },
+            });
+            Ok(())
+        }
+    }
+
+    let loop_runner = AgentLoop::new(
+        StreamingProvider,
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 1,
+            max_context_tokens: 16_384,
+            model: "mock".to_string(),
+        },
+    );
+    let mut observed_events = Vec::new();
+    let mut observed_messages = Vec::new();
+    let result = loop_runner
+        .run_turn_cancellable_with_event_observer(
+            &[AgentMessage::User {
+                content: "stream".to_string(),
+            }],
+            &CancellationToken::new(),
+            |event| observed_events.push(event.clone()),
+            |message| observed_messages.push(message.clone()),
+            |_| {},
+        )
+        .await
+        .expect("turn succeeds");
+
+    assert!(matches!(&observed_events[0], ProviderEvent::TextDelta { text } if text == "hel"));
+    assert!(matches!(&observed_events[1], ProviderEvent::TextDelta { text } if text == "lo"));
+    assert!(matches!(
+        observed_events[2],
+        ProviderEvent::FinalMessage { .. }
+    ));
+    assert_eq!(result.final_text, "hello");
+    assert_eq!(result.new_messages, observed_messages);
+}
+
+#[tokio::test]
 async fn agent_loop_records_model_on_assistant_responses() {
     #[derive(Clone, Debug)]
     struct FinalProvider;

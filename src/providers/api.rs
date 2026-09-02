@@ -29,9 +29,22 @@ pub trait Provider: Send + Sync {
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
-        Ok(vec![ProviderEvent::FinalMessage {
+        let mut events = Vec::new();
+        self.stream_events(messages, tools, &mut |event| events.push(event))
+            .await?;
+        Ok(events)
+    }
+
+    async fn stream_events(
+        &self,
+        messages: &[AgentMessage],
+        tools: &[ToolDefinition],
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
+        on_event(ProviderEvent::FinalMessage {
             message: self.complete(messages, tools).await?,
-        }])
+        });
+        Ok(())
     }
 }
 
@@ -48,11 +61,12 @@ where
         (**self).complete(messages, tools).await
     }
 
-    async fn events(
+    async fn stream_events(
         &self,
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
-    ) -> Result<Vec<ProviderEvent>, ProviderError> {
-        (**self).events(messages, tools).await
+        on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+    ) -> Result<(), ProviderError> {
+        (**self).stream_events(messages, tools, on_event).await
     }
 }

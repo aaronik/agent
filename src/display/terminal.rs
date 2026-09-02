@@ -54,6 +54,10 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
+    pub fn format_standalone_footer(status_line: &str) -> String {
+        format!("\n\n{status_line}")
+    }
+
     pub fn render_turn_submitted(&self, status_line: &str) {
         if self.live_enabled
             && io::stdout().is_terminal()
@@ -155,9 +159,10 @@ impl TerminalDisplay {
     }
 
     pub fn format_working_footer_start(status_line: &str, height: u16) -> String {
-        let output_bottom = height.saturating_sub(2).max(1);
+        let output_bottom = height.saturating_sub(3).max(1);
         format!(
-            "\x1b[?25l\x1b[r\x1b[2S\x1b[1;{output_bottom}r{}{}\x1b[{output_bottom};1H\n",
+            "\x1b[?25l\x1b[r\x1b[3S\x1b[1;{output_bottom}r\x1b[{};1H\x1b[2K{}{}\x1b[{output_bottom};1H\n",
+            height.saturating_sub(2).max(1),
             Self::format_working_footer_update(status_line, height),
             Self::format_working_input_update("", 0, "INSERT", &working_directory_prompt(), height,)
         )
@@ -173,13 +178,16 @@ impl TerminalDisplay {
         input_rows: u16,
     ) -> String {
         let status_row = height.saturating_sub(input_rows).max(1);
-        format!("\x1b[s\x1b[{status_row};1H\x1b[2K{status_line}\x1b[u")
+        format!(
+            "\x1b[s\x1b[{};1H\x1b[2K\x1b[{status_row};1H\x1b[2K{status_line}\x1b[u",
+            status_row.saturating_sub(1).max(1)
+        )
     }
 
     pub fn format_working_footer_resize(old_rows: u16, new_rows: u16, height: u16) -> String {
         let old_rows = old_rows.max(1);
         let new_rows = new_rows.max(1);
-        let output_bottom = height.saturating_sub(new_rows + 1).max(1);
+        let output_bottom = height.saturating_sub(new_rows + 2).max(1);
         if new_rows > old_rows {
             let growth = new_rows - old_rows;
             format!("\x1b[s\x1b[r\x1b[{growth}S\x1b[1;{output_bottom}r\x1b[u\x1b[{growth}A")
@@ -240,12 +248,18 @@ impl TerminalDisplay {
 
     pub fn format_working_footer_finish(height: u16, input_rows: u16) -> String {
         let status_row = height.saturating_sub(input_rows).max(1);
+        let separator_row = status_row.saturating_sub(1).max(1);
         let mut rendered = String::from("\x1b[s\x1b[r");
-        for row in status_row..=height {
+        for row in separator_row..=height {
             rendered.push_str(&format!("\x1b[{row};1H\x1b[2K"));
         }
         rendered.push_str("\x1b[u\x1b[?25h");
         rendered
+    }
+
+    pub fn render_assistant_delta(&self, text: &str) {
+        print!("{text}");
+        flush_stdout();
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {

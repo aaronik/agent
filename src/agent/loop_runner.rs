@@ -66,10 +66,33 @@ where
         &self,
         starting_messages: &[AgentMessage],
         cancellation_token: &CancellationToken,
+        on_message: F,
+        on_tool_start: G,
+    ) -> Result<AgentTurnResult, ProviderError>
+    where
+        F: FnMut(&AgentMessage),
+        G: FnMut(&ToolCall),
+    {
+        self.run_turn_cancellable_with_event_observer(
+            starting_messages,
+            cancellation_token,
+            |_| {},
+            on_message,
+            on_tool_start,
+        )
+        .await
+    }
+
+    pub async fn run_turn_cancellable_with_event_observer<E, F, G>(
+        &self,
+        starting_messages: &[AgentMessage],
+        cancellation_token: &CancellationToken,
+        mut on_event: E,
         mut on_message: F,
         mut on_tool_start: G,
     ) -> Result<AgentTurnResult, ProviderError>
     where
+        E: FnMut(&ProviderEvent) + Send,
         F: FnMut(&AgentMessage),
         G: FnMut(&ToolCall),
     {
@@ -84,17 +107,21 @@ where
                 &self.config.model,
                 self.config.max_context_tokens,
             );
-            let events = tokio::select! {
-                events = self
-                    .provider
-                    .events(
-                        &provider_messages,
-                        self.tools.definitions(),
-                    ) => events,
+            let mut events = Vec::new();
+            let mut receive_event = |event| {
+                on_event(&event);
+                events.push(event);
+            };
+            let provider_result = tokio::select! {
+                result = self.provider.stream_events(
+                    &provider_messages,
+                    self.tools.definitions(),
+                    &mut receive_event,
+                ) => result,
                 _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
             };
-            let events = match events {
-                Ok(events) => events,
+            let events = match provider_result {
+                Ok(()) => events,
                 Err(ProviderError::Request(error)) => {
                     let recovery_message = AgentMessage::System {
                         content: format!(
