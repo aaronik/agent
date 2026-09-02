@@ -307,16 +307,23 @@ fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
         metadata: Default::default(),
     })];
 
-    let line = format_cost_and_context_line(&messages, "openai:gpt-5.2");
+    let line = format_cost_and_context_line(&messages, "openai:gpt-5.2", true);
 
     assert!(line.contains("Cost: $1.2345"));
     assert!(line.contains("/400,000 tokens)"));
-    assert!(line.contains("Model: openai:gpt-5.2"));
+    assert!(line.contains("Model: openai:gpt-5.2   git:allowed"));
+}
+
+#[test]
+fn prompt_metadata_omits_git_indicator_when_writes_are_disallowed() {
+    let line = format_cost_and_context_line(&[], "mock", false);
+
+    assert!(!line.contains("git:allowed"));
 }
 
 #[test]
 fn prompt_metadata_does_not_render_negative_zero_cost() {
-    let line = format_cost_and_context_line(&[], "mock");
+    let line = format_cost_and_context_line(&[], "mock", false);
 
     assert!(line.contains("Cost: $0.0000"));
     assert!(!line.contains("Cost: $-0.0000"));

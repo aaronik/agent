@@ -118,7 +118,11 @@ pub fn context_window_tokens(raw_model: &str) -> usize {
     DEFAULT_CONTEXT_TOKENS
 }
 
-pub fn format_cost_and_context_line(messages: &[AgentMessage], raw_model: &str) -> String {
+pub fn format_cost_and_context_line(
+    messages: &[AgentMessage],
+    raw_model: &str,
+    allow_git_writes: bool,
+) -> String {
     let max_context_tokens = context_window_tokens(raw_model);
     let used = crate::agent::count_tokens(messages, raw_model);
     let remaining = max_context_tokens.saturating_sub(used);
@@ -128,12 +132,17 @@ pub fn format_cost_and_context_line(messages: &[AgentMessage], raw_model: &str) 
         .unwrap_or(0);
 
     format!(
-        "Cost: ${:.4}   Context {}% ({}/{} tokens)   Model: {}",
+        "Cost: ${:.4}   Context {}% ({}/{} tokens)   Model: {}{}",
         normalized_cost(total_session_cost_usd(messages, raw_model)),
         pct,
         format_number(remaining),
         format_number(max_context_tokens),
-        raw_model
+        raw_model,
+        if allow_git_writes {
+            "   git:allowed"
+        } else {
+            ""
+        }
     )
 }
 

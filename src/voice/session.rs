@@ -107,6 +107,7 @@ pub async fn run_talk_session(
             store,
             session,
             cancellation_token: &cancellation_token,
+            allow_git_writes,
             single_response,
         })
         .await
@@ -207,6 +208,7 @@ struct TalkLoopTick<'a> {
     store: &'a SessionStore,
     session: &'a mut Session,
     cancellation_token: &'a CancellationToken,
+    allow_git_writes: bool,
     single_response: bool,
 }
 
@@ -255,6 +257,7 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                 store: context.store,
                 session: context.session,
                 cancellation_token: context.cancellation_token,
+                allow_git_writes: context.allow_git_writes,
             };
             match handle_realtime_event(event, &mut event_context).await {
                 Ok(()) if response_completed => {
@@ -326,6 +329,7 @@ struct RealtimeEventContext<'a> {
     store: &'a SessionStore,
     session: &'a mut Session,
     cancellation_token: &'a CancellationToken,
+    allow_git_writes: bool,
 }
 
 async fn handle_realtime_event(
@@ -369,7 +373,11 @@ async fn handle_realtime_event(
             } else {
                 handle_tool_calls(tool_calls, usage, context).await?;
             }
-            print_cost_and_context(context.session, context.model_name);
+            print_cost_and_context(
+                context.session,
+                context.model_name,
+                context.allow_git_writes,
+            );
         }
         RealtimeEvent::Other(_) => {}
     }
@@ -509,10 +517,10 @@ fn attach_usage_to_latest_voice_assistant(
         .push(assistant_message(String::new(), Some(usage), model_name));
 }
 
-fn print_cost_and_context(session: &Session, model_name: &str) {
+fn print_cost_and_context(session: &Session, model_name: &str, allow_git_writes: bool) {
     println!(
         "\n{}",
-        format_cost_and_context_line(&session.messages, model_name)
+        format_cost_and_context_line(&session.messages, model_name, allow_git_writes)
     );
 }
 

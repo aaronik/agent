@@ -151,7 +151,8 @@ fn realtime_response_done_usage_contributes_to_cost_line() {
             metadata: Default::default(),
         },
     )];
-    let line = agent_rs::providers::format_cost_and_context_line(&messages, "openai:gpt-realtime");
+    let line =
+        agent_rs::providers::format_cost_and_context_line(&messages, "openai:gpt-realtime", false);
 
     assert!(line.contains("Cost: $1.2345"));
 }

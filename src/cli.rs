@@ -216,6 +216,7 @@ async fn run_with_args_and_prefill(
                     &store,
                     &session,
                     &model_name,
+                    allow_git_writes,
                     prompt_prefill.take().as_deref(),
                 )
                 .await
@@ -288,7 +289,8 @@ async fn run_with_args_and_prefill(
         if loop_runner.is_none() {
             loop_runner = Some(build_loop_runner(&model_name, allow_git_writes)?);
         }
-        let status_line = format_cost_and_context_line(&session.messages, &model_name);
+        let status_line =
+            format_cost_and_context_line(&session.messages, &model_name, allow_git_writes);
         display.render_turn_submitted(&status_line);
         let cancellation_token = CancellationToken::new();
         let esc_abort = if args.single {
@@ -341,6 +343,7 @@ async fn run_with_args_and_prefill(
                         display.update_working_footer(&format_cost_and_context_line(
                             &status_messages,
                             &model_name,
+                            allow_git_writes,
                         ));
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
@@ -1225,6 +1228,7 @@ async fn prompt_for_input(
     store: &SessionStore,
     session: &Session,
     model_name: &str,
+    allow_git_writes: bool,
     prefill: Option<&str>,
 ) -> Result<PromptInput, Box<dyn Error>> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -1266,7 +1270,8 @@ async fn prompt_for_input(
         "{}",
         TerminalDisplay::format_standalone_footer(&format_cost_and_context_line(
             &session.messages,
-            model_name
+            model_name,
+            allow_git_writes
         ))
     );
     seed_line_editor_prefill(&mut line_editor, prefill);
@@ -1322,7 +1327,10 @@ async fn handle_slash_command(
             println!("{}", slash_help(store)?);
         }
         "/session" => {
-            println!("{}", format_session_info(session, model_name));
+            println!(
+                "{}",
+                format_session_info(session, model_name, *allow_git_writes)
+            );
         }
         "/compact" => {
             compact_session(store, session, model_name, rest).await?;
@@ -1526,14 +1534,14 @@ fn compaction_message_text(message: &AgentMessage) -> String {
     }
 }
 
-fn format_session_info(session: &Session, model_name: &str) -> String {
+fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bool) -> String {
     format!(
         "Session ID: {}\nCreated: {}\nUpdated: {}\nMessages: {}\n{}",
         session.session_id,
         session.created_at.to_rfc3339(),
         session.updated_at.to_rfc3339(),
         session.messages.len(),
-        format_cost_and_context_line(&session.messages, model_name),
+        format_cost_and_context_line(&session.messages, model_name, allow_git_writes),
     )
 }
 
