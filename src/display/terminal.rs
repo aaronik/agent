@@ -54,6 +54,10 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
+    pub fn assistant_stream_remainder<'a>(streamed: &str, final_content: &'a str) -> &'a str {
+        final_content.strip_prefix(streamed).unwrap_or_default()
+    }
+
     pub fn format_standalone_footer(status_line: &str) -> String {
         format!("\n\n{status_line}")
     }

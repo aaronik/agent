@@ -45,6 +45,22 @@ fn assistant_markdown_renders_common_markdown_features() {
 }
 
 #[test]
+fn streamed_assistant_final_render_only_appends_unstreamed_suffix() {
+    assert_eq!(
+        TerminalDisplay::assistant_stream_remainder("hello", "hello world"),
+        " world"
+    );
+    assert_eq!(
+        TerminalDisplay::assistant_stream_remainder("hello", "hello"),
+        ""
+    );
+    assert_eq!(
+        TerminalDisplay::assistant_stream_remainder("hello", "goodbye"),
+        ""
+    );
+}
+
+#[test]
 fn standalone_footer_keeps_a_blank_separator_above_status() {
     assert_eq!(
         TerminalDisplay::format_standalone_footer("Cost: $0"),

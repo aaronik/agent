@@ -326,12 +326,19 @@ async fn run_with_args_and_prefill(
                             .lock()
                             .map(|content| content.clone())
                             .unwrap_or_default();
-                        let render_message = !matches!(
-                            message,
-                            AgentMessage::Assistant(assistant)
-                                if !streamed_content.is_empty() && assistant.content == streamed_content
-                        );
-                        if render_message {
+                        if let AgentMessage::Assistant(assistant) = message {
+                            let remainder = TerminalDisplay::assistant_stream_remainder(
+                                &streamed_content,
+                                &assistant.content,
+                            );
+                            if !streamed_content.is_empty() {
+                                if !remainder.is_empty() {
+                                    display.render_assistant_delta(remainder);
+                                }
+                            } else {
+                                display.render_new_message(message);
+                            }
+                        } else {
                             if let AgentMessage::Tool(result) = message {
                                 display.render_tool_result(result);
                             }
