@@ -54,8 +54,12 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
-    pub fn assistant_stream_remainder<'a>(streamed: &str, final_content: &'a str) -> &'a str {
-        final_content.strip_prefix(streamed).unwrap_or_default()
+    pub fn assistant_stream_remainder(streamed: &str, final_content: &str) -> String {
+        match final_content.strip_prefix(streamed) {
+            Some(remainder) => remainder.to_string(),
+            None if !final_content.is_empty() => format!("\n{final_content}"),
+            None => String::new(),
+        }
     }
 
     pub fn format_standalone_footer(status_line: &str) -> String {

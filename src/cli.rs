@@ -333,7 +333,7 @@ async fn run_with_args_and_prefill(
                             );
                             if !streamed_content.is_empty() {
                                 if !remainder.is_empty() {
-                                    display.render_assistant_delta(remainder);
+                                    display.render_assistant_delta(&remainder);
                                 }
                             } else {
                                 display.render_new_message(message);

@@ -56,7 +56,7 @@ fn streamed_assistant_final_render_only_appends_unstreamed_suffix() {
     );
     assert_eq!(
         TerminalDisplay::assistant_stream_remainder("hello", "goodbye"),
-        ""
+        "\ngoodbye"
     );
 }
 
