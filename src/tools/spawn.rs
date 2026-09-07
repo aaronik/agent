@@ -1,10 +1,14 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
+use tokio::time;
 
+use crate::agent::CancellationToken;
 use crate::providers::effective_model_name;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -15,6 +19,13 @@ pub struct SpawnArgs {
 }
 
 pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
+    spawn_cancellable(args, &CancellationToken::new()).await
+}
+
+pub async fn spawn_cancellable(
+    args: SpawnArgs,
+    cancellation_token: &CancellationToken,
+) -> Result<String, String> {
     let raw_model =
         std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None));
 
@@ -25,17 +36,36 @@ pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
         .arg("--single")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    set_process_group(&mut command);
 
     if let Some(conversation_id) = args.conversation_id.as_deref() {
         command.arg("--resume").arg(conversation_id);
     }
 
-    let output = command
+    let mut child = command
         .arg(args.task)
-        .output()
-        .await
+        .spawn()
         .map_err(|err| format!("Error spawning agent: {err}"))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(read_pipe(stdout));
+    let stderr_task = tokio::spawn(read_pipe(stderr));
+
+    let output = tokio::select! {
+        status = child.wait() => {
+            let status = status.map_err(|err| format!("Error spawning agent: {err}"))?;
+            let stdout = join_pipe_task(stdout_task, "stdout").await?;
+            let stderr = join_pipe_task(stderr_task, "stderr").await?;
+            std::process::Output { status, stdout, stderr }
+        }
+        _ = cancellation_token.cancelled() => {
+            terminate_child(&mut child).await;
+            return Err("tool call cancelled".to_string());
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -58,6 +88,57 @@ pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
     }
 
     Ok(format_spawn_output(&stdout))
+}
+
+async fn join_pipe_task(
+    task: tokio::task::JoinHandle<Result<Vec<u8>, String>>,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    task.await
+        .map_err(|err| format!("failed to join {name} reader: {err}"))?
+}
+
+async fn read_pipe<T>(pipe: Option<T>) -> Result<Vec<u8>, String>
+where
+    T: tokio::io::AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut output)
+            .await
+            .map_err(|err| format!("failed to read spawned agent output: {err}"))?;
+    }
+    Ok(output)
+}
+
+async fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    #[cfg(unix)]
+    kill_process_group(child);
+    let _ = child.start_kill();
+    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
+}
+
+#[cfg(unix)]
+fn set_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn set_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_group(child: &Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: kill is called with a negative pid to signal the child's process group.
+    let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
 }
 
 fn agent_executable() -> Result<PathBuf, String> {

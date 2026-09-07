@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -484,6 +485,7 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
 
 #[tokio::test]
 async fn spawn_uses_shared_agent_loop_with_mock_provider() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _guard = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
 
     let output = spawn(SpawnArgs {
@@ -497,6 +499,84 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     assert!(output.contains("Tool completed: hi"));
     assert!(output.contains("sessionId: "));
     assert!(output.contains("[CONVERSATION ID]"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_spawn_terminates_its_process_group() {
+    use agent_rs::agent::{CancellationToken, ToolStatus};
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+    use tokio::time::{sleep, timeout};
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let directory = tempdir().expect("temporary directory");
+    let script = directory.path().join("spawn-stand-in.sh");
+    let child_pid_file = directory.path().join("child.pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
+            child_pid_file.display()
+        ),
+    )
+    .expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
+    let cancellation = CancellationToken::new();
+    let registry = ToolRegistry::new();
+    let task = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move {
+            registry
+                .execute_cancellable(
+                    "spawn-cancel".to_string(),
+                    "spawn",
+                    json!({ "task": "ignored", "intent": "exercise cancellation" }),
+                    &cancellation,
+                )
+                .await
+        }
+    });
+
+    timeout(Duration::from_secs(1), async {
+        while !child_pid_file.exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("spawned process should start");
+    let child_pid = std::fs::read_to_string(&child_pid_file)
+        .expect("read child pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric child pid");
+
+    cancellation.cancel();
+    let result = timeout(Duration::from_secs(2), task)
+        .await
+        .expect("cancelled spawn should finish")
+        .expect("spawn task should not panic");
+    assert_eq!(result.status, ToolStatus::Error);
+    assert_eq!(result.content, "tool call cancelled");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &child_pid.to_string()])
+                .output()
+                .expect("inspect child process");
+            let status = String::from_utf8_lossy(&output.stdout);
+            if status.trim().is_empty() || status.trim_start().starts_with('Z') {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("spawn child process should be terminated");
 }
 
 struct EnvGuard {

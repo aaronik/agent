@@ -13,7 +13,7 @@ use crate::tools::files::{
 use crate::tools::image::{GenImageArgs, gen_image};
 use crate::tools::output::truncate_tool_output;
 use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
-use crate::tools::spawn::{SpawnArgs, spawn};
+use crate::tools::spawn::{SpawnArgs, spawn_cancellable};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
@@ -164,7 +164,7 @@ impl ToolRegistry {
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {
-                Ok(args) => Box::pin(spawn(args)).await,
+                Ok(args) => Box::pin(spawn_cancellable(args, cancellation_token)).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             _ => Err(format!("unknown tool: {name}")),
