@@ -55,11 +55,26 @@ impl TerminalDisplay {
     }
 
     pub fn assistant_stream_remainder(streamed: &str, final_content: &str) -> String {
-        match final_content.strip_prefix(streamed) {
-            Some(remainder) => remainder.to_string(),
-            None if !final_content.is_empty() => format!("\n{final_content}"),
-            None => String::new(),
+        if final_content.is_empty() || streamed.ends_with(final_content) {
+            return String::new();
         }
+        if let Some(remainder) = final_content.strip_prefix(streamed) {
+            return remainder.to_string();
+        }
+
+        let overlap = final_content
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(final_content.len()))
+            .filter(|&length| length > 0 && length <= streamed.len())
+            .rev()
+            .find(|&length| streamed.ends_with(&final_content[..length]))
+            .unwrap_or_default();
+        if overlap > 0 {
+            return final_content[overlap..].to_string();
+        }
+
+        format!("\n{final_content}")
     }
 
     pub fn format_standalone_footer(status_line: &str) -> String {

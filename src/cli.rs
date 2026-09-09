@@ -303,9 +303,9 @@ async fn run_with_args_and_prefill(
             )
         };
         let observed_messages = RefCell::new(Vec::new());
-        let streamed_assistant_content = Arc::new(std::sync::Mutex::new(String::new()));
+        let streamed_assistant = Arc::new(std::sync::Mutex::new(AssistantStreamBuffer::default()));
         let persistence_error = RefCell::new(None);
-        let streamed_assistant_content_for_events = Arc::clone(&streamed_assistant_content);
+        let streamed_assistant_for_events = Arc::clone(&streamed_assistant);
         let result = tokio::select! {
             result = loop_runner
                 .as_ref()
@@ -314,29 +314,39 @@ async fn run_with_args_and_prefill(
                     &session.messages,
                     &cancellation_token,
                     |event| {
-                        if let crate::agent::ProviderEvent::TextDelta { text } = event {
-                            display.render_assistant_delta(text);
-                            if let Ok(mut content) = streamed_assistant_content_for_events.lock() {
-                                content.push_str(text);
-                            }
+                        if let crate::agent::ProviderEvent::TextDelta { text } = event
+                            && let Ok(mut assistant) = streamed_assistant_for_events.lock()
+                            && let Some(text) = assistant.push(text)
+                        {
+                            display.render_assistant_delta(&text);
                         }
                     },
                     |message| {
-                        let streamed_content = streamed_assistant_content
+                        let streamed_content = streamed_assistant
                             .lock()
-                            .map(|content| content.clone())
+                            .map(|mut assistant| {
+                                let pending = assistant.finish();
+                                let rendered = assistant.rendered().to_string();
+                                (rendered, pending)
+                            })
                             .unwrap_or_default();
                         if let AgentMessage::Assistant(assistant) = message {
+                            if !streamed_content.1.is_empty() {
+                                display.render_assistant_delta(&streamed_content.1);
+                            }
                             let remainder = TerminalDisplay::assistant_stream_remainder(
-                                &streamed_content,
+                                &streamed_content.0,
                                 &assistant.content,
                             );
-                            if !streamed_content.is_empty() {
+                            if !streamed_content.0.is_empty() {
                                 if !remainder.is_empty() {
                                     display.render_assistant_delta(&remainder);
                                 }
                             } else {
                                 display.render_new_message(message);
+                            }
+                            if let Ok(mut assistant) = streamed_assistant.lock() {
+                                assistant.reset();
                             }
                         } else {
                             if let AgentMessage::Tool(result) = message {
@@ -408,6 +418,57 @@ async fn run_with_args_and_prefill(
 
     println!("sessionId: {}", session.session_id);
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct AssistantStreamBuffer {
+    rendered: String,
+    pending_repeat: String,
+}
+
+impl AssistantStreamBuffer {
+    fn push(&mut self, delta: &str) -> Option<String> {
+        if self.rendered.is_empty() {
+            self.rendered.push_str(delta);
+            return Some(delta.to_string());
+        }
+
+        self.pending_repeat.push_str(delta);
+        if self.rendered.starts_with(&self.pending_repeat) {
+            if self.pending_repeat.len() == self.rendered.len() {
+                self.pending_repeat.clear();
+            }
+            return None;
+        }
+
+        let output = if let Some(suffix) = self.pending_repeat.strip_prefix(&self.rendered) {
+            suffix.to_string()
+        } else {
+            self.pending_repeat.clone()
+        };
+        self.rendered.push_str(&output);
+        self.pending_repeat.clear();
+        (!output.is_empty()).then_some(output)
+    }
+
+    fn finish(&mut self) -> String {
+        if self.pending_repeat.is_empty() || self.pending_repeat == self.rendered {
+            self.pending_repeat.clear();
+            return String::new();
+        }
+        let output = std::mem::take(&mut self.pending_repeat);
+        self.rendered.push_str(&output);
+        output
+    }
+
+    fn rendered(&self) -> &str {
+        &self.rendered
+    }
+
+    fn reset(&mut self) {
+        self.rendered.clear();
+        self.pending_repeat.clear();
+    }
 }
 
 struct ParsedUserInput {
@@ -1174,7 +1235,7 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
             };
             return Ok(store.load(id)?);
         }
-        if !args.single
+        if args.talk
             && let Ok(session) = store.load(None)
         {
             return Ok(session);
@@ -2361,6 +2422,59 @@ mod tests {
                 content: "remember blue".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn text_without_resume_starts_a_new_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = SessionStore::with_root(temp.path().join(".agent"));
+        store
+            .save(&Session::new(
+                "other-session".to_string(),
+                vec![AgentMessage::Assistant(crate::agent::AssistantMessage {
+                    content: "stale output from another session".to_string(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    model: None,
+                    metadata: serde_json::Map::new(),
+                })],
+            ))
+            .expect("save session");
+        let args = Args::parse_from(["agent"]);
+
+        let session = load_or_create_session(&args, &store).expect("new session");
+
+        assert_ne!(session.session_id, "other-session");
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|message| { message.content() != "stale output from another session" })
+        );
+    }
+
+    #[test]
+    fn assistant_stream_buffer_suppresses_a_repeated_response() {
+        let mut buffer = AssistantStreamBuffer::default();
+
+        assert_eq!(buffer.push("Fixed. "), Some("Fixed. ".to_string()));
+        assert_eq!(buffer.push("Done."), Some("Done.".to_string()));
+        assert_eq!(buffer.push("Fixed. "), None);
+        assert_eq!(buffer.push("Done."), None);
+        assert_eq!(buffer.finish(), "");
+        assert_eq!(buffer.rendered(), "Fixed. Done.");
+    }
+
+    #[test]
+    fn assistant_stream_buffer_preserves_nonduplicate_continuation() {
+        let mut buffer = AssistantStreamBuffer::default();
+
+        assert_eq!(buffer.push("Fixed. "), Some("Fixed. ".to_string()));
+        assert_eq!(
+            buffer.push("Still working."),
+            Some("Still working.".to_string())
+        );
+        assert_eq!(buffer.rendered(), "Fixed. Still working.");
     }
 
     #[test]
