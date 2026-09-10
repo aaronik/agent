@@ -608,6 +608,68 @@ async fn agent_loop_bounces_provider_request_error_back_to_agent() {
 }
 
 #[tokio::test]
+async fn agent_loop_default_allows_more_than_legacy_turn_limit() {
+    #[derive(Clone, Debug)]
+    struct ManyToolCallsProvider {
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for ManyToolCallsProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            let request = self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if request < 200 {
+                return Ok(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{request}"),
+                        name: "communicate".to_string(),
+                        arguments: json!({
+                            "intent": "continue the long-running task",
+                            "message": "working"
+                        }),
+                    }],
+                    usage: None,
+                    model: None,
+                    metadata: Default::default(),
+                });
+            }
+
+            Ok(AssistantMessage {
+                content: "completed after a long run".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let loop_runner = AgentLoop::new(
+        ManyToolCallsProvider {
+            requests: Default::default(),
+        },
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+
+    let result = loop_runner
+        .run_turn(&[AgentMessage::User {
+            content: "keep working".to_string(),
+        }])
+        .await
+        .expect("default limit should not cut off a run after 200 tool turns");
+
+    assert_eq!(result.final_text, "completed after a long run");
+}
+
+#[tokio::test]
 async fn agent_loop_errors_on_max_turn_exhaustion() {
     #[derive(Clone, Debug)]
     struct LoopingProvider;

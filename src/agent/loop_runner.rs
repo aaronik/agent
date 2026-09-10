@@ -15,7 +15,10 @@ pub struct AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            max_turns: 200,
+            // This is a safety guard for genuinely non-terminating tool loops, not a
+            // practical cap on a normal long-running task. A 200-turn limit could
+            // end an otherwise healthy run immediately after a tool result.
+            max_turns: 1_000,
             max_context_tokens: 16_384,
             model: DEFAULT_MODEL.to_string(),
         }

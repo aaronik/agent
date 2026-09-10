@@ -1880,11 +1880,6 @@ impl AgentCompleter {
     }
 
     #[cfg(test)]
-    fn with_dir(candidates: Vec<String>, working_dir: PathBuf) -> Self {
-        Self::from_parts(candidates, None, working_dir)
-    }
-
-    #[cfg(test)]
     fn with_dynamic_candidates(
         candidates: Vec<String>,
         dynamic_candidates: Arc<RwLock<Vec<String>>>,
