@@ -16,7 +16,7 @@ crossterm = "0.29.0"
 dirs = "6.0.0"
 futures-util = "0.3.31"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
-reedline = "0.48.0"
+reedline = "0.51.0"
 schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

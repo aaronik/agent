@@ -6,10 +6,10 @@ use crossterm::event::{
 #[cfg(not(unix))]
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reedline::{
-    Completer, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, History, KeyCode,
-    KeyModifiers, Keybindings, ListMenu, MenuBuilder, PromptEditMode, PromptViMode, Reedline,
-    ReedlineEvent, ReedlineMenu, ReedlineRawEvent, SearchDirection, SearchQuery, Signal, Span,
-    Suggestion, Vi, default_vi_insert_keybindings, default_vi_normal_keybindings,
+    Completer, CompletionResult, DefaultPrompt, EditCommand, EditMode, FileBackedHistory, History,
+    KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, PromptEditMode, PromptViMode,
+    Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, SearchDirection, SearchQuery, Signal,
+    Span, Suggestion, Vi, default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
 use std::cell::RefCell;
 use std::error::Error;
@@ -1847,8 +1847,9 @@ pub fn completion_values_for_line_in_dir(
 ) -> Vec<String> {
     AgentCompleter::new(completion_candidates_in_dir(store, &[], project_dir))
         .complete(line, pos)
-        .into_iter()
-        .map(|suggestion| suggestion.value)
+        .suggestions()
+        .iter()
+        .map(|suggestion| suggestion.value.clone())
         .collect()
 }
 
@@ -1860,8 +1861,9 @@ pub fn completion_values_for_line_with_models(
 ) -> Vec<String> {
     AgentCompleter::new(completion_candidates(store, available_models))
         .complete(line, pos)
-        .into_iter()
-        .map(|suggestion| suggestion.value)
+        .suggestions()
+        .iter()
+        .map(|suggestion| suggestion.value.clone())
         .collect()
 }
 
@@ -2029,15 +2031,15 @@ fn current_working_dir() -> PathBuf {
 }
 
 impl Completer for AgentCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+    fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let Some(prefix) = line.get(..pos) else {
-            return Vec::new();
+            return CompletionResult::fresh(Vec::new());
         };
-        if prefix.starts_with('/') {
+        CompletionResult::fresh(if prefix.starts_with('/') {
             self.complete_command(prefix, pos)
         } else {
             self.complete_filename(prefix, pos)
-        }
+        })
     }
 }
 
@@ -2858,14 +2860,22 @@ mod completion_input_tests {
                 ]
         ));
 
-        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
+        let event = mode.parse_event(key(KeyCode::Enter));
+        assert!(
+            matches!(event, ReedlineEvent::Enter)
+                || matches!(event, ReedlineEvent::Multiple(events) if matches!(events.last(), Some(ReedlineEvent::Enter)))
+        );
     }
 
     #[test]
     fn enter_submits_and_iterm_shift_enter_inserts_newline_in_insert_mode() {
         let mut mode = agent_vi_mode();
 
-        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
+        let event = mode.parse_event(key(KeyCode::Enter));
+        assert!(
+            matches!(event, ReedlineEvent::Enter)
+                || matches!(event, ReedlineEvent::Multiple(events) if matches!(events.last(), Some(ReedlineEvent::Enter)))
+        );
         assert_eq!(
             mode.parse_event(modified_key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
             ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
@@ -2878,9 +2888,14 @@ mod completion_input_tests {
         assert!(matches!(
             mode.parse_event(key(KeyCode::Esc)),
             ReedlineEvent::Multiple(events)
-                if events == vec![ReedlineEvent::Esc, ReedlineEvent::Repaint]
+                if matches!(events.first(), Some(ReedlineEvent::Esc))
+                    && matches!(events.last(), Some(ReedlineEvent::Repaint))
         ));
-        assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::Enter);
+        let event = mode.parse_event(key(KeyCode::Enter));
+        assert!(
+            matches!(event, ReedlineEvent::Enter)
+                || matches!(event, ReedlineEvent::Multiple(events) if matches!(events.last(), Some(ReedlineEvent::Enter)))
+        );
     }
 
     #[test]
@@ -2909,8 +2924,9 @@ mod completion_input_tests {
 
         let initial_values = completer
             .complete("/models op", 10)
-            .into_iter()
-            .map(|suggestion| suggestion.value)
+            .suggestions()
+            .iter()
+            .map(|suggestion| suggestion.value.clone())
             .collect::<Vec<_>>();
         assert!(!initial_values.contains(&"/models openai:gpt-5.2".to_string()));
 
@@ -2919,8 +2935,9 @@ mod completion_input_tests {
 
         let refreshed_values = completer
             .complete("/models op", 10)
-            .into_iter()
-            .map(|suggestion| suggestion.value)
+            .suggestions()
+            .iter()
+            .map(|suggestion| suggestion.value.clone())
             .collect::<Vec<_>>();
         assert_eq!(
             refreshed_values.first(),
