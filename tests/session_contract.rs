@@ -37,6 +37,7 @@ fn session_schema_v1_round_trip() {
                 status: ToolStatus::Success,
                 content: "hi\n".to_string(),
                 elapsed_ms: Some(7),
+                subagent_usages: Vec::new(),
             }),
         ],
     );
@@ -163,6 +164,7 @@ fn session_search_ignores_tool_output_and_weak_generic_matches() {
                 status: ToolStatus::Success,
                 content: "source mentions shasta_private_land.py".to_string(),
                 elapsed_ms: None,
+                subagent_usages: Vec::new(),
             })],
         ))
         .expect("save tool noise");
@@ -258,6 +260,29 @@ fn new_session_ids_are_guids() {
     uuid::Uuid::parse_str(&first).expect("first session id is a guid");
     uuid::Uuid::parse_str(&second).expect("second session id is a guid");
     assert_ne!(first, second);
+}
+
+#[test]
+fn prompt_metadata_includes_subagent_response_costs() {
+    let messages = vec![AgentMessage::Tool(ToolResult {
+        tool_call_id: "call_spawn".to_string(),
+        name: "spawn".to_string(),
+        status: ToolStatus::Success,
+        content: "subagent complete".to_string(),
+        elapsed_ms: Some(7),
+        subagent_usages: vec![agent_rs::agent::SubagentUsage {
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 12,
+                raw: Some(json!({"total_cost": 1.2345})),
+            },
+            model: "openai:gpt-5.2".to_string(),
+        }],
+    })];
+
+    let line = format_cost_and_context_line(&messages, "mock", false);
+
+    assert!(line.contains("Cost: $1.2345"));
 }
 
 #[test]

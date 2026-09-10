@@ -32,6 +32,14 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent_usages: Vec<SubagentUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentUsage {
+    pub usage: Usage,
+    pub model: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

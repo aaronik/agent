@@ -164,12 +164,19 @@ where
 {
     messages
         .iter()
-        .filter_map(|message| match message {
+        .flat_map(|message| match message {
             AgentMessage::Assistant(assistant) => assistant
                 .usage
                 .as_ref()
-                .map(|usage| (usage, assistant.model.as_deref().unwrap_or(fallback_model))),
-            _ => None,
+                .map(|usage| (usage, assistant.model.as_deref().unwrap_or(fallback_model)))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            AgentMessage::Tool(result) => result
+                .subagent_usages
+                .iter()
+                .map(|subagent| (&subagent.usage, subagent.model.as_str()))
+                .collect(),
+            _ => Vec::new(),
         })
         .map(|(usage, model)| cost_for_usage(usage, model))
         .sum()

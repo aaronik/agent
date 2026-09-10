@@ -8,8 +8,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::time;
 
-use crate::agent::CancellationToken;
+use crate::agent::{AgentMessage, CancellationToken, SubagentUsage};
 use crate::providers::effective_model_name;
+use crate::session::SessionStore;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct SpawnArgs {
@@ -26,13 +27,29 @@ pub async fn spawn_cancellable(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<String, String> {
+    spawn_cancellable_with_usage(args, cancellation_token)
+        .await
+        .map(|(output, _)| output)
+}
+
+pub async fn spawn_cancellable_with_usage(
+    args: SpawnArgs,
+    cancellation_token: &CancellationToken,
+) -> Result<(String, Vec<SubagentUsage>), String> {
     let raw_model =
         std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None));
+
+    let existing_usage_count = args
+        .conversation_id
+        .as_deref()
+        .and_then(|session_id| SessionStore::new().ok()?.load(Some(session_id)).ok())
+        .map(|session| subagent_usages(&session.messages, &raw_model).len())
+        .unwrap_or(0);
 
     let mut command = Command::new(agent_executable()?);
     command
         .arg("--model")
-        .arg(raw_model)
+        .arg(&raw_model)
         .arg("--single")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -87,7 +104,32 @@ pub async fn spawn_cancellable(
         return Err(error);
     }
 
-    Ok(format_spawn_output(&stdout))
+    let formatted_output = format_spawn_output(&stdout);
+    let usages = session_id_from_agent_output(&stdout)
+        .and_then(|session_id| SessionStore::new().ok()?.load(Some(&session_id)).ok())
+        .map(|session| subagent_usages(&session.messages, &raw_model))
+        .map(|usages| usages.into_iter().skip(existing_usage_count).collect())
+        .unwrap_or_default();
+
+    Ok((formatted_output, usages))
+}
+
+fn subagent_usages(messages: &[AgentMessage], fallback_model: &str) -> Vec<SubagentUsage> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Assistant(assistant) => {
+                assistant.usage.as_ref().map(|usage| SubagentUsage {
+                    usage: usage.clone(),
+                    model: assistant
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| fallback_model.to_string()),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 async fn join_pipe_task(

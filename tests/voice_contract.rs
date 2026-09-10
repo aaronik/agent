@@ -251,6 +251,7 @@ fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
             status: ToolStatus::Success,
             content: "blue\n".to_string(),
             elapsed_ms: None,
+            subagent_usages: Vec::new(),
         }),
     ]);
 

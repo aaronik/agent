@@ -153,6 +153,7 @@ mod tests {
                 status: crate::agent::ToolStatus::Success,
                 content: "ok".to_string(),
                 elapsed_ms: None,
+                subagent_usages: Vec::new(),
             }),
             AgentMessage::User {
                 content: "newest".to_string(),

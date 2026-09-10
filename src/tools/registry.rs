@@ -13,7 +13,7 @@ use crate::tools::files::{
 use crate::tools::image::{GenImageArgs, gen_image};
 use crate::tools::output::truncate_tool_output;
 use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
-use crate::tools::spawn::{SpawnArgs, spawn_cancellable};
+use crate::tools::spawn::{SpawnArgs, spawn_cancellable_with_usage};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
@@ -116,6 +116,7 @@ impl ToolRegistry {
                 name,
                 ToolStatus::Error,
                 format!("unknown tool: {name}"),
+                Vec::new(),
                 started,
             );
         }
@@ -123,10 +124,18 @@ impl ToolRegistry {
         let arguments = match validated_tool_arguments(arguments) {
             Ok(arguments) => arguments,
             Err(content) => {
-                return tool_result(tool_call_id, name, ToolStatus::Error, content, started);
+                return tool_result(
+                    tool_call_id,
+                    name,
+                    ToolStatus::Error,
+                    content,
+                    Vec::new(),
+                    started,
+                );
             }
         };
 
+        let mut subagent_usages = Vec::new();
         let content = match name {
             "run_shell_command" => match serde_json::from_value::<RunShellCommandArgs>(arguments) {
                 Ok(args) => {
@@ -164,7 +173,15 @@ impl ToolRegistry {
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {
-                Ok(args) => Box::pin(spawn_cancellable(args, cancellation_token)).await,
+                Ok(args) => {
+                    match Box::pin(spawn_cancellable_with_usage(args, cancellation_token)).await {
+                        Ok((content, usages)) => {
+                            subagent_usages = usages;
+                            Ok(content)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             _ => Err(format!("unknown tool: {name}")),
@@ -174,7 +191,14 @@ impl ToolRegistry {
             Ok(content) => (ToolStatus::Success, content),
             Err(content) => (ToolStatus::Error, content),
         };
-        tool_result(tool_call_id, name, status, content, started)
+        tool_result(
+            tool_call_id,
+            name,
+            status,
+            content,
+            subagent_usages,
+            started,
+        )
     }
 }
 
@@ -183,6 +207,7 @@ fn tool_result(
     name: &str,
     status: ToolStatus,
     content: String,
+    subagent_usages: Vec<crate::agent::SubagentUsage>,
     started: Instant,
 ) -> ToolResult {
     let content = truncate_tool_output(content, &status);
@@ -192,6 +217,7 @@ fn tool_result(
         status,
         content,
         elapsed_ms: Some(duration_ms(started)),
+        subagent_usages,
     }
 }
 

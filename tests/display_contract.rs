@@ -97,6 +97,7 @@ fn tool_panels_render_without_raw_tool_call_json() {
         status: ToolStatus::Success,
         content: "hi\n".to_string(),
         elapsed_ms: None,
+        subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("╭─"));
@@ -134,6 +135,7 @@ fn communicate_renders_as_progress_text() {
         status: ToolStatus::Success,
         content: "working".to_string(),
         elapsed_ms: Some(12),
+        subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("working"));
@@ -164,6 +166,7 @@ fn tool_result_panel_shows_elapsed_time() {
         status: ToolStatus::Success,
         content: "ok".to_string(),
         elapsed_ms: Some(1_234),
+        subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("[OK Done]"));
@@ -186,6 +189,7 @@ fn diff_panels_render_with_diff_ansi() {
         status: ToolStatus::Success,
         content: "Successfully replaced 1 occurrence(s)\n\nDiff:\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
         elapsed_ms: None,
+                subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("\x1b[31m-old\x1b[0m"));
@@ -208,6 +212,7 @@ fn live_tool_result_can_replace_running_panel_in_place() {
             status: ToolStatus::Success,
             content: "hi\n".to_string(),
             elapsed_ms: None,
+            subagent_usages: Vec::new(),
         },
         Some(&call),
         start.lines().count(),
@@ -233,6 +238,7 @@ fn read_file_content_with_exit_code_text_still_renders_success() {
         content: "[FILE]: ./notes.txt\nread_file  [ERR Done (7)]  0ms\n(exit code: 7)\n"
             .to_string(),
         elapsed_ms: Some(0),
+        subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("read_file"));
@@ -250,6 +256,7 @@ fn shell_command_exit_code_marker_still_renders_error() {
         status: ToolStatus::Success,
         content: "boom\n(exit code: 7)".to_string(),
         elapsed_ms: None,
+        subagent_usages: Vec::new(),
     });
 
     assert!(rendered.contains("[ERR Done (7)]"));
