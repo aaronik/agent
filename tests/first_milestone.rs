@@ -328,6 +328,19 @@ fn no_completion_sound_flag_is_available_in_help() {
 }
 
 #[test]
+fn no_subagent_flag_is_available_in_help() {
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env_remove("OPENAI_API_KEY")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--no-subagent"))
+        .stdout(predicates::str::contains(
+            "Disable spawning subagents for this run",
+        ));
+}
+
+#[test]
 fn help_does_not_require_provider_configuration() {
     let mut cmd = Command::cargo_bin("agent").expect("agent binary");
     cmd.env_remove("OPENAI_API_KEY")

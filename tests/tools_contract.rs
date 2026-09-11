@@ -563,6 +563,30 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn spawn_marks_its_child_as_disallowing_subagents() {
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let directory = tempdir().expect("temporary directory");
+    let script = directory.path().join("spawn-arguments.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
+
+    let output = spawn(SpawnArgs {
+        task: "assigned task".to_string(),
+        conversation_id: None,
+    })
+    .await
+    .expect("spawn");
+
+    assert!(output.contains("--no-subagent"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn cancelling_spawn_terminates_its_process_group() {
     use agent_rs::agent::{CancellationToken, ToolStatus};
     use std::os::unix::fs::PermissionsExt;

@@ -93,6 +93,8 @@ pub struct Args {
     pub allow_git: bool,
     #[arg(long, help = "Disable the sound played after a successful turn")]
     pub no_completion_sound: bool,
+    #[arg(long, help = "Disable spawning subagents for this run")]
+    pub no_subagent: bool,
     #[arg(help = "Initial user message")]
     pub query: Vec<String>,
 }
@@ -289,7 +291,11 @@ async fn run_with_args_and_prefill(
         store.save(&session)?;
 
         if loop_runner.is_none() {
-            loop_runner = Some(build_loop_runner(&model_name, allow_git_writes)?);
+            loop_runner = Some(build_loop_runner(
+                &model_name,
+                allow_git_writes,
+                args.no_subagent,
+            )?);
         }
         let status_line =
             format_cost_and_context_line(&session.messages, &model_name, allow_git_writes);
@@ -615,6 +621,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             images: Vec::new(),
             allow_git: args.allow_git,
             no_completion_sound: args.no_completion_sound,
+            no_subagent: false,
             query: Vec::new(),
         },
         &store,
@@ -1434,6 +1441,7 @@ async fn handle_slash_command(
                     command: false,
                     allow_git: *allow_git_writes,
                     no_completion_sound: args.no_completion_sound,
+                    no_subagent: args.no_subagent,
                 },
                 store,
             )?;
@@ -1639,15 +1647,20 @@ fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
     Ok(help)
 }
 
+fn build_tool_registry(allow_git_writes: bool, include_spawn: bool) -> ToolRegistry {
+    match (allow_git_writes, include_spawn) {
+        (true, true) => ToolRegistry::new_with_git_write_access(),
+        (false, true) => ToolRegistry::new(),
+        (_, false) => ToolRegistry::without_spawn(),
+    }
+}
+
 fn build_loop_runner(
     model_name: &str,
     allow_git_writes: bool,
+    no_subagent: bool,
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
-    let tools = if allow_git_writes {
-        ToolRegistry::new_with_git_write_access()
-    } else {
-        ToolRegistry::new()
-    };
+    let tools = build_tool_registry(allow_git_writes, !no_subagent);
     Ok(AgentLoop::new(
         build_provider(model_name)?,
         tools,
@@ -2223,6 +2236,30 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_subagent_agents_do_not_receive_the_spawn_tool() {
+        let registry = build_tool_registry(false, false);
+        let names = registry
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!names.contains(&"spawn"));
+    }
+
+    #[test]
+    fn primary_agents_receive_the_spawn_tool() {
+        let registry = build_tool_registry(false, true);
+        let names = registry
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"spawn"));
+    }
 
     #[tokio::test]
     async fn allow_git_slash_command_toggles_git_write_access() {
