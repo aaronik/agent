@@ -38,7 +38,9 @@ pub struct BrowserControlArgs {
     /// Discard any existing persistent browser session and start a fresh session.
     #[serde(default)]
     pub reset: bool,
-    /// Show the browser window. Leave false unless the user directly asks to see it.
+    /// Show the browser window to the human user. This does not improve model vision,
+    /// image loading, rendering, or screenshots. Never set this merely to inspect images;
+    /// leave it false unless the user directly asks to see the browser window.
     #[serde(default)]
     pub visible: bool,
 }

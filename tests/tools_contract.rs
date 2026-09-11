@@ -80,6 +80,21 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     );
     assert!(
         browser_definition
+            .description
+            .contains("does not improve model vision")
+    );
+    assert!(
+        browser_definition
+            .description
+            .contains("screenshots work headlessly")
+    );
+    let visible_description = browser_definition.parameters["properties"]["visible"]["description"]
+        .as_str()
+        .expect("visible parameter description");
+    assert!(visible_description.contains("human user"));
+    assert!(visible_description.contains("Never set this merely to inspect images"));
+    assert!(
+        browser_definition
             .parameters
             .pointer("/properties/profile")
             .is_none()
