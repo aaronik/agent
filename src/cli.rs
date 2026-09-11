@@ -91,6 +91,8 @@ pub struct Args {
     pub images: Vec<std::path::PathBuf>,
     #[arg(long, help = "Allow git commands that modify repositories")]
     pub allow_git: bool,
+    #[arg(long, help = "Disable the sound played after a successful turn")]
+    pub no_completion_sound: bool,
     #[arg(help = "Initial user message")]
     pub query: Vec<String>,
 }
@@ -401,7 +403,9 @@ async fn run_with_args_and_prefill(
         match result {
             Ok(result) => {
                 debug_assert_eq!(result.new_messages, observed_messages);
-                play_turn_completed_sound();
+                if !args.no_completion_sound {
+                    play_turn_completed_sound();
+                }
             }
             Err(crate::providers::ProviderError::Cancelled)
                 if cancellation_token.is_cancelled() =>
@@ -610,6 +614,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             new: true,
             images: Vec::new(),
             allow_git: args.allow_git,
+            no_completion_sound: args.no_completion_sound,
             query: Vec::new(),
         },
         &store,
@@ -1428,6 +1433,7 @@ async fn handle_slash_command(
                     talk: false,
                     command: false,
                     allow_git: *allow_git_writes,
+                    no_completion_sound: args.no_completion_sound,
                 },
                 store,
             )?;

@@ -51,6 +51,7 @@ pub async fn spawn_cancellable_with_usage(
         .arg("--model")
         .arg(&raw_model)
         .arg("--single")
+        .arg("--no-completion-sound")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

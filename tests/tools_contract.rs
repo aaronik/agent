@@ -483,6 +483,51 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     assert!(output.contains("browser_control cannot work"));
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn spawn_does_not_play_completion_sound() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let fake_bin = tempfile::tempdir().expect("fake bin");
+    let sound_log = temp_home.path().join("sound.log");
+    let afplay = fake_bin.path().join("afplay");
+    std::fs::write(
+        &afplay,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$AGENT_SOUND_LOG\"\n",
+    )
+    .expect("write fake afplay");
+    std::fs::set_permissions(&afplay, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake afplay executable");
+
+    let path = format!(
+        "{}:{}",
+        fake_bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("UTF-8 home path"));
+    let _path = EnvGuard::set("PATH", &path);
+    let _sound_log = EnvGuard::set(
+        "AGENT_SOUND_LOG",
+        sound_log.to_str().expect("UTF-8 sound log path"),
+    );
+    let _model = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
+
+    spawn(SpawnArgs {
+        task: "run echo hi".to_string(),
+        conversation_id: None,
+    })
+    .await
+    .expect("spawn");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !sound_log.exists(),
+        "subagent completion should not play a sound"
+    );
+}
+
 #[tokio::test]
 async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
