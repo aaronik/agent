@@ -6,6 +6,14 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// Normal integration tests must never trigger host audio. Tests that verify
+/// completion audio construct `Command` directly and replace `afplay`.
+fn agent_command() -> Command {
+    let mut command = Command::cargo_bin("agent").expect("agent binary");
+    command.arg("--no-completion-sound");
+    command
+}
+
 #[test]
 #[cfg(target_os = "macos")]
 fn successful_text_turn_plays_completion_sound() {
@@ -51,7 +59,7 @@ fn successful_text_turn_plays_completion_sound() {
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     let output = cmd
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
@@ -95,7 +103,7 @@ fn mock_single_turn_executes_tool_and_saves_session() {
 fn default_store_uses_consolidated_agent_home_directory() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
         .assert()
@@ -109,7 +117,7 @@ fn default_store_uses_consolidated_agent_home_directory() {
 fn submitted_user_message_is_rendered_as_durable_output() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     let output = cmd
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "a unique user message"])
@@ -125,7 +133,7 @@ fn submitted_user_message_is_rendered_as_durable_output() {
 fn submitted_user_message_does_not_print_working_placeholder() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     let output = cmd
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
@@ -144,14 +152,14 @@ fn submitted_user_message_does_not_print_working_placeholder() {
 fn interactive_start_does_not_replay_latest_session_without_resume() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut initial = Command::cargo_bin("agent").expect("agent binary");
+    let mut initial = agent_command();
     initial
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "stale output sentinel"])
         .assert()
         .success();
 
-    let mut interactive = Command::cargo_bin("agent").expect("agent binary");
+    let mut interactive = agent_command();
     let output = interactive
         .env("HOME", temp_home.path())
         .args(["--model", "mock"])
@@ -170,14 +178,14 @@ fn interactive_start_does_not_replay_latest_session_without_resume() {
 fn resume_replay_shows_tool_commands() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut initial = Command::cargo_bin("agent").expect("agent binary");
+    let mut initial = agent_command();
     initial
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
         .assert()
         .success();
 
-    let mut replay = Command::cargo_bin("agent").expect("agent binary");
+    let mut replay = agent_command();
     replay
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "--resume"])
@@ -191,14 +199,14 @@ fn resume_replay_shows_tool_commands() {
 fn slash_resume_replays_conversation_output() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut initial = Command::cargo_bin("agent").expect("agent binary");
+    let mut initial = agent_command();
     initial
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
         .assert()
         .success();
 
-    let mut resume = Command::cargo_bin("agent").expect("agent binary");
+    let mut resume = agent_command();
     resume
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "/resume latest"])
@@ -223,7 +231,7 @@ fn new_session_loads_agents_md_memory_file() {
     )
     .expect("write claude memory");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.current_dir(project.path())
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
@@ -262,7 +270,7 @@ fn new_session_loads_user_agents_md_from_agent_directory() {
     )
     .expect("write user agents memory");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.current_dir(project.path())
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "run echo hi"])
@@ -293,7 +301,7 @@ fn new_session_loads_user_agents_md_from_agent_directory() {
 fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args(["--model", "mock", "-c", "run echo hi"])
         .assert()
@@ -305,7 +313,7 @@ fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
 
 #[test]
 fn command_buffer_flag_is_available_in_help() {
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env_remove("OPENAI_API_KEY")
         .arg("--help")
         .assert()
@@ -316,7 +324,7 @@ fn command_buffer_flag_is_available_in_help() {
 
 #[test]
 fn no_completion_sound_flag_is_available_in_help() {
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env_remove("OPENAI_API_KEY")
         .arg("--help")
         .assert()
@@ -329,7 +337,7 @@ fn no_completion_sound_flag_is_available_in_help() {
 
 #[test]
 fn no_subagent_flag_is_available_in_help() {
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env_remove("OPENAI_API_KEY")
         .arg("--help")
         .assert()
@@ -342,7 +350,7 @@ fn no_subagent_flag_is_available_in_help() {
 
 #[test]
 fn help_does_not_require_provider_configuration() {
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env_remove("OPENAI_API_KEY")
         .arg("--help")
         .assert()
@@ -363,7 +371,7 @@ async fn update_pricing_flag_downloads_litellm_pricing_without_provider_configur
         .await;
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env(
             "AGENT_PRICING_URL",
@@ -389,7 +397,7 @@ async fn update_pricing_flag_downloads_litellm_pricing_without_provider_configur
 fn single_without_query_does_not_require_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .arg("--single")
@@ -401,7 +409,7 @@ fn single_without_query_does_not_require_provider_configuration() {
 fn single_without_model_uses_gpt_5_6_terra_default() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env("AGENT_MODEL", "")
         .env("OLLAMA_MODEL", "")
@@ -417,7 +425,7 @@ fn single_without_model_uses_gpt_5_6_terra_default() {
 fn interactive_without_tty_returns_actionable_error() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args(["--new", "--model", "mock"])
@@ -450,7 +458,7 @@ fn slash_compact_summarizes_old_turns_and_archives_full_session() {
     let original = agent_rs::session::Session::new("compact-session".to_string(), messages);
     store.save(&original).expect("save session");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args([
             "--model",
@@ -513,7 +521,7 @@ fn slash_session_shows_current_session_information_without_provider_configuratio
     let updated_at = session.updated_at.to_rfc3339();
     store.save(&session).expect("save session");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args([
@@ -539,7 +547,7 @@ fn slash_session_shows_current_session_information_without_provider_configuratio
 fn slash_help_does_not_require_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args(["--single", "/help"])
@@ -566,7 +574,7 @@ fn slash_find_locates_conversation_without_provider_configuration() {
         ))
         .expect("save session");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args(["--single", "/find when we worked on shasta_private_land.py"])
@@ -580,7 +588,7 @@ fn slash_find_locates_conversation_without_provider_configuration() {
 #[test]
 fn slash_find_requires_a_query() {
     let temp_home = tempfile::tempdir().expect("temp home");
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args(["--single", "/find"])
         .assert()
@@ -592,7 +600,7 @@ fn slash_find_requires_a_query() {
 fn slash_new_aliases_clear_without_provider_configuration() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args(["--single", "/new"])
@@ -613,7 +621,7 @@ fn user_skills_are_invocable_and_receive_arguments() {
     )
     .expect("write skill");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "/review src/main.rs"])
         .assert()
@@ -663,7 +671,7 @@ fn project_skills_override_user_skills_and_appear_in_completion() {
         agent_rs::cli::completion_values_for_line_in_dir(&store, project.path(), "/dep", 4);
     assert_eq!(values.first(), Some(&"/deploy".to_string()));
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.current_dir(project.path())
         .env("HOME", temp_home.path())
         .args(["--model", "mock", "--single", "/deploy production"])
@@ -704,7 +712,7 @@ fn slash_help_lists_visible_skills_with_project_precedence() {
         std::fs::write(root.join("SKILL.md"), contents).expect("write skill");
     }
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.current_dir(project.path())
         .env("HOME", temp_home.path())
         .args(["--single", "/help"])
@@ -721,7 +729,7 @@ fn slash_help_lists_visible_skills_with_project_precedence() {
 #[test]
 fn slash_help_explains_how_users_and_agents_create_skills() {
     let temp_home = tempfile::tempdir().expect("temp home");
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .args(["--single", "/help"])
         .assert()
@@ -837,7 +845,7 @@ async fn slash_pricing_refresh_downloads_litellm_pricing_without_provider_config
         .await;
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env(
             "AGENT_PRICING_URL",
@@ -869,7 +877,7 @@ async fn context_limit_error_notifies_user_without_crashing() {
         .await;
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env("OPENAI_API_KEY", "test-key")
         .env("AGENT_BASE_URL", server.uri())
@@ -883,7 +891,7 @@ async fn context_limit_error_notifies_user_without_crashing() {
 fn slash_model_switch_does_not_initialize_default_provider() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
-    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    let mut cmd = agent_command();
     cmd.env("HOME", temp_home.path())
         .env_remove("OPENAI_API_KEY")
         .args(["--single", "/models mock"])
@@ -922,8 +930,7 @@ fn dragged_absolute_image_path_is_not_treated_as_a_slash_command() {
     std::fs::write(&image, b"png").expect("write image");
     let escaped = image.display().to_string().replace(' ', "\\ ");
 
-    let output = Command::cargo_bin("agent")
-        .expect("agent binary")
+    let output = agent_command()
         .env("HOME", home.path())
         .args(["--model", "mock", "--single", &format!("{escaped}.")])
         .output()
@@ -947,8 +954,7 @@ fn image_flag_accepts_an_image_in_single_text_mode() {
     let image = home.path().join("pixel.png");
     std::fs::write(&image, b"\x89PNG\r\n\x1a\n").expect("write image");
 
-    let output = Command::cargo_bin("agent")
-        .expect("agent binary")
+    let output = agent_command()
         .env("HOME", home.path())
         .args(["--model", "mock", "--single", "--image"])
         .arg(&image)
