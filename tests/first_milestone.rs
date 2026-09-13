@@ -887,6 +887,40 @@ async fn context_limit_error_notifies_user_without_crashing() {
         .stderr(predicates::str::contains("Run /compact, then try again."));
 }
 
+#[tokio::test]
+async fn persistent_provider_rejection_exits_single_turn_with_original_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {"message": "No tool output found for function call broken_call",
+                      "type": "invalid_request_error", "code": null, "param": "input"}
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    agent_command()
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .env("AGENT_BASE_URL", server.uri())
+        .args(["--model", "gpt-5.2", "--single", "continue"])
+        .timeout(std::time::Duration::from_secs(5))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No tool output found"));
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let session = store.load(None).unwrap();
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .filter(|m| m.content().starts_with("[HARNESS ERROR]"))
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn slash_model_switch_does_not_initialize_default_provider() {
     let temp_home = tempfile::tempdir().expect("temp home");

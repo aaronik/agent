@@ -420,6 +420,9 @@ async fn run_with_args_and_prefill(
             Err(crate::providers::ProviderError::ContextLengthExceeded(error)) => {
                 eprintln!("{}", context_limit_notice(&error));
             }
+            Err(error @ crate::providers::ProviderError::Request(_)) if !args.single => {
+                eprintln!("{error}");
+            }
             Err(err) => return Err(err.into()),
         }
 

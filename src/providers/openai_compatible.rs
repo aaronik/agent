@@ -275,10 +275,56 @@ struct StreamingToolCall {
     arguments: String,
 }
 
+// Checkpoints can end between an assistant tool call and its output (Escape,
+// Ctrl-C, or a crash). Preserve every real result and supply an explicit unknown
+// outcome for missing ones before the next turn. Never replay historical tools.
+fn messages_with_tool_outputs(
+    messages: &[AgentMessage],
+) -> Vec<std::borrow::Cow<'_, AgentMessage>> {
+    use std::borrow::Cow;
+
+    let mut normalized = Vec::with_capacity(messages.len());
+    let mut pending: Vec<&ToolCall> = Vec::new();
+    for message in messages {
+        if let AgentMessage::Tool(result) = message {
+            pending.retain(|call| call.id != result.tool_call_id);
+        } else {
+            normalized.extend(
+                pending
+                    .drain(..)
+                    .map(interrupted_tool_output)
+                    .map(Cow::Owned),
+            );
+        }
+        normalized.push(Cow::Borrowed(message));
+        if let AgentMessage::Assistant(assistant) = message {
+            pending.extend(&assistant.tool_calls);
+        }
+    }
+    normalized.extend(
+        pending
+            .into_iter()
+            .map(interrupted_tool_output)
+            .map(Cow::Owned),
+    );
+    normalized
+}
+
+fn interrupted_tool_output(call: &ToolCall) -> AgentMessage {
+    AgentMessage::Tool(crate::agent::ToolResult {
+        tool_call_id: call.id.clone(),
+        name: call.name.clone(),
+        status: crate::agent::ToolStatus::Error,
+        content: "[HARNESS] Tool execution was interrupted or its result was not saved. The outcome is unknown; it may have had side effects. Verify the current state before retrying.".to_string(),
+        elapsed_ms: None,
+        subagent_usages: Vec::new(),
+    })
+}
+
 fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
-    messages
+    messages_with_tool_outputs(messages)
         .iter()
-        .map(|message| match message {
+        .map(|message| match message.as_ref() {
             AgentMessage::System { content } => json!({"role": "system", "content": content}),
             AgentMessage::User { content } => json!({"role": "user", "content": content}),
             AgentMessage::UserWithImages { content, images } => json!({
@@ -343,8 +389,8 @@ fn chat_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 
 fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
     let mut input = Vec::new();
-    for message in messages {
-        match message {
+    for message in messages_with_tool_outputs(messages) {
+        match message.as_ref() {
             AgentMessage::System { content } => {
                 input.push(json!({"role": "system", "content": content}));
             }

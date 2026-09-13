@@ -99,6 +99,9 @@ where
         let mut messages = starting_messages.to_vec();
         let mut new_messages = Vec::new();
         let mut usage = None;
+        // A system message cannot fix a persistently rejected HTTP request.
+        // Keep one recovery attempt, but never spend the tool-turn budget on it.
+        let mut request_recovery_attempted = false;
 
         for _ in 0..self.config.max_turns {
             check_cancelled(cancellation_token)?;
@@ -119,6 +122,10 @@ where
                 Ok(()) => events,
                 Err(error @ ProviderError::ContextLengthExceeded(_)) => return Err(error),
                 Err(ProviderError::Request(error)) => {
+                    if request_recovery_attempted {
+                        return Err(ProviderError::Request(error));
+                    }
+                    request_recovery_attempted = true;
                     let recovery_message = AgentMessage::System {
                         content: format!(
                             "[HARNESS ERROR] The provider rejected the previous request: {error}. \

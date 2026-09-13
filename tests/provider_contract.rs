@@ -707,6 +707,168 @@ async fn agent_loop_bounces_non_context_provider_request_error_back_to_agent() {
 }
 
 #[tokio::test]
+async fn agent_loop_stops_repeated_request_errors() {
+    #[derive(Clone)]
+    struct RejectingProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for RejectingProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Request("400 missing tool output".into()))
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        RejectingProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+    let error = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect_err("persistent rejection must surface");
+    assert!(
+        matches!(error, ProviderError::Request(message) if message.contains("missing tool output"))
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn provider_repairs_interrupted_tool_history_without_reexecuting_calls() {
+    for flavor in [ProviderFlavor::OpenAiChat, ProviderFlavor::OpenAiResponses] {
+        for streaming in [false, true] {
+            let server = MockServer::start().await;
+            let chat = flavor == ProviderFlavor::OpenAiChat;
+            let response = if streaming {
+                let event = if chat {
+                    json!({"choices": [{"delta": {"content": "recovered"}}]})
+                } else {
+                    json!({"type": "response.completed", "response": {"output": []}})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body(vec![event]))
+            } else {
+                ResponseTemplate::new(200).set_body_json(if chat {
+                    json!({"choices": [{"message": {"content": "recovered"}}]})
+                } else {
+                    json!({"output": []})
+                })
+            };
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+                provider: "test".into(),
+                model: "test".into(),
+                base_url: server.uri(),
+                api_key: "test".into(),
+                flavor: flavor.clone(),
+            });
+            let mut messages = vec![AgentMessage::User {
+                content: "old ask".into(),
+            }];
+            // One partially completed batch, one entirely interrupted batch, and
+            // a fully completed batch. Old recovery messages must not hide gaps.
+            for (batch, completed) in [(0, 1), (1, 0), (2, 2)] {
+                messages.push(AgentMessage::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: (0..2)
+                        .map(|i| ToolCall {
+                            id: format!("call_{batch}_{i}"),
+                            name: "run_shell_command".into(),
+                            arguments: json!({"cmd": "must never execute"}),
+                        })
+                        .collect(),
+                    usage: None,
+                    model: None,
+                    metadata: Default::default(),
+                }));
+                for i in 0..completed {
+                    messages.push(AgentMessage::Tool(agent_rs::agent::ToolResult {
+                        tool_call_id: format!("call_{batch}_{i}"),
+                        name: "run_shell_command".into(),
+                        status: agent_rs::agent::ToolStatus::Success,
+                        content: "real output".into(),
+                        elapsed_ms: None,
+                        subagent_usages: Vec::new(),
+                    }));
+                }
+                messages.push(AgentMessage::System {
+                    content: "[HARNESS ERROR] old rejection".into(),
+                });
+                messages.push(AgentMessage::User {
+                    content: "continue".into(),
+                });
+            }
+            let original = messages.clone();
+            if streaming {
+                provider.events(&messages, &[]).await.expect("stream");
+            } else {
+                provider.complete(&messages, &[]).await.expect("complete");
+            }
+            assert_eq!(
+                messages, original,
+                "serialization must not rewrite saved history"
+            );
+            let requests = server.received_requests().await.unwrap();
+            let body: serde_json::Value = requests[0].body_json().unwrap();
+            let input = body[if chat { "messages" } else { "input" }]
+                .as_array()
+                .unwrap();
+            let outputs: Vec<_> = input
+                .iter()
+                .filter(|item| {
+                    if chat {
+                        item["role"] == "tool"
+                    } else {
+                        item["type"] == "function_call_output"
+                    }
+                })
+                .collect();
+            assert_eq!(outputs.len(), 6, "every call needs exactly one output");
+            for batch in 0..3 {
+                for i in 0..2 {
+                    let id = format!("call_{batch}_{i}");
+                    let output = outputs
+                        .iter()
+                        .find(|o| o[if chat { "tool_call_id" } else { "call_id" }] == id)
+                        .unwrap();
+                    let text = output[if chat { "content" } else { "output" }]
+                        .as_str()
+                        .unwrap();
+                    if batch == 2 || (batch == 0 && i == 0) {
+                        assert_eq!(text, "real output");
+                    } else {
+                        assert!(
+                            text.contains("interrupted") && text.contains("unknown"),
+                            "{text}"
+                        );
+                    }
+                }
+            }
+            // All tool results must precede the next system/user message.
+            for (index, item) in input.iter().enumerate() {
+                if chat && item.get("tool_calls").is_some() {
+                    assert_eq!(input[index + 1]["role"], "tool");
+                    assert_eq!(input[index + 2]["role"], "tool");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn agent_loop_default_allows_more_than_legacy_turn_limit() {
     #[derive(Clone, Debug)]
     struct ManyToolCallsProvider {
