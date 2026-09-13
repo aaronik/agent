@@ -113,6 +113,7 @@ async fn spawn_one(
         .spawn()
         .map_err(|err| format!("Error spawning agent: {err}"))?;
 
+    let process_group_id = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_task = tokio::spawn(read_pipe(stdout));
@@ -121,6 +122,10 @@ async fn spawn_one(
     let output = tokio::select! {
         status = child.wait() => {
             let status = status.map_err(|err| format!("Error spawning agent: {err}"))?;
+            // The agent may have exited while a descendant still owns its stdout
+            // or stderr. Stop the process group before draining so those pipes
+            // reach EOF instead of hanging this tool call indefinitely.
+            terminate_process_group(process_group_id);
             let stdout = join_pipe_task(stdout_task, "stdout").await?;
             let stderr = join_pipe_task(stderr_task, "stderr").await?;
             std::process::Output { status, stdout, stderr }
@@ -204,8 +209,7 @@ async fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    #[cfg(unix)]
-    kill_process_group(child);
+    terminate_process_group(child.id());
     let _ = child.start_kill();
     let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
 }
@@ -218,9 +222,14 @@ fn set_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 fn set_process_group(_command: &mut Command) {}
 
+fn terminate_process_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    kill_process_group(pid);
+}
+
 #[cfg(unix)]
-fn kill_process_group(child: &Child) {
-    let Some(pid) = child.id() else {
+fn kill_process_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
         return;
     };
     let Ok(pid) = i32::try_from(pid) else {

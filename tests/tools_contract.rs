@@ -696,6 +696,41 @@ async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
     assert_eq!(output.matches("--no-subagent").count(), 5);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_does_not_hang_when_a_descendant_keeps_output_pipes_open() {
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+    use tokio::time::timeout;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let directory = tempdir().expect("temporary directory");
+    let script = directory.path().join("hold-pipes.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n(sleep 60) &\nprintf 'sessionId: fake\\n'\n",
+    )
+    .expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
+
+    let output = timeout(
+        Duration::from_secs(1),
+        spawn(SpawnArgs {
+            model: None,
+            task: "ignored".to_string(),
+            conversation_id: None,
+            num_subagents: 1,
+        }),
+    )
+    .await
+    .expect("spawn should not wait for descendant-held pipes")
+    .expect("spawn");
+
+    assert!(output.contains("sessionId: fake"));
+}
+
 #[tokio::test]
 async fn spawn_rejects_zero_subagents() {
     let result = spawn(SpawnArgs {
