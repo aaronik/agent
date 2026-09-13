@@ -1,6 +1,8 @@
 pub mod api;
 pub mod configuration;
 pub mod mock;
+pub mod models;
+pub use models::list_models;
 pub mod openai_compatible;
 
 pub use api::{Provider, ProviderError};

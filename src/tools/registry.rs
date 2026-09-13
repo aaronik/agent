@@ -79,7 +79,7 @@ impl ToolRegistry {
         if include_spawn {
             definitions.push(definition::<SpawnArgs>(
                 "spawn",
-                "Spawn a focused single-invocation agent using the configured provider.",
+                "Spawn a focused single-invocation agent. Optionally pass model as an exact model ID from /models (e.g. openai:gpt-4o or ollama:llama3:latest); invalid or unavailable models return an error before any subagents launch. When omitted, use the configured spawn model.",
             ));
         }
 

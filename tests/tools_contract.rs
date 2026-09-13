@@ -498,6 +498,107 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     assert!(output.contains("browser_control cannot work"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_model_override_must_be_in_models_list() {
+    use agent_rs::agent::ToolStatus;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "test:latest"}]
+        })))
+        .mount(&server)
+        .await;
+    let _url = EnvGuard::set("OLLAMA_URL", &server.uri());
+    let _key = EnvGuard::remove("OPENAI_API_KEY");
+    let _default = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let script = directory.path().join("spawn-arguments.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().unwrap());
+    let registry = ToolRegistry::new();
+    let definition = registry
+        .definitions()
+        .iter()
+        .find(|tool| tool.name == "spawn")
+        .unwrap();
+    assert!(definition.parameters["properties"].get("model").is_some());
+
+    let result = registry
+        .execute(
+            "selected".into(),
+            "spawn",
+            json!({
+                "intent": "test selected model", "task": "assigned task", "model": "ollama:test:latest",
+                "conversation_id": "existing-session", "num_subagents": 2
+            }),
+        )
+        .await;
+    assert_eq!(result.status, ToolStatus::Success, "{}", result.content);
+    assert_eq!(
+        result
+            .content
+            .matches("--model\nollama:test:latest")
+            .count(),
+        2
+    );
+    assert_eq!(
+        result.content.matches("--resume\nexisting-session").count(),
+        2
+    );
+    assert!(!result.content.contains("mock"));
+
+    // None of these is an exact entry in /models; mock must not bypass validation.
+    for model in [
+        "",
+        "missing",
+        "unknown:test",
+        "ollama:missing",
+        "mock",
+        "test:latest",
+    ] {
+        let result = registry
+            .execute(
+                "invalid".into(),
+                "spawn",
+                json!({
+                    "intent": "test unavailable model", "task": "must not launch", "model": model
+                }),
+            )
+            .await;
+        assert_eq!(result.status, ToolStatus::Error, "model: {model}");
+        assert!(result.content.contains("/models"), "{}", result.content);
+        assert!(!result.content.contains("[SPAWNED AGENT OUTPUT]"));
+    }
+
+    // A discovery failure must fail closed rather than launch the requested model.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "models": [{"name": "test:latest"}]
+        })))
+        .mount(&server)
+        .await;
+    let result = registry
+        .execute(
+            "unavailable".into(),
+            "spawn",
+            json!({
+                "intent": "test unavailable model", "task": "must not launch", "model": "ollama:test:latest"
+            }),
+        )
+        .await;
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("/models"));
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn spawn_does_not_play_completion_sound() {
@@ -530,6 +631,7 @@ async fn spawn_does_not_play_completion_sound() {
     let _model = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
 
     spawn(SpawnArgs {
+        model: None,
         task: "run echo hi".to_string(),
         conversation_id: None,
         num_subagents: 1,
@@ -550,6 +652,7 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     let _guard = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
 
     let output = spawn(SpawnArgs {
+        model: None,
         task: "run echo hi".to_string(),
         conversation_id: None,
         num_subagents: 1,
@@ -580,6 +683,7 @@ async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
 
     let started = std::time::Instant::now();
     let output = spawn(SpawnArgs {
+        model: None,
         task: "same assigned task".to_string(),
         conversation_id: None,
         num_subagents: 5,
@@ -595,6 +699,7 @@ async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
 #[tokio::test]
 async fn spawn_rejects_zero_subagents() {
     let result = spawn(SpawnArgs {
+        model: None,
         task: "ignored".to_string(),
         conversation_id: None,
         num_subagents: 0,
@@ -618,6 +723,7 @@ async fn spawn_marks_its_child_as_disallowing_subagents() {
     let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
 
     let output = spawn(SpawnArgs {
+        model: None,
         task: "assigned task".to_string(),
         conversation_id: None,
         num_subagents: 1,
@@ -712,6 +818,12 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
         unsafe {
@@ -730,4 +842,28 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn shell_limits_captured_output_and_times_out_after_child_exits_with_open_pipes() {
+    let output = run_shell_command(RunShellCommandArgs {
+        cmd: "head -c 200000 /dev/zero | tr '\\0' x".into(),
+        timeout: 5,
+    })
+    .await
+    .expect("output");
+    assert!(output.len() < 100_000, "captured {} bytes", output.len());
+    assert!(output.contains("[output truncated]"));
+
+    let timeout = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_shell_command(RunShellCommandArgs {
+            cmd: "(sleep 30) & echo done".into(),
+            timeout: 1,
+        }),
+    )
+    .await
+    .expect("overall timeout must include pipe drain")
+    .expect("timeout result");
+    assert!(timeout.contains("(exit code: 124)"));
 }

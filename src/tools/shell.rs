@@ -9,6 +9,8 @@ use tokio::time;
 
 use crate::agent::CancellationToken;
 
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 32 * 1024;
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RunShellCommandArgs {
     pub cmd: String,
@@ -30,14 +32,13 @@ pub async fn run_shell_command_cancellable(
             "blocked git write operation: `{blocked}`. Read-only git commands such as log, reflog, status, diff, show, and branch --list are allowed."
         ));
     }
-
-    let output = run_command_output(
+    match run_command_output(
         &args.cmd,
         Duration::from_secs(args.timeout),
         cancellation_token,
     )
-    .await?;
-    match output {
+    .await?
+    {
         CommandOutput::Completed(output) => Ok(format_completed_output(output)),
         CommandOutput::TimedOut => Ok(format!(
             "(exit code: 124)\ncommand timed out after {}s",
@@ -62,108 +63,137 @@ async fn run_command_output(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     set_process_group(&mut command);
-
     let mut child = command
         .spawn()
         .map_err(|err| format!("failed to run command: {err}"))?;
+    let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
+    let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
+    let deadline = time::Instant::now() + timeout;
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(read_pipe(stdout));
-    let stderr_task = tokio::spawn(read_pipe(stderr));
-
-    tokio::select! {
-        status = child.wait() => {
-            let status = status.map_err(|err| format!("failed to wait for command: {err}"))?;
-            let stdout = join_pipe_task(stdout_task, "stdout").await?;
-            let stderr = join_pipe_task(stderr_task, "stderr").await?;
-            Ok(CommandOutput::Completed(std::process::Output {
-                status,
-                stdout,
-                stderr,
-            }))
-        }
-        _ = time::sleep(timeout) => {
-            terminate_child(&mut child).await;
-            Ok(CommandOutput::TimedOut)
-        }
-        _ = cancellation_token.cancelled() => {
-            terminate_child(&mut child).await;
-            Ok(CommandOutput::Cancelled)
-        }
-    }
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|err| format!("failed to wait for command: {err}"))?,
+        _ = time::sleep_until(deadline) => { terminate_child(&mut child).await; return Ok(CommandOutput::TimedOut); }
+        _ = cancellation_token.cancelled() => { terminate_child(&mut child).await; return Ok(CommandOutput::Cancelled); }
+    };
+    // A descendant can retain the pipes after the shell exits. The deadline
+    // applies to draining too; killing the group closes those inherited FDs.
+    let pipes = async {
+        Ok::<_, String>((
+            join_pipe_task(stdout_task, "stdout").await?,
+            join_pipe_task(stderr_task, "stderr").await?,
+        ))
+    };
+    tokio::pin!(pipes);
+    let (stdout, stderr) = tokio::select! {
+        result = &mut pipes => result?,
+        _ = time::sleep_until(deadline) => { terminate_process_group(&child); return Ok(CommandOutput::TimedOut); }
+        _ = cancellation_token.cancelled() => { terminate_process_group(&child); return Ok(CommandOutput::Cancelled); }
+    };
+    Ok(CommandOutput::Completed(CapturedOutput {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 enum CommandOutput {
-    Completed(std::process::Output),
+    Completed(CapturedOutput),
     TimedOut,
     Cancelled,
 }
+struct CapturedOutput {
+    status: std::process::ExitStatus,
+    stdout: PipeOutput,
+    stderr: PipeOutput,
+}
+struct PipeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
 
 async fn join_pipe_task(
-    task: tokio::task::JoinHandle<Result<Vec<u8>, String>>,
+    task: tokio::task::JoinHandle<Result<PipeOutput, String>>,
     name: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<PipeOutput, String> {
     task.await
         .map_err(|err| format!("failed to join {name} reader: {err}"))?
 }
 
-async fn read_pipe<T>(pipe: Option<T>) -> Result<Vec<u8>, String>
+async fn read_pipe<T>(pipe: Option<T>) -> Result<PipeOutput, String>
 where
     T: tokio::io::AsyncRead + Unpin,
 {
-    let mut output = Vec::new();
-    if let Some(mut pipe) = pipe {
-        pipe.read_to_end(&mut output)
+    let Some(mut pipe) = pipe else {
+        return Ok(PipeOutput {
+            bytes: Vec::new(),
+            truncated: false,
+        });
+    };
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 8192];
+    let mut truncated = false;
+    loop {
+        let count = pipe
+            .read(&mut buffer)
             .await
             .map_err(|err| format!("failed to read command output: {err}"))?;
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(bytes.len());
+        let kept = count.min(remaining);
+        bytes.extend_from_slice(&buffer[..kept]);
+        truncated |= kept < count;
     }
-    Ok(output)
+    Ok(PipeOutput { bytes, truncated })
 }
 
 async fn terminate_child(child: &mut Child) {
+    terminate_process_group(child);
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    #[cfg(unix)]
-    kill_process_group(child);
     let _ = child.start_kill();
     let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
 }
-
 #[cfg(unix)]
 fn set_process_group(command: &mut Command) {
     command.process_group(0);
 }
-
 #[cfg(not(unix))]
 fn set_process_group(_command: &mut Command) {}
+fn terminate_process_group(child: &Child) {
+    #[cfg(unix)]
+    kill_process_group(child);
+}
 
 #[cfg(unix)]
 fn kill_process_group(child: &Child) {
-    let Some(pid) = child.id() else {
-        return;
-    };
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    // SAFETY: kill is called with a negative pid to signal the child's process group.
-    let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
 }
 
-fn format_completed_output(output: std::process::Output) -> String {
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-
+fn format_completed_output(output: CapturedOutput) -> String {
+    let mut combined = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
+    if output.stdout.truncated || output.stderr.truncated {
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str("[output truncated]\n");
+    }
     if !output.status.success() {
         if !combined.is_empty() && !combined.ends_with('\n') {
             combined.push('\n');
         }
-        let code = output.status.code().unwrap_or(1);
-        combined.push_str(&format!("(exit code: {code})"));
+        combined.push_str(&format!(
+            "(exit code: {})",
+            output.status.code().unwrap_or(1)
+        ));
     }
-
     combined
 }
 

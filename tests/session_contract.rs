@@ -381,3 +381,25 @@ fn prompt_metadata_does_not_render_negative_zero_cost() {
     assert!(line.contains("Cost: $0.0000"));
     assert!(!line.contains("Cost: $-0.0000"));
 }
+
+#[test]
+fn session_store_rejects_path_like_ids_and_mismatched_embedded_ids() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    let bad = Session::new("../../outside".to_string(), Vec::new());
+    assert!(store.save(&bad).is_err());
+    store.ensure_dirs().expect("dirs");
+    std::fs::write(
+        store
+            .sessions_dir()
+            .join("550e8400-e29b-41d4-a716-446655440000.json"),
+        serde_json::to_string(&Session::new("../../outside".to_string(), Vec::new())).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        store
+            .load(Some("550e8400-e29b-41d4-a716-446655440000"))
+            .is_err()
+    );
+    assert!(store.load(Some("../safe")).is_err());
+}

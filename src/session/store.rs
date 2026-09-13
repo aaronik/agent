@@ -56,6 +56,7 @@ impl SessionStore {
 
     pub fn save(&self, session: &Session) -> io::Result<()> {
         self.ensure_dirs()?;
+        validate_session_id(&session.session_id)?;
         if session.schema_version != SESSION_SCHEMA_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -103,9 +104,16 @@ impl SessionStore {
             ));
         }
 
+        validate_session_id(&id)?;
         let payload = fs::read_to_string(self.session_path(&id))?;
         let session: Session = serde_json::from_str(&payload)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        if session.session_id != id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session ID does not match its filename",
+            ));
+        }
         if session.schema_version != SESSION_SCHEMA_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -231,6 +239,24 @@ impl SessionStore {
 
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(format!("{session_id}.json"))
+    }
+}
+
+fn validate_session_id(id: &str) -> io::Result<()> {
+    // Current IDs are UUIDs, but retain compatibility with old human-readable
+    // session IDs while rejecting any path syntax on every platform.
+    if !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid session ID",
+        ))
     }
 }
 

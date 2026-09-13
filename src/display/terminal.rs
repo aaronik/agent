@@ -155,18 +155,19 @@ impl TerminalDisplay {
     }
 
     pub fn render_assistant_delta(&self, text: &str) {
-        self.output(text);
+        self.output(&sanitize_terminal_text(text));
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {
         match message {
             AgentMessage::System { .. } | AgentMessage::Tool(_) => {}
             AgentMessage::User { content } => {
-                self.output(&format!("\n{content}\n\n"));
+                self.output(&format!("\n{}\n\n", sanitize_terminal_text(content)));
             }
             AgentMessage::UserWithImages { content, images } => {
                 self.output(&format!(
-                    "\n{content}\n[attached {} image(s)]\n\n",
+                    "\n{}\n[attached {} image(s)]\n\n",
+                    sanitize_terminal_text(content),
                     images.len()
                 ));
             }
@@ -203,7 +204,7 @@ impl TerminalDisplay {
     }
 
     pub fn format_assistant_content(&self, content: &str) -> String {
-        format_markdown(content)
+        format_markdown(&sanitize_terminal_text(content))
     }
 
     pub fn format_tool_start(&self, call: &ToolCall) -> String {
@@ -230,14 +231,20 @@ impl TerminalDisplay {
                 .elapsed_ms
                 .map(|elapsed_ms| format!(" ({})", format_elapsed(elapsed_ms)))
                 .unwrap_or_default();
-            return format!("{DIM}{ITALIC}{}{elapsed}{RESET}\n", result.content.trim());
+            return format!(
+                "{DIM}{ITALIC}{}{elapsed}{RESET}\n",
+                sanitize_terminal_text(result.content.trim())
+            );
         }
 
         let exit_code = extract_shell_exit_code(&result.name, &result.content);
         let visual_status = visual_status(result.status.clone(), exit_code);
         let title = tool_result_title(&result.name, visual_status, result.elapsed_ms);
         let mut body = call.map(tool_call_body).unwrap_or_default();
-        let mut result_content = remove_shell_exit_code_marker(&result.name, &result.content);
+        let mut result_content = sanitize_terminal_text(&remove_shell_exit_code_marker(
+            &result.name,
+            &result.content,
+        ));
         result_content = format_tool_content(&result.name, &result_content);
         if !result_content.trim().is_empty() {
             body.extend(result_content.lines().map(str::to_string));
@@ -267,13 +274,14 @@ fn visual_status(status: ToolStatus, exit_code: Option<i32>) -> VisualToolStatus
 }
 
 fn tool_title(name: &str, status: VisualToolStatus) -> String {
+    let name = sanitize_terminal_text(name);
     let status_text = match status {
         VisualToolStatus::Running => styled(CYAN, "[> Running]"),
         VisualToolStatus::Done => styled(GREEN, "[OK Done]"),
         VisualToolStatus::Error(Some(code)) => styled(RED, &format!("[ERR Done ({code})]")),
         VisualToolStatus::Error(None) => styled(RED, "[ERR Done]"),
     };
-    format!("{}  {status_text}", styled(CYAN, name))
+    format!("{}  {status_text}", styled(CYAN, &name))
 }
 
 fn tool_result_title(name: &str, status: VisualToolStatus, elapsed_ms: Option<u64>) -> String {
@@ -312,8 +320,8 @@ fn format_args_lines(call: &ToolCall) -> Vec<String> {
     let mut lines = Vec::new();
     for (key, value) in args {
         let rendered = match value {
-            serde_json::Value::String(value) => value.clone(),
-            other => other.to_string(),
+            serde_json::Value::String(value) => sanitize_terminal_text(value),
+            other => sanitize_terminal_text(&other.to_string()),
         };
         let mut rendered_lines = rendered.lines();
         if let Some(first) = rendered_lines.next() {
@@ -441,6 +449,18 @@ fn remove_exit_code_marker(content: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+/// Makes externally supplied text inert before it reaches a terminal. Renderer
+/// generated SGR sequences are added only after this boundary.
+fn sanitize_terminal_text(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\x1b' => '␛',
+            character if character.is_control() && character != '\n' && character != '\t' => '�',
+            character => character,
+        })
+        .collect()
 }
 
 fn visible_width(text: &str) -> usize {

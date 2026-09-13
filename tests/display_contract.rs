@@ -449,3 +449,18 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+#[test]
+fn untrusted_content_cannot_emit_terminal_control_sequences() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_assistant_content("hello\x1b]52;c;secret\x07\x1b[2Jworld");
+    assert!(!rendered.contains("\x1b]52"));
+    assert!(!rendered.contains("\x1b[2J"));
+    assert!(strip_ansi(&rendered).contains("␛"));
+    let tool = display.format_tool_start(&ToolCall {
+        id: "x".into(),
+        name: "fetch".into(),
+        arguments: json!({"url":"x\u{1b}[2J"}),
+    });
+    assert!(!tool.contains("\x1b[2J"));
+}

@@ -11,12 +11,15 @@ use tokio::process::{Child, Command};
 use tokio::time;
 
 use crate::agent::{AgentMessage, CancellationToken, SubagentUsage};
-use crate::providers::effective_model_name;
+use crate::providers::{effective_model_name, list_models};
 use crate::session::SessionStore;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct SpawnArgs {
     pub task: String,
+    /// Exact model ID from /models; omitted to use the configured spawn model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(default = "default_num_subagents")]
@@ -48,6 +51,18 @@ pub async fn spawn_cancellable_with_usage(
         return Err("num_subagents must be at least 1".to_string());
     }
 
+    if let Some(model) = &args.model {
+        let available = tokio::select! {
+            _ = cancellation_token.cancelled() => return Err("tool call cancelled".to_string()),
+            models = list_models() => models,
+        };
+        if !available.contains(model) {
+            return Err(format!(
+                "Invalid or unavailable model {model:?}: not present in /models. Use an exact model ID from /models."
+            ));
+        }
+    }
+
     let results =
         join_all((0..args.num_subagents).map(|_| spawn_one(args.clone(), cancellation_token)))
             .await;
@@ -65,8 +80,9 @@ async fn spawn_one(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
-    let raw_model =
-        std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None));
+    let raw_model = args.model.clone().unwrap_or_else(|| {
+        std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None))
+    });
 
     let existing_usage_count = args
         .conversation_id

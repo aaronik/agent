@@ -101,18 +101,30 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     fs::write(&script_path, script)
         .map_err(|err| format!("failed to write Playwright control script: {err}"))?;
 
+    // `kill_on_drop` makes the timeout path actively terminate the script
+    // process rather than merely abandoning Command::output's future.
+    let mut script_command = Command::new(node);
+    script_command
+        .arg(&script_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    script_command.process_group(0);
+    let script_child = script_command
+        .spawn()
+        .map_err(|err| format!("failed to start Playwright script: {err}"))?;
     let output = match time::timeout(
         Duration::from_secs(args.timeout),
-        Command::new(node)
-            .arg(&script_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
+        script_child.wait_with_output(),
     )
     .await
     {
         Ok(result) => result.map_err(|err| format!("failed to run Playwright script: {err}"))?,
         Err(_) => {
+            // Dropping the child returned by wait_with_output honors kill_on_drop.
+            // Also remove the generated script on this formerly leaky path.
+            let _ = fs::remove_file(&script_path);
             if args.close
                 && let Some(session) = session_guard.take()
             {
