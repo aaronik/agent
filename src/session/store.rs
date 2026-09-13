@@ -64,14 +64,14 @@ impl SessionStore {
         }
 
         let session_path = self.session_path(&session.session_id);
-        let tmp_path = session_path.with_extension("json.tmp");
+        let tmp_path = session_path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
         let payload = serde_json::to_string_pretty(session)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         fs::write(&tmp_path, format!("{payload}\n"))?;
         fs::rename(tmp_path, session_path)?;
 
         let latest = self.latest_session_path();
-        let latest_tmp = latest.with_extension("tmp");
+        let latest_tmp = latest.with_extension(format!("{}.tmp", Uuid::new_v4()));
         fs::write(&latest_tmp, format!("{}\n", session.session_id))?;
         fs::rename(latest_tmp, latest)?;
         Ok(())

@@ -54,6 +54,34 @@ fn session_schema_v1_round_trip() {
 }
 
 #[test]
+fn concurrent_session_saves_do_not_share_a_temporary_latest_pointer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join(".agent");
+    let workers = (0..5)
+        .map(|index| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let store = SessionStore::with_root(root);
+                store
+                    .save(&Session::new(
+                        format!("session-{index}"),
+                        vec![AgentMessage::User {
+                            content: "parallel save".to_string(),
+                        }],
+                    ))
+                    .expect("concurrent save");
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("worker should not panic");
+    }
+
+    let store = SessionStore::with_root(root);
+    assert_eq!(store.list_session_ids().expect("list sessions").len(), 5);
+}
+
+#[test]
 fn session_labels_are_ordered_by_recently_saved_first() {
     let temp = tempfile::tempdir().expect("temp dir");
     let store = SessionStore::with_root(temp.path().join(".agent"));

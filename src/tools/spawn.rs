@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use futures_util::future::join_all;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -17,6 +19,12 @@ pub struct SpawnArgs {
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default = "default_num_subagents")]
+    pub num_subagents: usize,
+}
+
+fn default_num_subagents() -> usize {
+    1
 }
 
 pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
@@ -36,6 +44,27 @@ pub async fn spawn_cancellable_with_usage(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
+    if args.num_subagents == 0 {
+        return Err("num_subagents must be at least 1".to_string());
+    }
+
+    let results =
+        join_all((0..args.num_subagents).map(|_| spawn_one(args.clone(), cancellation_token)))
+            .await;
+    let mut outputs = Vec::with_capacity(results.len());
+    let mut usages = Vec::new();
+    for result in results {
+        let (output, child_usages) = result?;
+        outputs.push(output);
+        usages.extend(child_usages);
+    }
+    Ok((outputs.join("\n\n"), usages))
+}
+
+async fn spawn_one(
+    args: SpawnArgs,
+    cancellation_token: &CancellationToken,
+) -> Result<(String, Vec<SubagentUsage>), String> {
     let raw_model =
         std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None));
 
@@ -50,7 +79,6 @@ pub async fn spawn_cancellable_with_usage(
     command
         .arg("--model")
         .arg(&raw_model)
-        .arg("--single")
         .arg("--no-subagent")
         .arg("--no-completion-sound")
         .stdin(Stdio::null())
@@ -64,6 +92,7 @@ pub async fn spawn_cancellable_with_usage(
     }
 
     let mut child = command
+        .arg("--single")
         .arg(args.task)
         .spawn()
         .map_err(|err| format!("Error spawning agent: {err}"))?;

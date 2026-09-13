@@ -532,6 +532,7 @@ async fn spawn_does_not_play_completion_sound() {
     spawn(SpawnArgs {
         task: "run echo hi".to_string(),
         conversation_id: None,
+        num_subagents: 1,
     })
     .await
     .expect("spawn");
@@ -551,6 +552,7 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     let output = spawn(SpawnArgs {
         task: "run echo hi".to_string(),
         conversation_id: None,
+        num_subagents: 1,
     })
     .await
     .expect("spawn");
@@ -559,6 +561,46 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     assert!(output.contains("Tool completed: hi"));
     assert!(output.contains("sessionId: "));
     assert!(output.contains("[CONVERSATION ID]"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let directory = tempdir().expect("temporary directory");
+    let script = directory.path().join("parallel-spawn.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 0.2\nprintf '%s\\n' \"$@\"\n")
+        .expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
+
+    let started = std::time::Instant::now();
+    let output = spawn(SpawnArgs {
+        task: "same assigned task".to_string(),
+        conversation_id: None,
+        num_subagents: 5,
+    })
+    .await
+    .expect("spawn");
+
+    assert!(started.elapsed() < Duration::from_millis(600));
+    assert_eq!(output.matches("same assigned task").count(), 5, "{output}");
+    assert_eq!(output.matches("--no-subagent").count(), 5);
+}
+
+#[tokio::test]
+async fn spawn_rejects_zero_subagents() {
+    let result = spawn(SpawnArgs {
+        task: "ignored".to_string(),
+        conversation_id: None,
+        num_subagents: 0,
+    })
+    .await;
+    assert_eq!(result, Err("num_subagents must be at least 1".to_string()));
 }
 
 #[cfg(unix)]
@@ -578,6 +620,7 @@ async fn spawn_marks_its_child_as_disallowing_subagents() {
     let output = spawn(SpawnArgs {
         task: "assigned task".to_string(),
         conversation_id: None,
+        num_subagents: 1,
     })
     .await
     .expect("spawn");
