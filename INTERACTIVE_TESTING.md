@@ -10,8 +10,9 @@ Use a temporary `HOME` to avoid modifying real sessions/history; retain the real
    explicit window size (for example 80 columns × 24 rows).
 2. Feed the PTY output into a terminal emulator. Answer cursor-position requests
    (`ESC [ 6 n`) using the emulator's actual cursor, not a constant coordinate.
-3. Type `run echo hi`, then Enter. Confirm the running tool panel, completed
-   panel, and `Tool completed: hi` appear in order. Confirm a clean new prompt.
+3. Type `run sleep 1; echo hi`, then Enter. Confirm a transient Running preview,
+   then one completed panel and `Tool completed: hi`. Check screen plus scrollback:
+   no Running preview should remain. Confirm a clean new prompt.
 4. Repeat a turn; exit with Ctrl-C. Check cursor visibility and terminal modes.
 5. Repeat with `AGENT_NO_LIVE=1` and with `--single`.
 

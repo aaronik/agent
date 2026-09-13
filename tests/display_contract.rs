@@ -464,3 +464,134 @@ fn untrusted_content_cannot_emit_terminal_control_sequences() {
     });
     assert!(!tool.contains("\x1b[2J"));
 }
+
+fn transcript(terminal: &mut vt100::Parser) -> String {
+    terminal.screen_mut().set_scrollback(0);
+    let mut text = terminal.screen().contents();
+    for offset in 1..=500 {
+        terminal.screen_mut().set_scrollback(offset);
+        text.push('\n');
+        text.push_str(&terminal.screen().contents());
+    }
+    terminal.screen_mut().set_scrollback(0);
+    text
+}
+
+#[test]
+fn running_tools_are_transient_even_across_output_and_footer_growth() {
+    let mut terminal = vt100::Parser::new(12, 80, 1000);
+    let mut live = LiveRenderer::new(80, 12);
+    feed(&mut terminal, live.start("status"));
+    feed(&mut terminal, live.output("existing transcript\n"));
+    let call = ToolCall {
+        id: "one".into(),
+        name: "fetch".into(),
+        arguments: json!({"url": "https://example.com"}),
+    };
+    feed(&mut terminal, live.tool_start(&call));
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("[> Running]"), "{visible}");
+    assert!(visible.contains("https://example.com"), "{visible}");
+    for i in 0..100 {
+        feed(&mut terminal, live.output(&format!("OUTPUT-{i:03}\n")));
+        feed(
+            &mut terminal,
+            live.input("one\ntwo\nthree\nfour", 18, "INSERT", "~"),
+        );
+        feed(&mut terminal, live.spinner(i));
+        feed(&mut terminal, live.input("", 0, "INSERT", "~"));
+    }
+    let done = TerminalDisplay::new().format_tool_result_for_call(
+        &ToolResult {
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            status: ToolStatus::Success,
+            content: "RESULT-MARKER".into(),
+            elapsed_ms: Some(123),
+            subagent_usages: vec![],
+        },
+        Some(&call),
+    );
+    feed(&mut terminal, live.tool_result(&call.id, &done));
+    assert!(terminal.screen().contents().contains("[OK Done]"));
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(!history.contains("Running"), "{history}");
+    assert!(history.contains("existing transcript"));
+    assert!(history.contains("RESULT-MARKER"));
+    for i in 0..100 {
+        assert!(history.contains(&format!("OUTPUT-{i:03}")));
+    }
+}
+
+#[test]
+fn running_preview_tracks_call_ids_and_cancellation_cleans_up() {
+    let mut terminal = vt100::Parser::new(12, 80, 1000);
+    let mut live = LiveRenderer::new(80, 12);
+    feed(&mut terminal, live.start("status"));
+    for (id, name) in [("a", "FIRST"), ("b", "SECOND")] {
+        feed(
+            &mut terminal,
+            live.tool_start(&ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: json!({}),
+            }),
+        );
+    }
+    // A repeated notification updates rather than duplicates a running call.
+    feed(
+        &mut terminal,
+        live.tool_start(&ToolCall {
+            id: "a".into(),
+            name: "FIRST".into(),
+            arguments: json!({}),
+        }),
+    );
+    assert_eq!(terminal.screen().contents().matches("FIRST").count(), 1);
+    feed(&mut terminal, live.tool_result("b", "SECOND completed\n"));
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("[> Running] FIRST"), "{visible}");
+    assert!(!visible.contains("[> Running] SECOND"), "{visible}");
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(!history.contains("Running"), "{history}");
+    assert!(history.contains("SECOND completed"));
+    assert!(!terminal.screen().hide_cursor());
+}
+
+#[test]
+fn running_previews_are_bounded_sanitized_and_resize_safely() {
+    let mut terminal = vt100::Parser::new(24, 80, 1000);
+    let mut live = LiveRenderer::new(80, 24);
+    feed(&mut terminal, live.start("status"));
+    feed(&mut terminal, live.output("PRESERVE\n"));
+    for i in 0..10 {
+        let rendered = live.tool_start(&ToolCall {
+            id: i.to_string(),
+            name: "fetch".into(),
+            arguments: json!({"url": format!("\u{1b}[2J{}", "漢字🙂\n".repeat(100))}),
+        });
+        assert!(!rendered.contains("\x1b[2J"));
+        feed(&mut terminal, rendered);
+    }
+    assert!(terminal.screen().contents().contains('…'));
+    // vt100 truncates screen cells on shrink rather than reflowing them like
+    // native terminals. Put the marker into scrollback before a 2-column resize.
+    feed(&mut terminal, live.output(&"history\n".repeat(40)));
+    for (width, height) in [(40, 12), (100, 35), (8, 4), (2, 2), (80, 24)] {
+        terminal.screen_mut().set_size(height, width);
+        feed(&mut terminal, live.resize(width, height));
+        feed(
+            &mut terminal,
+            live.input(&"draft".repeat(100), 500, "INSERT", "~"),
+        );
+        feed(&mut terminal, live.spinner(2));
+        feed(&mut terminal, live.input("", 0, "INSERT", "~"));
+    }
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(!history.contains("Running"), "{history}");
+    assert!(!history.contains("url="), "{history}");
+    assert!(history.contains("PRESERVE"));
+}

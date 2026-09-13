@@ -94,6 +94,10 @@ impl TerminalDisplay {
     }
 
     fn output(&self, text: &str) {
+        self.output_with(text, |renderer| renderer.output(text));
+    }
+
+    fn output_with(&self, text: &str, update: impl FnOnce(&mut LiveRenderer) -> String) {
         let Ok(mut renderer) = self.renderer.lock() else {
             return;
         };
@@ -104,7 +108,7 @@ impl TerminalDisplay {
             {
                 rendered.push_str(&renderer.resize_at(width, height, terminal_cursor_position()));
             }
-            rendered.push_str(&renderer.output(text));
+            rendered.push_str(&update(renderer));
             rendered
         } else {
             text.to_string()
@@ -139,6 +143,10 @@ impl TerminalDisplay {
     }
 
     pub fn finish_turn(&self) {
+        let Ok(mut calls) = self.active_calls.lock() else {
+            return;
+        };
+        calls.clear();
         let Ok(mut renderer) = self.renderer.lock() else {
             return;
         };
@@ -183,24 +191,26 @@ impl TerminalDisplay {
     }
 
     pub fn render_tool_result(&self, result: &ToolResult) {
-        let active = self
-            .active_calls
-            .lock()
-            .ok()
-            .and_then(|mut calls| calls.remove(&result.tool_call_id));
+        // Hold call state through rendering, always before the renderer lock.
+        // Starts/results cannot interleave their state and display updates.
+        let Ok(mut calls) = self.active_calls.lock() else {
+            return;
+        };
+        let active = calls.remove(&result.tool_call_id);
         let rendered = self.format_tool_result_with_call(result, active.as_ref());
-        // Durable output is append-only. A panel may already be in scrollback,
-        // so relative cursor erasure cannot safely replace it.
-        self.output(&rendered);
+        self.output_with(&rendered, |renderer| {
+            renderer.tool_result(&result.tool_call_id, &rendered)
+        });
     }
 
     pub fn render_tool_start(&self, call: &ToolCall) {
-        if let Ok(mut calls) = self.active_calls.lock() {
-            calls.insert(call.id.clone(), call.clone());
-        }
-        if self.live_enabled {
-            self.output(&self.format_tool_start(call));
-        }
+        let Ok(mut calls) = self.active_calls.lock() else {
+            return;
+        };
+        calls.insert(call.id.clone(), call.clone());
+        // Without a live renderer (pipes / AGENT_NO_LIVE), emit only the final
+        // result. Never commit a Running preview to permanent scrollback.
+        self.transaction(|renderer| renderer.tool_start(call));
     }
 
     pub fn format_assistant_content(&self, content: &str) -> String {

@@ -21,6 +21,7 @@ pub struct LiveRenderer {
     mode: String,
     prompt: String,
     frame: usize,
+    running_tools: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for LiveRenderer {
@@ -48,6 +49,7 @@ impl LiveRenderer {
             mode: "INSERT".into(),
             prompt: super::working_directory_prompt(),
             frame: 0,
+            running_tools: Vec::new(),
         }
     }
 
@@ -143,6 +145,67 @@ impl LiveRenderer {
             .collect()
     }
 
+    /// Running calls never enter the terminal's durable transcript. Keep a
+    /// stable order and update by ID so overlapping calls complete independently.
+    pub fn tool_start(&mut self, call: &crate::agent::ToolCall) -> String {
+        let mut out = self.clear();
+        let summary = working_input_preview(&format!(
+            "[> Running] {}  {}",
+            call.name,
+            super::format_args_lines(call).join("  ")
+        ));
+        if let Some((_, preview)) = self.running_tools.iter_mut().find(|(id, _)| id == &call.id) {
+            *preview = summary;
+        } else {
+            self.running_tools.push((call.id.clone(), summary));
+        }
+        out.push_str(&self.draw());
+        out
+    }
+
+    pub fn tool_result(&mut self, id: &str, completed: &str) -> String {
+        self.running_tools
+            .retain(|(running_id, _)| running_id != id);
+        // output() clears the old transient area before appending the result,
+        // then redraws only the tools that are still running.
+        self.output(completed)
+    }
+
+    fn tool_lines(&self, input_rows: usize) -> Vec<String> {
+        // Preserve the input viewport, status, separator, and an output row.
+        let budget = usize::from(self.height)
+            .saturating_sub(input_rows + 3)
+            .min(3);
+        if budget == 0 || self.width < 6 {
+            return Vec::new();
+        }
+        let width = usize::from(self.width - 1);
+        let overflow = self.running_tools.len() > budget;
+        let shown = if overflow { budget - 1 } else { budget };
+        let mut lines: Vec<_> = self
+            .running_tools
+            .iter()
+            .take(shown)
+            .map(|(_, text)| {
+                if text.width() > width {
+                    format!("{}…", truncate_to_width(text, width - 1))
+                } else {
+                    text.clone()
+                }
+            })
+            .collect();
+        if overflow {
+            lines.push(truncate_to_width(
+                &format!(
+                    "[> Running] … {} more tools",
+                    self.running_tools.len() - shown
+                ),
+                width,
+            ));
+        }
+        lines
+    }
+
     fn draw(&mut self) -> String {
         if !self.active {
             return String::new();
@@ -151,7 +214,9 @@ impl LiveRenderer {
         if lines.is_empty() {
             return self.restore_cursor();
         }
-        let reserve = lines.len() as u16 + 2;
+        let tools = self.tool_lines(lines.len());
+        let tool_rows = tools.len() as u16;
+        let reserve = lines.len() as u16 + tool_rows + 2;
         let (row, col) = self.terminal.screen().cursor_position();
         let available = self.height - row - 1;
         let mut out = String::new();
@@ -187,9 +252,15 @@ impl LiveRenderer {
         }
         let row = self.terminal.screen().cursor_position().0;
         out.push_str(&format!("{RESET}\x1b[{};1H\x1b[J", row + 2));
+        for (index, line) in tools.iter().enumerate() {
+            out.push_str(&format!(
+                "\x1b[{};1H\x1b[36m{line}{RESET}",
+                row + 3 + index as u16
+            ));
+        }
         out.push_str(&format!(
             "\x1b[{};1H\x1b[2m{}",
-            row + 3,
+            row + 3 + tool_rows,
             truncate_to_width(
                 &working_input_preview(&self.status),
                 usize::from(self.width - 1)
@@ -198,7 +269,7 @@ impl LiveRenderer {
         for (index, line) in lines.iter().enumerate() {
             out.push_str(&format!(
                 "\x1b[{};1H\x1b[0;36m{line}{RESET}",
-                row + 4 + index as u16
+                row + 4 + tool_rows + index as u16
             ));
         }
         out.push_str(&self.restore_cursor());

@@ -49,10 +49,13 @@ User-level instructions are read from `$HOME/.agent/AGENTS.md`.
 
 ## Terminal output
 
-Live output uses normal terminal scrollback. Tool-start and completed panels are
-append-only, and results are no longer shortened to a 30-line display preview
-(the tool layer's existing size limits still apply). Long input wraps by display
-width and keeps the editing cursor visible; very small windows hide the footer.
+Live output uses normal terminal scrollback. Running tools appear as compact,
+transient previews above the input footer; only completed panels enter scrollback.
+Previews are shortened to fit (at most three rows total, with an overflow count)
+and hidden when the window is too small. Completed commands/results are not
+shortened to a 30-line display preview (the tool layer's size limits still apply).
+Long input wraps by display width and keeps the editing cursor visible.
+Piped output and `AGENT_NO_LIVE=1` omit Running previews entirely.
 
 Set `AGENT_NO_LIVE=1` to disable the working footer and animation. Supporting
 terminals use synchronized output to avoid presenting half-drawn frames; a resize
