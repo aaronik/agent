@@ -251,11 +251,48 @@ fn agent_executable() -> Result<PathBuf, String> {
 
 fn format_spawn_output(agent_stdout: &str) -> String {
     let conversation_id = session_id_from_agent_output(agent_stdout);
+    let agent_stdout = strip_terminal_escape_sequences(agent_stdout);
 
     let mut output = format!("[SPAWNED AGENT OUTPUT]\n{}", agent_stdout.trim_end());
     if let Some(conversation_id) = conversation_id {
         output.push_str(&format!("\n[CONVERSATION ID]\n{conversation_id}"));
     }
+    output
+}
+
+fn strip_terminal_escape_sequences(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars();
+
+    while let Some(character) = characters.next() {
+        if character != '\x1b' {
+            output.push(character);
+            continue;
+        }
+
+        match characters.next() {
+            Some('[') => {
+                // CSI: consume through its final byte (U+0040..=U+007E).
+                for character in characters.by_ref() {
+                    if ('@'..='~').contains(&character) {
+                        break;
+                    }
+                }
+            }
+            Some(']') | Some('P') | Some('^') | Some('_') => {
+                // OSC/DCS/PM/APC: terminated by BEL or ST (ESC \\).
+                let mut escaped = false;
+                for character in characters.by_ref() {
+                    if character == '\x07' || (escaped && character == '\\') {
+                        break;
+                    }
+                    escaped = character == '\x1b';
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+
     output
 }
 
@@ -286,6 +323,17 @@ mod tests {
             output,
             "[SPAWNED AGENT OUTPUT]\ntask complete\nsessionId:  abc-123\n[CONVERSATION ID]\nabc-123"
         );
+    }
+
+    #[test]
+    fn format_spawn_output_strips_nested_terminal_escape_sequences() {
+        let output = format_spawn_output("\x1b[90m╭─ \x1b[36mtool\x1b[0m\nsessionId: abc-123\n");
+
+        assert_eq!(
+            output,
+            "[SPAWNED AGENT OUTPUT]\n╭─ tool\nsessionId: abc-123\n[CONVERSATION ID]\nabc-123"
+        );
+        assert!(!output.contains('\x1b'));
     }
 
     #[test]
