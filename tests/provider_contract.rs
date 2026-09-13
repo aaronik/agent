@@ -470,7 +470,6 @@ async fn agent_loop_observes_text_deltas_before_the_final_message() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 1,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );
@@ -526,7 +525,6 @@ async fn agent_loop_records_model_on_assistant_responses() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 1,
-            max_context_tokens: 16_384,
             model: "openai:gpt-5.6-sol".to_string(),
         },
     );
@@ -544,7 +542,109 @@ async fn agent_loop_records_model_on_assistant_responses() {
 }
 
 #[tokio::test]
-async fn agent_loop_bounces_provider_request_error_back_to_agent() {
+async fn agent_loop_sends_full_history_without_silent_trimming() {
+    #[derive(Clone, Debug)]
+    struct InspectingProvider;
+
+    #[async_trait]
+    impl Provider for InspectingProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            assert!(messages.iter().any(|message| {
+                matches!(message, AgentMessage::User { content } if content == "original ask")
+            }));
+            assert!(messages.iter().any(|message| {
+                matches!(message, AgentMessage::User { content } if content == "latest ask")
+            }));
+            Ok(AssistantMessage {
+                content: "done".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let loop_runner = AgentLoop::new(
+        InspectingProvider,
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 1,
+            model: "mock".to_string(),
+        },
+    );
+    let result = loop_runner
+        .run_turn(&[
+            AgentMessage::User {
+                content: "original ask".to_string(),
+            },
+            AgentMessage::Assistant(AssistantMessage {
+                content: "large response ".repeat(10_000),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            }),
+            AgentMessage::User {
+                content: "latest ask".to_string(),
+            },
+        ])
+        .await
+        .expect("turn succeeds with full history");
+
+    assert_eq!(result.final_text, "done");
+}
+
+#[tokio::test]
+async fn agent_loop_returns_context_limit_error_without_retrying() {
+    #[derive(Clone, Debug)]
+    struct FullContextProvider {
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for FullContextProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::request(
+                "maximum context length exceeded".to_string(),
+            ))
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let loop_runner = AgentLoop::new(
+        FullContextProvider {
+            attempts: attempts.clone(),
+        },
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 2,
+            model: "mock".to_string(),
+        },
+    );
+    let err = loop_runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".to_string(),
+        }])
+        .await
+        .expect_err("context overflow should be returned to the CLI");
+
+    assert!(matches!(err, ProviderError::ContextLengthExceeded(_)));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn agent_loop_bounces_non_context_provider_request_error_back_to_agent() {
     #[derive(Clone, Debug)]
     struct RecoveringProvider {
         attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -585,7 +685,6 @@ async fn agent_loop_bounces_provider_request_error_back_to_agent() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 2,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );
@@ -700,7 +799,6 @@ async fn agent_loop_errors_on_max_turn_exhaustion() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 1,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );
@@ -724,7 +822,6 @@ async fn agent_loop_respects_pre_cancelled_token() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 1,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );
@@ -789,7 +886,6 @@ async fn agent_loop_aborts_in_flight_shell_tool_when_token_is_cancelled() {
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 2,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );
@@ -840,7 +936,6 @@ async fn agent_loop_aborts_in_flight_provider_request_when_token_is_cancelled() 
         ToolRegistry::new(),
         AgentLoopConfig {
             max_turns: 1,
-            max_context_tokens: 16_384,
             model: "mock".to_string(),
         },
     );

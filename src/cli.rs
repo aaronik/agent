@@ -26,8 +26,7 @@ use crate::display::TerminalDisplay;
 use crate::memory::load_all_agents_memory;
 use crate::pricing::refresh_pricing_cache;
 use crate::providers::{
-    Provider, build_provider, context_window_tokens, effective_model_name,
-    format_cost_and_context_line,
+    Provider, build_provider, effective_model_name, format_cost_and_context_line,
 };
 use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
@@ -418,6 +417,9 @@ async fn run_with_args_and_prefill(
             {
                 eprintln!("turn aborted");
             }
+            Err(crate::providers::ProviderError::ContextLengthExceeded(error)) => {
+                eprintln!("{}", context_limit_notice(&error));
+            }
             Err(err) => return Err(err.into()),
         }
 
@@ -590,6 +592,10 @@ fn load_image_attachments(
             })
         })
         .collect()
+}
+
+fn context_limit_notice(_provider_error: &str) -> &'static str {
+    "The conversation is too large for the model's context window. Run /compact, then try again."
 }
 
 fn play_turn_completed_sound() {
@@ -1666,7 +1672,6 @@ fn build_loop_runner(
         tools,
         AgentLoopConfig {
             model: model_name.to_string(),
-            max_context_tokens: context_window_tokens(model_name),
             ..AgentLoopConfig::default()
         },
     ))

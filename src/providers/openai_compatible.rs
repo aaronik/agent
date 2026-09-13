@@ -56,7 +56,7 @@ impl OpenAiCompatibleProvider {
                 "tool_choice": "auto"
             }))
             .await
-            .map_err(|err| ProviderError::Request(err.to_string()))?;
+            .map_err(|err| ProviderError::request(err.to_string()))?;
         parse_chat_response(value)
     }
 
@@ -77,7 +77,7 @@ impl OpenAiCompatibleProvider {
                 }
             }))
             .await
-            .map_err(|err| ProviderError::Request(err.to_string()))?;
+            .map_err(|err| ProviderError::request(err.to_string()))?;
         parse_responses_response(value)
     }
 
@@ -116,14 +116,14 @@ impl OpenAiCompatibleProvider {
                 }
             }))
             .await
-            .map_err(|err| ProviderError::Request(err.to_string()))?;
+            .map_err(|err| ProviderError::request(err.to_string()))?;
 
         let mut content = String::new();
         let mut tool_calls = BTreeMap::new();
         let mut usage = None;
 
         while let Some(chunk) = stream.next().await {
-            let chunk: Value = chunk.map_err(|err| ProviderError::Request(err.to_string()))?;
+            let chunk: Value = chunk.map_err(|err| ProviderError::request(err.to_string()))?;
             if let Some(chunk_usage) = parse_usage(chunk.get("usage")) {
                 usage = Some(chunk_usage.clone());
                 on_event(ProviderEvent::Usage { usage: chunk_usage });
@@ -183,13 +183,13 @@ impl OpenAiCompatibleProvider {
                 "stream": true
             }))
             .await
-            .map_err(|err| ProviderError::Request(err.to_string()))?;
+            .map_err(|err| ProviderError::request(err.to_string()))?;
 
         let mut content = String::new();
         let mut final_message = None;
 
         while let Some(chunk) = stream.next().await {
-            let chunk: Value = chunk.map_err(|err| ProviderError::Request(err.to_string()))?;
+            let chunk: Value = chunk.map_err(|err| ProviderError::request(err.to_string()))?;
             match chunk.get("type").and_then(Value::as_str) {
                 Some("response.output_text.delta") => {
                     if let Some(delta) = chunk.get("delta").and_then(Value::as_str) {
@@ -227,7 +227,7 @@ impl OpenAiCompatibleProvider {
                     final_message = Some(message);
                 }
                 Some("response.failed") | Some("response.error") => {
-                    return Err(ProviderError::Request(chunk.to_string()));
+                    return Err(ProviderError::request(chunk.to_string()));
                 }
                 _ => {}
             }

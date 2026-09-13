@@ -8,12 +8,38 @@ use crate::tools::ToolDefinition;
 pub enum ProviderError {
     #[error("provider request failed: {0}")]
     Request(String),
+    #[error("provider context limit exceeded: {0}")]
+    ContextLengthExceeded(String),
     #[error("provider response was invalid: {0}")]
     InvalidResponse(String),
     #[error("agent exceeded max tool turns ({0})")]
     MaxTurnsExceeded(usize),
     #[error("agent turn was cancelled")]
     Cancelled,
+}
+
+impl ProviderError {
+    pub fn request(message: String) -> Self {
+        if is_context_length_error(&message) {
+            Self::ContextLengthExceeded(message)
+        } else {
+            Self::Request(message)
+        }
+    }
+}
+
+fn is_context_length_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length exceeded",
+        "maximum context length",
+        "context window",
+        "too many tokens",
+        "token limit",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 #[async_trait]

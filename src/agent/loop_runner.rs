@@ -1,6 +1,5 @@
 use crate::agent::{
     AgentMessage, AgentTurnResult, AssistantMessage, CancellationToken, ProviderEvent, ToolCall,
-    trim_messages,
 };
 use crate::providers::{Provider, ProviderError, configuration::DEFAULT_MODEL};
 use crate::tools::ToolRegistry;
@@ -8,7 +7,6 @@ use crate::tools::ToolRegistry;
 #[derive(Clone, Debug)]
 pub struct AgentLoopConfig {
     pub max_turns: usize,
-    pub max_context_tokens: usize,
     pub model: String,
 }
 
@@ -19,7 +17,6 @@ impl Default for AgentLoopConfig {
             // practical cap on a normal long-running task. A 200-turn limit could
             // end an otherwise healthy run immediately after a tool result.
             max_turns: 1_000,
-            max_context_tokens: 16_384,
             model: DEFAULT_MODEL.to_string(),
         }
     }
@@ -105,11 +102,6 @@ where
 
         for _ in 0..self.config.max_turns {
             check_cancelled(cancellation_token)?;
-            let provider_messages = trim_messages(
-                &messages,
-                &self.config.model,
-                self.config.max_context_tokens,
-            );
             let mut events = Vec::new();
             let mut receive_event = |event| {
                 on_event(&event);
@@ -117,7 +109,7 @@ where
             };
             let provider_result = tokio::select! {
                 result = self.provider.stream_events(
-                    &provider_messages,
+                    &messages,
                     self.tools.definitions(),
                     &mut receive_event,
                 ) => result,
@@ -125,6 +117,7 @@ where
             };
             let events = match provider_result {
                 Ok(()) => events,
+                Err(error @ ProviderError::ContextLengthExceeded(_)) => return Err(error),
                 Err(ProviderError::Request(error)) => {
                     let recovery_message = AgentMessage::System {
                         content: format!(
@@ -204,7 +197,7 @@ fn assistant_from_events(events: Vec<ProviderEvent>) -> Result<AssistantMessage,
             ProviderEvent::TextDelta { text } => text_deltas.push(text),
             ProviderEvent::Usage { usage: event_usage } => usage = Some(event_usage),
             ProviderEvent::FinalMessage { message } => final_message = Some(message),
-            ProviderEvent::Error { message } => return Err(ProviderError::Request(message)),
+            ProviderEvent::Error { message } => return Err(ProviderError::request(message)),
             ProviderEvent::ToolCall { .. } | ProviderEvent::ToolCallDelta { .. } => {}
         }
     }

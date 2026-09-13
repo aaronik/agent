@@ -850,6 +850,35 @@ async fn slash_pricing_refresh_downloads_litellm_pricing_without_provider_config
         .stdout(predicates::str::contains("Pricing updated"));
 }
 
+#[tokio::test]
+async fn context_limit_error_notifies_user_without_crashing() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Maximum context length exceeded\"}}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let temp_home = tempfile::tempdir().expect("temp home");
+
+    let mut cmd = Command::cargo_bin("agent").expect("agent binary");
+    cmd.env("HOME", temp_home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .env("AGENT_BASE_URL", server.uri())
+        .args(["--model", "gpt-5.2", "--single", "keep the full history"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Run /compact, then try again."));
+}
+
 #[test]
 fn slash_model_switch_does_not_initialize_default_provider() {
     let temp_home = tempfile::tempdir().expect("temp home");
