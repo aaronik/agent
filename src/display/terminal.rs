@@ -2,6 +2,12 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+mod live;
+pub use live::LiveRenderer;
+
 use crate::agent::{AgentMessage, ToolCall, ToolResult, ToolStatus};
 
 const RESET: &str = "\x1b[0m";
@@ -16,23 +22,12 @@ const PANEL_MAX_WIDTH: usize = 120;
 const PANEL_PADDING: usize = 2;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-#[derive(Clone, Debug)]
-struct ActiveToolCall {
-    call: ToolCall,
-    rendered_line_count: Option<usize>,
-}
-
 #[derive(Debug)]
 pub struct TerminalDisplay {
     live_enabled: bool,
-    active_calls: Mutex<HashMap<String, ActiveToolCall>>,
-    working_footer: Mutex<Option<WorkingFooter>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WorkingFooter {
-    terminal_height: u16,
-    input_rows: u16,
+    active_calls: Mutex<HashMap<String, ToolCall>>,
+    // Serialize whole rendering transactions, not just individual print! calls.
+    renderer: Mutex<Option<LiveRenderer>>,
 }
 
 impl Default for TerminalDisplay {
@@ -46,7 +41,7 @@ impl TerminalDisplay {
         Self {
             live_enabled: std::env::var("AGENT_NO_LIVE").ok().as_deref() != Some("1"),
             active_calls: Mutex::new(HashMap::new()),
-            working_footer: Mutex::new(None),
+            renderer: Mutex::new(None),
         }
     }
 
@@ -81,222 +76,106 @@ impl TerminalDisplay {
         format!("\n\n{status_line}")
     }
 
+    fn transaction(&self, update: impl FnOnce(&mut LiveRenderer) -> String) {
+        let Ok(mut renderer) = self.renderer.lock() else {
+            return;
+        };
+        let Some(renderer) = renderer.as_mut() else {
+            return;
+        };
+        let mut rendered = String::new();
+        if let Ok((width, height)) = crossterm::terminal::size()
+            && renderer.size() != (width.max(1), height.max(1))
+        {
+            rendered.push_str(&renderer.resize_at(width, height, terminal_cursor_position()));
+        }
+        rendered.push_str(&update(renderer));
+        write_render_transaction(&rendered, true);
+    }
+
+    fn output(&self, text: &str) {
+        let Ok(mut renderer) = self.renderer.lock() else {
+            return;
+        };
+        let rendered = if let Some(renderer) = renderer.as_mut() {
+            let mut rendered = String::new();
+            if let Ok((width, height)) = crossterm::terminal::size()
+                && renderer.size() != (width.max(1), height.max(1))
+            {
+                rendered.push_str(&renderer.resize_at(width, height, terminal_cursor_position()));
+            }
+            rendered.push_str(&renderer.output(text));
+            rendered
+        } else {
+            text.to_string()
+        };
+        write_render_transaction(&rendered, renderer.is_some());
+    }
+
     pub fn render_turn_submitted(&self, status_line: &str) {
         if self.live_enabled
             && io::stdout().is_terminal()
             && let Ok((width, height)) = crossterm::terminal::size()
-            && height >= 3
+            && let Ok(mut renderer) = self.renderer.lock()
         {
-            let status_line = truncate_to_width(status_line, width as usize);
-            print!(
-                "{}",
-                Self::format_working_footer_start(&status_line, height)
-            );
-            if let Ok(mut footer) = self.working_footer.lock() {
-                *footer = Some(WorkingFooter {
-                    terminal_height: height,
-                    input_rows: 1,
-                });
-            }
+            let mut live = LiveRenderer::new(width, height);
+            write_render_transaction(&live.start(status_line), true);
+            *renderer = Some(live);
         }
-        flush_stdout();
     }
 
     pub fn update_working_footer(&self, status_line: &str) {
-        let footer = self.working_footer.lock().ok().and_then(|footer| *footer);
-        if let Some(footer) = footer {
-            let status_line = crossterm::terminal::size()
-                .ok()
-                .map(|(width, _)| truncate_to_width(status_line, width as usize))
-                .unwrap_or_else(|| status_line.to_string());
-            print!(
-                "{}",
-                Self::format_working_footer_update_rows(
-                    &status_line,
-                    footer.terminal_height,
-                    footer.input_rows,
-                )
-            );
-            flush_stdout();
-        }
+        self.transaction(|renderer| renderer.status(status_line));
     }
 
     pub fn update_working_input(&self, input: &str, cursor: usize, mode: &str) {
-        let Ok(mut footer_guard) = self.working_footer.lock() else {
-            return;
-        };
-        let Some(mut footer) = *footer_guard else {
-            return;
-        };
-        let max_input_rows = footer.terminal_height.saturating_sub(2).max(1);
-        let input_rows = (input.split('\n').count().max(1) as u16).min(max_input_rows);
-        if input_rows != footer.input_rows {
-            print!(
-                "{}",
-                Self::format_working_footer_resize(
-                    footer.input_rows,
-                    input_rows,
-                    footer.terminal_height,
-                )
-            );
-            footer.input_rows = input_rows;
-            *footer_guard = Some(footer);
-        }
-        print!(
-            "{}",
-            Self::format_working_input_update(
-                input,
-                cursor,
-                mode,
-                &working_directory_prompt(),
-                footer.terminal_height,
-            )
-        );
-        flush_stdout();
-        debug_assert!(cursor <= input.chars().count());
+        self.transaction(|renderer| {
+            renderer.input(input, cursor, mode, &working_directory_prompt())
+        });
     }
 
     pub fn update_spinner(&self, frame_index: usize) {
-        let footer = self.working_footer.lock().ok().and_then(|footer| *footer);
-        if let Some(footer) = footer {
-            let frame = SPINNER_FRAMES[frame_index % SPINNER_FRAMES.len()];
-            let input_start = footer.terminal_height - footer.input_rows + 1;
-            print!("{}", Self::format_spinner_update(frame, input_start));
-            flush_stdout();
-        }
+        self.transaction(|renderer| renderer.spinner(frame_index));
     }
 
     pub fn finish_turn(&self) {
-        let footer = self
-            .working_footer
-            .lock()
-            .ok()
-            .and_then(|mut footer| footer.take());
-        if let Some(footer) = footer {
-            print!(
-                "{}",
-                Self::format_working_footer_finish(footer.terminal_height, footer.input_rows,)
-            );
-            flush_stdout();
-        }
-    }
-
-    pub fn format_working_footer_start(status_line: &str, height: u16) -> String {
-        let output_bottom = height.saturating_sub(3).max(1);
-        format!(
-            "\x1b[?25l\x1b[r\x1b[3S\x1b[1;{output_bottom}r\x1b[{};1H\x1b[2K{}{}\x1b[{output_bottom};1H\n",
-            height.saturating_sub(2).max(1),
-            Self::format_working_footer_update(status_line, height),
-            Self::format_working_input_update("", 0, "INSERT", &working_directory_prompt(), height,)
-        )
-    }
-
-    pub fn format_working_footer_update(status_line: &str, height: u16) -> String {
-        Self::format_working_footer_update_rows(status_line, height, 1)
-    }
-
-    fn format_working_footer_update_rows(
-        status_line: &str,
-        height: u16,
-        input_rows: u16,
-    ) -> String {
-        let status_row = height.saturating_sub(input_rows).max(1);
-        format!(
-            "\x1b[s\x1b[{};1H\x1b[2K\x1b[{status_row};1H\x1b[2K{status_line}\x1b[u",
-            status_row.saturating_sub(1).max(1)
-        )
-    }
-
-    pub fn format_working_footer_resize(old_rows: u16, new_rows: u16, height: u16) -> String {
-        let old_rows = old_rows.max(1);
-        let new_rows = new_rows.max(1);
-        let output_bottom = height.saturating_sub(new_rows + 2).max(1);
-        if new_rows > old_rows {
-            let growth = new_rows - old_rows;
-            format!("\x1b[s\x1b[r\x1b[{growth}S\x1b[1;{output_bottom}r\x1b[u\x1b[{growth}A")
-        } else if old_rows > new_rows {
-            let shrink = old_rows - new_rows;
-            format!("\x1b[s\x1b[r\x1b[{shrink}T\x1b[1;{output_bottom}r\x1b[u\x1b[{shrink}B")
-        } else {
-            String::new()
-        }
-    }
-
-    pub fn format_working_input_update(
-        input: &str,
-        cursor: usize,
-        mode: &str,
-        prompt: &str,
-        height: u16,
-    ) -> String {
-        let split = char_byte_index(input, cursor);
-        let mut marked = String::with_capacity(input.len() + 3);
-        marked.push_str(&input[..split]);
-        marked.push('│');
-        marked.push_str(&input[split..]);
-        let lines = marked.split('\n').collect::<Vec<_>>();
-        let max_rows = height.saturating_sub(2).max(1) as usize;
-        let first_line = lines.len().saturating_sub(max_rows);
-        let visible = &lines[first_line..];
-        let start_row = height
-            .saturating_sub(visible.len() as u16)
-            .saturating_add(1);
-        let indicator = if mode == "NORMAL" { "〉" } else { ": " };
-        let mut rendered = String::from("\x1b[s");
-        for (index, line) in visible.iter().enumerate() {
-            let row = start_row + index as u16;
-            rendered.push_str(&format!("\x1b[{row};1H\x1b[2K"));
-            if index == 0 {
-                rendered.push_str(&format!(
-                    "\x1b[38;5;14m{} \x1b[38;5;10m{prompt}\x1b[38;5;14m{indicator}\x1b[38;5;7m",
-                    SPINNER_FRAMES[0]
-                ));
-            } else {
-                rendered.push_str("\x1b[38;5;14m  · \x1b[38;5;7m");
+        let Ok(mut renderer) = self.renderer.lock() else {
+            return;
+        };
+        if let Some(mut live) = renderer.take() {
+            let mut rendered = String::new();
+            if let Ok((width, height)) = crossterm::terminal::size()
+                && live.size() != (width.max(1), height.max(1))
+            {
+                rendered.push_str(&live.resize_at(width, height, terminal_cursor_position()));
             }
-            rendered.push_str(&working_input_preview(line));
-            rendered.push_str(RESET);
+            rendered.push_str(&live.finish());
+            write_render_transaction(&rendered, true);
         }
-        rendered.push_str("\x1b[u");
-        rendered
-    }
-
-    pub fn format_spinner_update(frame: &str, height: u16) -> String {
-        format!("\x1b[s\x1b[{height};1H\x1b[38;5;14m{frame}{RESET}\x1b[u")
-    }
-
-    pub fn format_clear_submitted_prompt_status() -> &'static str {
-        ""
-    }
-
-    pub fn format_working_footer_finish(height: u16, input_rows: u16) -> String {
-        let status_row = height.saturating_sub(input_rows).max(1);
-        let separator_row = status_row.saturating_sub(1).max(1);
-        let mut rendered = String::from("\x1b[s\x1b[r");
-        for row in separator_row..=height {
-            rendered.push_str(&format!("\x1b[{row};1H\x1b[2K"));
-        }
-        rendered.push_str("\x1b[u\x1b[?25h");
-        rendered
     }
 
     pub fn render_assistant_delta(&self, text: &str) {
-        print!("{text}");
-        flush_stdout();
+        self.output(text);
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {
         match message {
             AgentMessage::System { .. } | AgentMessage::Tool(_) => {}
             AgentMessage::User { content } => {
-                println!("\n{content}\n");
+                self.output(&format!("\n{content}\n\n"));
             }
             AgentMessage::UserWithImages { content, images } => {
-                println!("\n{content}\n[attached {} image(s)]\n", images.len());
+                self.output(&format!(
+                    "\n{content}\n[attached {} image(s)]\n\n",
+                    images.len()
+                ));
             }
             AgentMessage::Assistant(assistant) => {
                 if !assistant.content.trim().is_empty() {
-                    println!("\n{}", self.format_assistant_content(&assistant.content));
+                    self.output(&format!(
+                        "\n{}\n",
+                        self.format_assistant_content(&assistant.content)
+                    ));
                 }
             }
         }
@@ -308,33 +187,18 @@ impl TerminalDisplay {
             .lock()
             .ok()
             .and_then(|mut calls| calls.remove(&result.tool_call_id));
-        let rendered =
-            self.format_tool_result_with_call(result, active.as_ref().map(|active| &active.call));
-        if self.live_enabled
-            && io::stdout().is_terminal()
-            && let Some(line_count) = active.and_then(|active| active.rendered_line_count)
-        {
-            print!("{}", clear_rendered_lines(line_count));
-        }
-        print!("{rendered}");
-        flush_stdout();
+        let rendered = self.format_tool_result_with_call(result, active.as_ref());
+        // Durable output is append-only. A panel may already be in scrollback,
+        // so relative cursor erasure cannot safely replace it.
+        self.output(&rendered);
     }
 
     pub fn render_tool_start(&self, call: &ToolCall) {
-        let rendered = self.live_enabled.then(|| self.format_tool_start(call));
-        let rendered_line_count = rendered.as_deref().map(rendered_line_count);
         if let Ok(mut calls) = self.active_calls.lock() {
-            calls.insert(
-                call.id.clone(),
-                ActiveToolCall {
-                    call: call.clone(),
-                    rendered_line_count,
-                },
-            );
+            calls.insert(call.id.clone(), call.clone());
         }
-        if let Some(rendered) = rendered {
-            print!("{rendered}");
-            flush_stdout();
+        if self.live_enabled {
+            self.output(&self.format_tool_start(call));
         }
     }
 
@@ -360,19 +224,6 @@ impl TerminalDisplay {
         self.format_tool_result_with_call(result, call)
     }
 
-    pub fn format_tool_result_replacing_start_for_call(
-        &self,
-        result: &ToolResult,
-        call: Option<&ToolCall>,
-        start_rendered_line_count: usize,
-    ) -> String {
-        format!(
-            "{}{}",
-            clear_rendered_lines(start_rendered_line_count),
-            self.format_tool_result_with_call(result, call)
-        )
-    }
-
     fn format_tool_result_with_call(&self, result: &ToolResult, call: Option<&ToolCall>) -> String {
         if result.name == "communicate" {
             let elapsed = result
@@ -389,7 +240,7 @@ impl TerminalDisplay {
         let mut result_content = remove_shell_exit_code_marker(&result.name, &result.content);
         result_content = format_tool_content(&result.name, &result_content);
         if !result_content.trim().is_empty() {
-            body.extend(preview_lines(&result_content));
+            body.extend(result_content.lines().map(str::to_string));
         }
         if body.is_empty() {
             body.push(styled(DIM, ""));
@@ -485,20 +336,29 @@ fn format_tool_content(name: &str, content: &str) -> String {
     content.to_string()
 }
 
-fn preview_lines(content: &str) -> Vec<String> {
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut out = Vec::new();
-    for line in lines.iter().take(30) {
-        out.push((*line).to_string());
-    }
-    if lines.len() > 30 {
-        out.push(styled(DIM, "..."));
-    }
-    out
+fn format_panel(title: &str, body: &[String]) -> String {
+    let width = crossterm::terminal::size()
+        .map(|(width, _)| usize::from(width))
+        .unwrap_or(PANEL_MAX_WIDTH + 1);
+    format_panel_at_width(title, body, width)
 }
 
-fn format_panel(title: &str, body: &[String]) -> String {
-    let content_width = panel_content_width(title, body);
+pub fn format_panel_at_width(title: &str, body: &[String], width: usize) -> String {
+    let terminal_max = width.saturating_sub(1).clamp(1, PANEL_MAX_WIDTH);
+    // On narrow terminals use plain wrapped lines instead of forcing a panel
+    // whose borders/title are wider than the screen.
+    if terminal_max < PANEL_MIN_WIDTH {
+        let mut out = String::from("\n");
+        for line in std::iter::once(title).chain(body.iter().map(String::as_str)) {
+            for line in wrap_visible(line, terminal_max) {
+                out.push_str(&line);
+                out.push_str(RESET);
+                out.push('\n');
+            }
+        }
+        return out;
+    }
+    let content_width = panel_content_width(title, body, terminal_max);
     let panel_width = content_width + PANEL_PADDING * 2 + 2;
     let title_prefix = format!("{}╭─ {title} ", GREY);
     let top_fill = panel_width
@@ -535,12 +395,7 @@ fn format_panel(title: &str, body: &[String]) -> String {
     out
 }
 
-fn panel_content_width(title: &str, body: &[String]) -> usize {
-    let terminal_max = crossterm::terminal::size()
-        .ok()
-        .map(|(width, _)| (width as usize).saturating_sub(4))
-        .unwrap_or(PANEL_MAX_WIDTH)
-        .clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+fn panel_content_width(title: &str, body: &[String], terminal_max: usize) -> usize {
     let title_width = visible_width(title).saturating_add(2);
     let body_width = body
         .iter()
@@ -588,52 +443,36 @@ fn remove_exit_code_marker(content: &str) -> String {
     }
 }
 
-fn rendered_line_count(rendered: &str) -> usize {
-    rendered.lines().count()
-}
-
-fn clear_rendered_lines(line_count: usize) -> String {
-    "\x1b[1A\x1b[2K\r".repeat(line_count)
-}
-
 fn visible_width(text: &str) -> usize {
-    strip_ansi(text).chars().count()
+    strip_ansi(text).width()
 }
 
 fn wrap_visible(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || visible_width(text) <= max_width {
-        return vec![text.to_string()];
-    }
-
+    let max_width = max_width.max(1);
     let mut out = Vec::new();
     let mut line = String::new();
     let mut visible = 0;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            line.push(ch);
-            for next in chars.by_ref() {
-                line.push(next);
-                if next == 'm' {
-                    break;
-                }
-            }
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.starts_with("\x1b[")
+            && let Some(end) = remaining.find('m')
+        {
+            line.push_str(&remaining[..=end]);
+            remaining = &remaining[end + 1..];
             continue;
         }
-
-        if visible >= max_width {
+        let grapheme = remaining.graphemes(true).next().expect("nonempty text");
+        let width = grapheme.width();
+        if visible > 0 && visible + width > max_width {
             out.push(std::mem::take(&mut line));
             visible = 0;
         }
-        line.push(ch);
-        visible += 1;
+        line.push_str(grapheme);
+        visible += width;
+        remaining = &remaining[grapheme.len()..];
     }
-
-    if !line.is_empty() {
+    if !line.is_empty() || out.is_empty() {
         out.push(line);
-    }
-    if out.is_empty() {
-        out.push(String::new());
     }
     out
 }
@@ -691,11 +530,32 @@ fn char_byte_index(text: &str, character_index: usize) -> usize {
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
+    let mut used = 0;
+    text.graphemes(true)
+        .take_while(|grapheme| {
+            used += grapheme.width();
+            used <= width
+        })
+        .collect()
 }
 
-fn flush_stdout() {
-    let _ = io::stdout().flush();
+fn terminal_cursor_position() -> Option<(u16, u16)> {
+    let _input = super::TERMINAL_INPUT.lock().ok()?;
+    crossterm::cursor::position().ok()
+}
+
+fn write_render_transaction(rendered: &str, synchronized: bool) {
+    let mut out = io::stdout().lock();
+    // Supporting terminals present footer erasure, output, and redraw as one
+    // frame. Unsupported terminals safely ignore synchronized-output mode.
+    if synchronized && out.is_terminal() {
+        let _ = out.write_all(b"\x1b[?2026h");
+    }
+    let _ = out.write_all(rendered.as_bytes());
+    if synchronized && out.is_terminal() {
+        let _ = out.write_all(b"\x1b[?2026l");
+    }
+    let _ = out.flush();
 }
 
 fn format_markdown(content: &str) -> String {

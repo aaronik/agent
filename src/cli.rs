@@ -723,6 +723,9 @@ impl WorkingVimEditor {
     }
 
     fn apply(&mut self, event: Event) -> WorkingInputAction {
+        if matches!(event, Event::Resize(..)) {
+            return WorkingInputAction::Redraw;
+        }
         if let Event::Paste(text) = event {
             if self.mode == WorkingVimMode::Insert {
                 for character in text.chars() {
@@ -1058,31 +1061,40 @@ impl EscAbortWatcher {
                         }
                         last_spinner_update = std::time::Instant::now();
                     }
-                    match event::poll(Duration::from_millis(20)) {
-                        Ok(true) => match event::read() {
-                            Ok(event) => {
-                                if let Ok(mut editor) = watcher_editor.lock() {
-                                    match editor.apply(event) {
-                                        WorkingInputAction::Abort => {
-                                            cancellation_token.cancel();
-                                            break;
-                                        }
-                                        WorkingInputAction::Redraw => {
-                                            if let Some(display) = &display {
-                                                display.update_working_input(
-                                                    &editor.text(),
-                                                    editor.cursor,
-                                                    editor.mode.label(),
-                                                );
-                                            }
-                                        }
-                                        WorkingInputAction::Ignored => {}
+                    let next_event = {
+                        let _input = crate::display::TERMINAL_INPUT
+                            .lock()
+                            .expect("terminal input lock poisoned");
+                        match event::poll(Duration::from_millis(20)) {
+                            Ok(true) => event::read().map(Some),
+                            Ok(false) => Ok(None),
+                            Err(error) => Err(error),
+                        }
+                    };
+                    // Release the input lock before acquiring display/editor
+                    // locks: a render transaction may query cursor position.
+                    match next_event {
+                        Ok(Some(event)) => {
+                            if let Ok(mut editor) = watcher_editor.lock() {
+                                match editor.apply(event) {
+                                    WorkingInputAction::Abort => {
+                                        cancellation_token.cancel();
+                                        break;
                                     }
+                                    WorkingInputAction::Redraw => {
+                                        if let Some(display) = &display {
+                                            display.update_working_input(
+                                                &editor.text(),
+                                                editor.cursor,
+                                                editor.mode.label(),
+                                            );
+                                        }
+                                    }
+                                    WorkingInputAction::Ignored => {}
                                 }
                             }
-                            Err(_) => break,
-                        },
-                        Ok(false) => {}
+                        }
+                        Ok(None) => {}
                         Err(_) => break,
                     }
                 }
@@ -2723,6 +2735,19 @@ mod tests {
         editor.apply(key_event(CrosstermKeyCode::Esc));
         editor.cursor = 0;
         editor
+    }
+
+    #[test]
+    fn working_input_resize_redraws_without_changing_the_draft() {
+        let mut editor = WorkingVimEditor::default();
+        editor.apply(Event::Paste("draft 漢字".into()));
+        let cursor = editor.cursor;
+        assert_eq!(
+            editor.apply(Event::Resize(40, 12)),
+            WorkingInputAction::Redraw
+        );
+        assert_eq!(editor.text(), "draft 漢字");
+        assert_eq!(editor.cursor, cursor);
     }
 
     #[test]

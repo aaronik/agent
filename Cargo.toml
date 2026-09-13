@@ -34,6 +34,9 @@ tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 url = "2.5.7"
 termimad = "0.34.1"
 pulldown-cmark = "0.13.4"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+vt100 = "0.16"
 
 [dev-dependencies]
 assert_cmd = "2.1.1"

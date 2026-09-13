@@ -47,6 +47,18 @@ Agent state is stored under `$HOME/.agent`.
 Pricing data is cached under `$HOME/.agent/pricing`.
 User-level instructions are read from `$HOME/.agent/AGENTS.md`.
 
+## Terminal output
+
+Live output uses normal terminal scrollback. Tool-start and completed panels are
+append-only, and results are no longer shortened to a 30-line display preview
+(the tool layer's existing size limits still apply). Long input wraps by display
+width and keeps the editing cursor visible; very small windows hide the footer.
+
+Set `AGENT_NO_LIVE=1` to disable the working footer and animation. Supporting
+terminals use synchronized output to avoid presenting half-drawn frames; a resize
+that interrupts a frame can still behave differently across terminal emulators.
+See [INTERACTIVE_TESTING.md](INTERACTIVE_TESTING.md) for regression checks.
+
 ## Skills
 
 Create user skills at `~/.agent/skills/<name>/SKILL.md` or project skills at

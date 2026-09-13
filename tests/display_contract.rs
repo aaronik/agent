@@ -73,14 +73,6 @@ fn standalone_footer_keeps_a_blank_separator_above_status() {
 }
 
 #[test]
-fn working_footer_reserves_a_blank_separator_above_status() {
-    let rendered = TerminalDisplay::format_working_footer_start("Cost: $0", 24);
-    assert!(rendered.contains("\x1b[1;21r"));
-    assert!(rendered.contains("\x1b[22;1H\x1b[2K"));
-    assert!(rendered.contains("\x1b[23;1H\x1b[2KCost: $0"));
-}
-
-#[test]
 fn assistant_plain_text_content_is_preserved() {
     let display = TerminalDisplay::new();
     let rendered = display.format_assistant_content("Plain text");
@@ -197,38 +189,6 @@ fn diff_panels_render_with_diff_ansi() {
 }
 
 #[test]
-fn live_tool_result_can_replace_running_panel_in_place() {
-    let display = TerminalDisplay::new();
-    let call = ToolCall {
-        id: "call_1".to_string(),
-        name: "run_shell_command".to_string(),
-        arguments: json!({"cmd": "echo hi"}),
-    };
-    let start = display.format_tool_start(&call);
-    let rendered = display.format_tool_result_replacing_start_for_call(
-        &ToolResult {
-            tool_call_id: "call_1".to_string(),
-            name: "run_shell_command".to_string(),
-            status: ToolStatus::Success,
-            content: "hi\n".to_string(),
-            elapsed_ms: None,
-            subagent_usages: Vec::new(),
-        },
-        Some(&call),
-        start.lines().count(),
-    );
-
-    assert!(rendered.starts_with("\x1b[1A\x1b[2K\r"));
-    assert_eq!(
-        rendered.matches("\x1b[1A\x1b[2K\r").count(),
-        start.lines().count()
-    );
-    assert!(rendered.contains("[OK Done]"));
-    assert!(rendered.contains("cmd=echo hi"));
-    assert!(rendered.contains("hi"));
-}
-
-#[test]
 fn read_file_content_with_exit_code_text_still_renders_success() {
     let display = TerminalDisplay::new();
     let rendered = display.format_tool_result(&ToolResult {
@@ -263,129 +223,205 @@ fn shell_command_exit_code_marker_still_renders_error() {
     assert!(!rendered.contains("(exit code: 7)"));
 }
 
-#[test]
-fn working_footer_reserves_bottom_rows_and_renders_status_and_input() {
-    let rendered = TerminalDisplay::format_working_footer_start(
-        "cost: $0.01 | context: 90% (900/1,000) | model: mock",
-        24,
-    );
+// Exercise the same state machine used by TerminalDisplay against a terminal,
+// rather than asserting that potentially incorrect escape strings were emitted.
+use agent_rs::display::terminal::LiveRenderer;
+use unicode_width::UnicodeWidthStr;
 
-    assert!(rendered.contains("\x1b[1;21r"));
-    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
-    assert!(rendered.contains("cost: $0.01"));
-    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
-    assert!(rendered.contains("\x1b[38;5;14m: \x1b[38;5;7m│"));
-    assert!(!rendered.contains("Working..."));
-    assert!(!rendered.contains("-- INSERT --"));
-    assert!(rendered.starts_with("\x1b[?25l\x1b[r\x1b[3S\x1b[1;21r"));
-    assert!(rendered.ends_with("\x1b[21;1H\n"));
-    assert!(!rendered.contains("\x1b[s\x1b[1;21r"));
+fn feed(parser: &mut vt100::Parser, text: String) {
+    parser.process(text.as_bytes());
 }
 
 #[test]
-fn working_input_update_renders_multiline_text_on_multiple_footer_rows() {
-    let rendered = TerminalDisplay::format_working_input_update(
-        "first line\nsecond line",
-        22,
+fn live_output_preserves_scrollback_and_cleans_up_the_footer() {
+    let mut terminal = vt100::Parser::new(12, 40, 1000);
+    let mut live = LiveRenderer::new(40, 12);
+    terminal.process(b"existing transcript\r\n");
+    feed(&mut terminal, live.start("cost: $0"));
+    for i in 0..100 {
+        feed(&mut terminal, live.output(&format!("OUTPUT-{i:03}\n")));
+        feed(&mut terminal, live.spinner(i));
+    }
+    feed(&mut terminal, live.finish());
+    assert!(!terminal.screen().hide_cursor());
+    let mut history = terminal.screen().contents();
+    for offset in 1..=120 {
+        terminal.screen_mut().set_scrollback(offset);
+        history.push_str(&terminal.screen().contents());
+    }
+    assert!(history.contains("existing transcript"));
+    for i in 0..100 {
+        assert!(
+            history.contains(&format!("OUTPUT-{i:03}")),
+            "lost output {i}"
+        );
+    }
+    assert!(!history.contains("cost: $0"));
+    assert!(!history.contains('⠋'));
+    assert!(!history.contains('⠹'));
+}
+
+#[test]
+fn live_input_wraps_unicode_and_keeps_the_cursor_in_view() {
+    let mut live = LiveRenderer::new(24, 10);
+    live.start("status");
+    let input = "漢字🙂e\u{301}".repeat(40);
+    live.input(
+        &input,
+        input.chars().count(),
         "INSERT",
-        "~/projects/agent",
-        24,
+        "/a/very/long/directory",
     );
-
-    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
-    assert!(rendered.contains("first line"));
-    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
-    assert!(rendered.contains("second line│"));
-    assert!(!rendered.contains("first line↵second line"));
+    let rows = live.input_lines();
+    assert!(rows.len() <= 6);
+    assert!(rows.iter().all(|row| row.width() < 24));
+    assert!(rows.iter().any(|row| row.contains('│')));
+    live.input(&input, 0, "NORMAL", "/a/very/long/directory");
+    assert!(live.input_lines().iter().any(|row| row.contains('│')));
 }
 
 #[test]
-fn working_footer_resize_grows_reserved_input_rows() {
-    let rendered = TerminalDisplay::format_working_footer_resize(1, 2, 24);
-
-    assert!(rendered.contains("\x1b[r\x1b[1S\x1b[1;20r"));
-    assert!(rendered.ends_with("\x1b[u\x1b[1A"));
-}
-
-#[test]
-fn working_footer_resize_shrinks_reserved_input_rows() {
-    let rendered = TerminalDisplay::format_working_footer_resize(3, 1, 24);
-
-    assert!(rendered.contains("\x1b[r\x1b[2T\x1b[1;21r"));
-    assert!(rendered.ends_with("\x1b[u\x1b[2B"));
-}
-
-#[test]
-fn working_input_update_renders_typed_text_and_preserves_output_cursor() {
-    let insert = TerminalDisplay::format_working_input_update(
-        "next question",
-        13,
-        "INSERT",
-        "~/projects/agent",
-        24,
+fn resizing_and_multiline_input_do_not_leave_spinner_or_status_remnants() {
+    let mut terminal = vt100::Parser::new(24, 80, 1000);
+    let mut live = LiveRenderer::new(80, 24);
+    feed(&mut terminal, live.start("STATUS-MARKER"));
+    feed(&mut terminal, live.output("before resize\n"));
+    feed(
+        &mut terminal,
+        live.input(&"x".repeat(100), 100, "INSERT", "~/agent"),
     );
-    let normal = TerminalDisplay::format_working_input_update(
-        "next question",
-        13,
-        "NORMAL",
-        "~/projects/agent",
-        24,
+    for (width, height) in [(40, 12), (100, 35), (8, 4), (2, 2), (80, 24)] {
+        terminal.screen_mut().set_size(height, width);
+        feed(&mut terminal, live.resize(width, height));
+        feed(
+            &mut terminal,
+            live.input("one\ntwo\nthree", 13, "INSERT", "~/agent"),
+        );
+        feed(&mut terminal, live.input("", 0, "INSERT", "~/agent"));
+        feed(&mut terminal, live.spinner(3));
+        feed(&mut terminal, live.output("after resize\n"));
+    }
+    feed(&mut terminal, live.finish());
+    let visible = terminal.screen().contents();
+    assert!(!visible.contains("STATUS-MARKER"), "{visible}");
+    assert!(!visible.contains('⠸'), "{visible}");
+    assert!(!visible.contains("~/agent"), "{visible}");
+}
+
+#[test]
+fn live_stream_chunks_preserve_partial_lines_and_use_full_screen_scrolling() {
+    let mut terminal = vt100::Parser::new(10, 30, 100);
+    let mut live = LiveRenderer::new(30, 10);
+    feed(&mut terminal, live.start("status"));
+    for chunk in [
+        "hello",
+        " world",
+        "\n",
+        "漢字",
+        "🙂",
+        "!\n",
+        "x".repeat(60).as_str(),
+        "\nEND",
+    ] {
+        let rendered = live.output(chunk);
+        assert!(!rendered.contains(";7r"));
+        assert!(!rendered.contains("[1A\x1b[2K"));
+        feed(&mut terminal, rendered);
+        feed(&mut terminal, live.spinner(0));
+    }
+    feed(&mut terminal, live.finish());
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("hello world"), "{visible}");
+    assert!(visible.contains("漢字🙂!"), "{visible}");
+    assert!(visible.contains("END"), "{visible}");
+    assert!(!visible.contains("status"));
+}
+
+#[test]
+fn tool_results_are_append_only_and_do_not_silently_drop_lines() {
+    let display = TerminalDisplay::new();
+    let content = (0..100)
+        .map(|i| format!("line-{i:03}\n"))
+        .collect::<String>();
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "large".into(),
+        name: "fetch".into(),
+        status: ToolStatus::Success,
+        content,
+        elapsed_ms: None,
+        subagent_usages: Vec::new(),
+    });
+    assert!(!rendered.contains("\x1b[1A"));
+    for i in 0..100 {
+        assert!(rendered.contains(&format!("line-{i:03}")));
+    }
+}
+
+#[test]
+fn narrow_panels_fit_terminal_cells_without_losing_unicode_text() {
+    use agent_rs::display::terminal::format_panel_at_width;
+    for width in [8, 16, 40, 80] {
+        let body = vec!["漢字🙂e\u{301}".repeat(10)];
+        let rendered = format_panel_at_width("fetch [OK Done]", &body, width);
+        let plain = strip_ansi(&rendered);
+        assert!(
+            plain.lines().all(|line| line.width() < width),
+            "width {width}: {plain}"
+        );
+        assert_eq!(plain.matches('漢').count(), 10);
+        assert_eq!(plain.matches('🙂').count(), 10);
+    }
+}
+
+#[test]
+fn multiline_cursor_near_the_start_is_visible_even_with_a_long_tail() {
+    let mut live = LiveRenderer::new(30, 12);
+    live.start("status");
+    let input = format!("one\ntwo\n{}", "tail\n".repeat(50));
+    live.input(&input, 5, "INSERT", "~/agent");
+    assert!(live.input_lines().iter().any(|row| row.contains("t│wo")));
+}
+
+#[test]
+fn pending_autowrap_survives_spinner_and_footer_growth() {
+    let mut terminal = vt100::Parser::new(10, 20, 100);
+    let mut live = LiveRenderer::new(20, 10);
+    feed(&mut terminal, live.start("status"));
+    feed(&mut terminal, live.output(&"x".repeat(20)));
+    feed(
+        &mut terminal,
+        live.input("one\ntwo\nthree", 13, "INSERT", "~"),
     );
-
-    assert!(insert.starts_with("\x1b[s"));
-    assert!(insert.contains("\x1b[38;5;14m⠋ \x1b[38;5;10m~/projects/agent"));
-    assert!(
-        insert.contains("\x1b[38;5;10m~/projects/agent\x1b[38;5;14m: \x1b[38;5;7mnext question│")
-    );
-    assert!(!insert.contains("-- INSERT --"));
-    assert!(
-        normal.contains("\x1b[38;5;10m~/projects/agent\x1b[38;5;14m〉\x1b[38;5;7mnext question│")
-    );
-    assert!(!normal.contains("-- NORMAL --"));
-    assert!(insert.ends_with("\x1b[u"));
+    feed(&mut terminal, live.spinner(5));
+    feed(&mut terminal, live.output("Y\nEND"));
+    feed(&mut terminal, live.finish());
+    let screen = terminal.screen().contents();
+    assert!(screen.contains(&"x".repeat(20)), "{screen}");
+    assert!(screen.contains("Y\nEND"), "{screen}");
 }
 
 #[test]
-fn spinner_update_redraws_only_the_indicator_before_folder() {
-    assert_eq!(
-        TerminalDisplay::format_spinner_update("⠹", 24),
-        "\x1b[s\x1b[24;1H\x1b[38;5;14m⠹\x1b[0m\x1b[u"
-    );
+fn long_input_keeps_an_animated_indicator_when_scrolled_to_the_cursor() {
+    let mut live = LiveRenderer::new(20, 10);
+    live.start("status");
+    live.input(&"x".repeat(300), 300, "INSERT", "~/agent");
+    live.spinner(2);
+    assert!(live.input_lines()[0].starts_with("⠹ "));
 }
 
 #[test]
-fn working_footer_hides_real_cursor_and_finish_restores_it() {
-    let start = TerminalDisplay::format_working_footer_start("status", 24);
-    let finish = TerminalDisplay::format_working_footer_finish(24, 1);
-
-    assert!(start.starts_with("\x1b[?25l"));
-    assert!(finish.ends_with("\x1b[u\x1b[?25h"));
-}
-
-#[test]
-fn submitted_prompt_status_can_be_cleared_before_footer_starts() {
-    assert_eq!(TerminalDisplay::format_clear_submitted_prompt_status(), "");
-}
-
-#[test]
-fn working_footer_update_preserves_output_cursor() {
-    let rendered = TerminalDisplay::format_working_footer_update("updated", 24);
-
-    assert!(rendered.starts_with("\x1b[s"));
-    assert!(rendered.contains("\x1b[23;1H\x1b[2Kupdated"));
-    assert!(!rendered.contains("\x1b[24;1H"));
-    assert!(!rendered.contains("Working..."));
-    assert!(rendered.ends_with("\x1b[u"));
-}
-
-#[test]
-fn working_footer_finish_restores_scroll_region_and_clears_footer() {
-    let rendered = TerminalDisplay::format_working_footer_finish(24, 1);
-
-    assert!(rendered.contains("\x1b[r"));
-    assert!(rendered.contains("\x1b[23;1H\x1b[2K"));
-    assert!(rendered.contains("\x1b[24;1H\x1b[2K"));
-    assert!(rendered.ends_with("\x1b[u\x1b[?25h"));
+fn external_cursor_after_resize_is_used_instead_of_old_screen_coordinates() {
+    let mut terminal = vt100::Parser::new(12, 40, 100);
+    let mut live = LiveRenderer::new(40, 12);
+    feed(&mut terminal, live.start("status"));
+    feed(&mut terminal, live.output("before\n"));
+    // Model an emulator that relocates the output cursor during resize.
+    terminal.screen_mut().set_size(24, 80);
+    terminal.process(b"\x1b[5;1Hanchor\r\n");
+    feed(&mut terminal, live.resize_at(80, 24, Some((0, 5))));
+    feed(&mut terminal, live.output("after\n"));
+    feed(&mut terminal, live.finish());
+    assert!(terminal.screen().contents().contains("anchor\nafter"));
 }
 
 struct EnvGuard {
