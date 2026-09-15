@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 
+use chrono::Local;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -22,10 +23,16 @@ const PANEL_MAX_WIDTH: usize = 120;
 const PANEL_PADDING: usize = 2;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+#[derive(Clone, Debug)]
+struct ActiveToolCall {
+    call: ToolCall,
+    triggered_at: String,
+}
+
 #[derive(Debug)]
 pub struct TerminalDisplay {
     live_enabled: bool,
-    active_calls: Mutex<HashMap<String, ToolCall>>,
+    active_calls: Mutex<HashMap<String, ActiveToolCall>>,
     // Serialize whole rendering transactions, not just individual print! calls.
     renderer: Mutex<Option<LiveRenderer>>,
 }
@@ -207,7 +214,13 @@ impl TerminalDisplay {
         let Ok(mut calls) = self.active_calls.lock() else {
             return;
         };
-        calls.insert(call.id.clone(), call.clone());
+        calls.insert(
+            call.id.clone(),
+            ActiveToolCall {
+                call: call.clone(),
+                triggered_at: Local::now().format("%H:%M:%S").to_string(),
+            },
+        );
         // Without a live renderer (pipes / AGENT_NO_LIVE), emit only the final
         // result. Never commit a Running preview to permanent scrollback.
         self.transaction(|renderer| renderer.tool_start(call));
@@ -218,7 +231,11 @@ impl TerminalDisplay {
     }
 
     pub fn format_tool_start(&self, call: &ToolCall) -> String {
-        let title = tool_title(&call.name, VisualToolStatus::Running);
+        let title = tool_title(
+            &call.name,
+            VisualToolStatus::Running,
+            Some(&Local::now().format("%H:%M:%S").to_string()),
+        );
         let body = tool_call_body(call);
         format_panel(&title, &body)
     }
@@ -232,10 +249,18 @@ impl TerminalDisplay {
         result: &ToolResult,
         call: Option<&ToolCall>,
     ) -> String {
-        self.format_tool_result_with_call(result, call)
+        let active_call = call.map(|call| ActiveToolCall {
+            call: call.clone(),
+            triggered_at: String::new(),
+        });
+        self.format_tool_result_with_call(result, active_call.as_ref())
     }
 
-    fn format_tool_result_with_call(&self, result: &ToolResult, call: Option<&ToolCall>) -> String {
+    fn format_tool_result_with_call(
+        &self,
+        result: &ToolResult,
+        call: Option<&ActiveToolCall>,
+    ) -> String {
         if result.name == "communicate" {
             let elapsed = result
                 .elapsed_ms
@@ -249,8 +274,13 @@ impl TerminalDisplay {
 
         let exit_code = extract_shell_exit_code(&result.name, &result.content);
         let visual_status = visual_status(result.status.clone(), exit_code);
-        let title = tool_result_title(&result.name, visual_status, result.elapsed_ms);
-        let mut body = call.map(tool_call_body).unwrap_or_default();
+        let triggered_at = call
+            .filter(|active| !active.triggered_at.is_empty())
+            .map(|active| active.triggered_at.as_str());
+        let title = tool_result_title(&result.name, visual_status, result.elapsed_ms, triggered_at);
+        let mut body = call
+            .map(|active| tool_call_body(&active.call))
+            .unwrap_or_default();
         let mut result_content = sanitize_terminal_text(&remove_shell_exit_code_marker(
             &result.name,
             &result.content,
@@ -283,19 +313,27 @@ fn visual_status(status: ToolStatus, exit_code: Option<i32>) -> VisualToolStatus
     }
 }
 
-fn tool_title(name: &str, status: VisualToolStatus) -> String {
+fn tool_title(name: &str, status: VisualToolStatus, triggered_at: Option<&str>) -> String {
     let name = sanitize_terminal_text(name);
+    let triggered_at = triggered_at
+        .map(|time| format!("  {}", styled(DIM, time)))
+        .unwrap_or_default();
     let status_text = match status {
         VisualToolStatus::Running => styled(CYAN, "[> Running]"),
         VisualToolStatus::Done => styled(GREEN, "[OK Done]"),
         VisualToolStatus::Error(Some(code)) => styled(RED, &format!("[ERR Done ({code})]")),
         VisualToolStatus::Error(None) => styled(RED, "[ERR Done]"),
     };
-    format!("{}  {status_text}", styled(CYAN, &name))
+    format!("{}  {status_text}{triggered_at}", styled(CYAN, &name))
 }
 
-fn tool_result_title(name: &str, status: VisualToolStatus, elapsed_ms: Option<u64>) -> String {
-    let mut title = tool_title(name, status);
+fn tool_result_title(
+    name: &str,
+    status: VisualToolStatus,
+    elapsed_ms: Option<u64>,
+    triggered_at: Option<&str>,
+) -> String {
+    let mut title = tool_title(name, status, triggered_at);
     if let Some(elapsed_ms) = elapsed_ms {
         title.push_str(&format!("  {}", styled(DIM, &format_elapsed(elapsed_ms))));
     }

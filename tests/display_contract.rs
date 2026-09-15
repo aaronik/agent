@@ -2,6 +2,19 @@ use agent_rs::agent::{ToolCall, ToolResult, ToolStatus};
 use agent_rs::display::TerminalDisplay;
 use serde_json::json;
 
+fn has_trigger_time(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let bytes = word.as_bytes();
+        bytes.len() == 8
+            && bytes[2] == b':'
+            && bytes[5] == b':'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    })
+}
+
 fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
@@ -147,6 +160,7 @@ fn tool_start_panel_summarizes_running_call() {
     assert!(rendered.contains("fetch"));
     assert!(rendered.contains("[> Running]"));
     assert!(rendered.contains("url=https://example.com"));
+    assert!(has_trigger_time(&strip_ansi(&rendered)));
 }
 
 #[test]
