@@ -9,8 +9,6 @@ use tokio::time;
 
 use crate::agent::CancellationToken;
 
-const MAX_CAPTURED_OUTPUT_BYTES: usize = 32 * 1024;
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RunShellCommandArgs {
     pub cmd: String,
@@ -108,7 +106,6 @@ struct CapturedOutput {
 }
 struct PipeOutput {
     bytes: Vec<u8>,
-    truncated: bool,
 }
 
 async fn join_pipe_task(
@@ -123,29 +120,13 @@ async fn read_pipe<T>(pipe: Option<T>) -> Result<PipeOutput, String>
 where
     T: tokio::io::AsyncRead + Unpin,
 {
-    let Some(mut pipe) = pipe else {
-        return Ok(PipeOutput {
-            bytes: Vec::new(),
-            truncated: false,
-        });
-    };
     let mut bytes = Vec::new();
-    let mut buffer = [0; 8192];
-    let mut truncated = false;
-    loop {
-        let count = pipe
-            .read(&mut buffer)
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes)
             .await
             .map_err(|err| format!("failed to read command output: {err}"))?;
-        if count == 0 {
-            break;
-        }
-        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(bytes.len());
-        let kept = count.min(remaining);
-        bytes.extend_from_slice(&buffer[..kept]);
-        truncated |= kept < count;
     }
-    Ok(PipeOutput { bytes, truncated })
+    Ok(PipeOutput { bytes })
 }
 
 async fn terminate_child(child: &mut Child) {
@@ -179,12 +160,6 @@ fn kill_process_group(child: &Child) {
 fn format_completed_output(output: CapturedOutput) -> String {
     let mut combined = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
-    if output.stdout.truncated || output.stderr.truncated {
-        if !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        combined.push_str("[output truncated]\n");
-    }
     if !output.status.success() {
         if !combined.is_empty() && !combined.ends_with('\n') {
             combined.push('\n');

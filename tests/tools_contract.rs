@@ -174,6 +174,85 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     assert!(unknown.content.contains("unknown tool"));
 }
 
+fn assert_saved_tool_output(output: &str, expected: &str) {
+    let encoded_path = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Full output saved to temporary file: "))
+        .expect("saved output path");
+    let path: String = serde_json::from_str(encoded_path).expect("JSON-quoted path");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("full output"),
+        expected
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(output.contains("Delete this temporary file when finished with it."));
+    std::fs::remove_file(path).expect("remove saved output");
+}
+
+#[tokio::test]
+async fn registry_preserves_unicode_head_and_tail_and_saves_full_output() {
+    let content = format!("{}MIDDLE_ONLY{}", "🙂".repeat(20_000), "終".repeat(20_000));
+    let registry = ToolRegistry::without_spawn();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let result = registry
+            .execute(
+                "large".into(),
+                "communicate",
+                json!({"intent": "test truncation", "message": content}),
+            )
+            .await;
+        assert_eq!(result.status, agent_rs::agent::ToolStatus::Success);
+        assert!(result.content.starts_with(&"🙂".repeat(16_000)));
+        assert!(result.content.ends_with(&"終".repeat(16_000)));
+        assert!(!result.content.contains("MIDDLE_ONLY"));
+        assert!(result.content.chars().count() < 33_000);
+        results.push(result.content);
+    }
+    assert_ne!(
+        results[0], results[1],
+        "each call needs its own output file"
+    );
+    for output in results {
+        assert_saved_tool_output(&output, &content);
+    }
+}
+
+#[tokio::test]
+async fn registry_leaves_output_at_or_below_limit_unchanged() {
+    for size in [0, 31_999, 32_000] {
+        let content = "🙂".repeat(size);
+        let result = ToolRegistry::without_spawn()
+            .execute(
+                "boundary".into(),
+                "communicate",
+                json!({"intent": "test boundary", "message": content}),
+            )
+            .await;
+        assert_eq!(result.content, content);
+    }
+}
+
+#[tokio::test]
+async fn registry_truncates_and_saves_error_output_without_changing_status() {
+    let name = format!("{}ERROR_AT_END", "x".repeat(32_001));
+    let result = ToolRegistry::without_spawn()
+        .execute("error".into(), &name, json!({}))
+        .await;
+    assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
+    assert!(result.content.starts_with("unknown tool: "));
+    assert!(result.content.ends_with("ERROR_AT_END"));
+    assert!(result.content.contains("The tool finished with an error."));
+    assert_saved_tool_output(&result.content, &format!("unknown tool: {name}"));
+}
+
 #[tokio::test]
 async fn registry_truncates_all_large_tool_results_with_guidance() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
@@ -199,6 +278,7 @@ async fn registry_truncates_all_large_tool_results_with_guidance() {
     );
     assert!(result.content.contains("The tool completed successfully."));
     assert!(result.content.contains("make a more selective tool call"));
+    assert_saved_tool_output(&result.content, &"x".repeat(40_000));
 }
 
 #[tokio::test]
@@ -256,6 +336,7 @@ async fn run_shell_command_truncates_large_completed_output_with_guidance() {
     assert!(output.contains("[Output trimmed by the harness to avoid overwhelming the context.]"));
     assert!(output.contains("The tool completed successfully."));
     assert!(output.contains("make a more selective tool call"));
+    assert_saved_tool_output(&output, &"x".repeat(40_000));
 }
 
 #[tokio::test]
@@ -434,6 +515,10 @@ async fn read_file_truncates_large_content_with_guidance() {
     assert!(output.contains("[Output trimmed by the harness to avoid overwhelming the context.]"));
     assert!(output.contains("The tool completed successfully."));
     assert!(output.contains("make a more selective tool call"));
+    assert_saved_tool_output(
+        &output,
+        &format!("[FILE]: {}\n{}", path.display(), "a".repeat(40_000)),
+    );
 }
 
 #[tokio::test]
@@ -880,15 +965,17 @@ impl Drop for EnvGuard {
 }
 
 #[tokio::test]
-async fn shell_limits_captured_output_and_times_out_after_child_exits_with_open_pipes() {
+async fn shell_preserves_full_output_and_times_out_after_child_exits_with_open_pipes() {
     let output = run_shell_command(RunShellCommandArgs {
-        cmd: "head -c 200000 /dev/zero | tr '\\0' x".into(),
+        cmd: "head -c 200000 /dev/zero | tr '\\0' x; printf TAIL; printf STDERR >&2; exit 7".into(),
         timeout: 5,
     })
     .await
     .expect("output");
-    assert!(output.len() < 100_000, "captured {} bytes", output.len());
-    assert!(output.contains("[output truncated]"));
+    assert_eq!(
+        output,
+        format!("{}TAILSTDERR\n(exit code: 7)", "x".repeat(200_000))
+    );
 
     let timeout = tokio::time::timeout(
         std::time::Duration::from_secs(2),
