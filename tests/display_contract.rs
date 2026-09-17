@@ -58,6 +58,118 @@ fn assistant_markdown_renders_common_markdown_features() {
 }
 
 #[test]
+fn streamed_fences_render_like_replay_across_chunk_boundaries() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let display = TerminalDisplay::new();
+    for source in [
+        "```python\nprint('hello')\n```",
+        "~~~~rust\nfn main() {}\n~~~\n~~~~\n",
+        "```unknown\n漢字🙂\n```\n",
+        "```python\nprint('unfinished')",
+        "```\nliteral ``` inside code\n```\n",
+        "   ```rust\n   fn main() {}\n   ```\n",
+    ] {
+        let mut stream = AssistantMarkdownStream::default();
+        let mut rendered = String::new();
+        for character in source.chars() {
+            let delta = stream.push(&character.to_string());
+            assert!(!delta.contains("```python"), "raw fence leaked: {delta}");
+            rendered.push_str(&delta);
+        }
+        rendered.push_str(&stream.finish());
+        assert_eq!(
+            rendered,
+            display.format_assistant_content(source),
+            "{source}"
+        );
+        assert_eq!(stream.push("next response"), "next response");
+        assert!(stream.finish().is_empty());
+    }
+}
+
+#[test]
+fn streaming_prose_remains_immediate_and_fence_like_text_is_preserved() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    for source in [
+        "ordinary prose",
+        "inline ``` is not a block\n",
+        "``not fenced\n",
+        "    ```indented\n",
+        "```bad`info\n",
+    ] {
+        let mut stream = AssistantMarkdownStream::default();
+        let mut rendered = String::new();
+        for character in source.chars() {
+            rendered.push_str(&stream.push(&character.to_string()));
+        }
+        rendered.push_str(&stream.finish());
+        assert_eq!(rendered, source);
+    }
+    let mut stream = AssistantMarkdownStream::default();
+    assert_eq!(stream.push("hello"), "hello");
+    assert_eq!(stream.push(" world\n"), " world\n");
+    assert!(stream.push("``").is_empty());
+    assert!(stream.push("`python\nprint('hi')\n").is_empty());
+    let rendered = stream.push("```\nAfter");
+    assert!(rendered.contains("\x1b[38;2;"));
+    assert!(strip_ansi(&rendered).contains("print('hi')"));
+    assert!(strip_ansi(&rendered).trim_end().ends_with("After"));
+    assert!(!rendered.contains("```"));
+    assert!(stream.finish().is_empty());
+}
+
+#[test]
+fn streamed_code_survives_scrollback_and_interrupted_message_boundaries() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let mut stream = AssistantMarkdownStream::default();
+    let mut terminal = vt100::Parser::new(10, 40, 1000);
+    let mut live = LiveRenderer::new(40, 10);
+    feed(&mut terminal, live.start("CODE-STATUS"));
+    assert!(stream.push("```python\n").is_empty());
+    for index in 0..120 {
+        assert!(
+            stream
+                .push(&format!("print('line-{index:03}')\n"))
+                .is_empty()
+        );
+        feed(&mut terminal, live.spinner(index));
+    }
+    // Finishing an interrupted/unclosed block must not lose its contents.
+    feed(&mut terminal, live.output(&stream.finish()));
+    feed(&mut terminal, live.output(&stream.push("NEXT-MESSAGE\n")));
+    feed(&mut terminal, live.finish());
+    terminal.screen_mut().set_scrollback(1000);
+    let mut transcript = String::new();
+    loop {
+        transcript.push_str(&terminal.screen().contents());
+        let offset = terminal.screen().scrollback();
+        if offset == 0 {
+            break;
+        }
+        terminal
+            .screen_mut()
+            .set_scrollback(offset.saturating_sub(10));
+    }
+    for index in 0..120 {
+        assert!(
+            transcript.contains(&format!("line-{index:03}")),
+            "{transcript}"
+        );
+    }
+    assert!(transcript.contains("NEXT-MESSAGE"));
+    assert!(!transcript.contains("```"));
+    assert!(!transcript.contains("CODE-STATUS"));
+
+    assert!(stream.push("```unknown\n\x1b[2J\n").is_empty());
+    let interrupted = stream.finish();
+    assert!(!interrupted.contains("\x1b[2J"));
+    assert!(interrupted.contains("␛[2J"));
+}
+
+#[test]
 fn streamed_assistant_final_render_only_appends_unstreamed_suffix() {
     assert_eq!(
         TerminalDisplay::assistant_stream_remainder("hello", "hello world"),

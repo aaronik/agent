@@ -859,6 +859,84 @@ async fn slash_pricing_refresh_downloads_litellm_pricing_without_provider_config
 }
 
 #[tokio::test]
+async fn streamed_code_is_highlighted_on_first_render_and_saved_as_markdown() {
+    let server = MockServer::start().await;
+    let chunks = [
+        "Before\n",
+        "`",
+        "``py",
+        "thon\n",
+        "print('hello')\n",
+        "``",
+        "`",
+    ];
+    let mut body = chunks
+        .iter()
+        .map(|text| {
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "id": "chatcmpl_test", "object": "chat.completion.chunk",
+                    "created": 0, "model": "test",
+                    "choices": [{"index": 0, "delta": {"content": text}}]
+                })
+            )
+        })
+        .collect::<String>();
+    body.push_str("data: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    for no_live in ["0", "1"] {
+        let home = tempfile::tempdir().expect("home");
+        let output = agent_command()
+            .env("HOME", home.path())
+            .env("OLLAMA_URL", server.uri())
+            .env("AGENT_NO_LIVE", no_live)
+            .args(["--model", "ollama:test", "--single", "show code"])
+            .output()
+            .expect("agent output");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        assert!(!stdout.contains("```"), "{stdout}");
+        assert!(stdout.contains("\x1b[38;2;"), "{stdout}");
+        let mut terminal = vt100::Parser::new(24, 120, 100);
+        terminal.process(stdout.replace('\n', "\r\n").as_bytes());
+        assert_eq!(
+            terminal
+                .screen()
+                .contents()
+                .matches("print('hello')")
+                .count(),
+            1
+        );
+        let entry = std::fs::read_dir(home.path().join(".agent/sessions"))
+            .expect("sessions")
+            .next()
+            .expect("session")
+            .expect("entry");
+        let session: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry.path()).expect("session json"))
+                .expect("json");
+        assert_eq!(
+            session["messages"]
+                .as_array()
+                .expect("messages")
+                .last()
+                .expect("assistant")["content"],
+            chunks.concat()
+        );
+    }
+}
+
+#[tokio::test]
 async fn context_limit_error_notifies_user_without_crashing() {
     let server = MockServer::start().await;
     let body = concat!(

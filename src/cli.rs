@@ -352,6 +352,7 @@ async fn run_with_args_and_prefill(
                             } else {
                                 display.render_new_message(message);
                             }
+                            display.finish_assistant_stream();
                             if let Ok(mut assistant) = streamed_assistant.lock() {
                                 assistant.reset();
                             }

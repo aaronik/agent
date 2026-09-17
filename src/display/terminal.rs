@@ -7,7 +7,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 mod live;
+mod markdown_stream;
 pub use live::LiveRenderer;
+pub use markdown_stream::AssistantMarkdownStream;
 
 use crate::agent::{AgentMessage, ToolCall, ToolResult, ToolStatus};
 
@@ -33,6 +35,7 @@ struct ActiveToolCall {
 pub struct TerminalDisplay {
     live_enabled: bool,
     active_calls: Mutex<HashMap<String, ActiveToolCall>>,
+    assistant_stream: Mutex<AssistantMarkdownStream>,
     // Serialize whole rendering transactions, not just individual print! calls.
     renderer: Mutex<Option<LiveRenderer>>,
 }
@@ -48,6 +51,7 @@ impl TerminalDisplay {
         Self {
             live_enabled: std::env::var("AGENT_NO_LIVE").ok().as_deref() != Some("1"),
             active_calls: Mutex::new(HashMap::new()),
+            assistant_stream: Mutex::new(AssistantMarkdownStream::default()),
             renderer: Mutex::new(None),
         }
     }
@@ -101,7 +105,9 @@ impl TerminalDisplay {
     }
 
     fn output(&self, text: &str) {
-        self.output_with(text, |renderer| renderer.output(text));
+        if !text.is_empty() {
+            self.output_with(text, |renderer| renderer.output(text));
+        }
     }
 
     fn output_with(&self, text: &str, update: impl FnOnce(&mut LiveRenderer) -> String) {
@@ -150,6 +156,7 @@ impl TerminalDisplay {
     }
 
     pub fn finish_turn(&self) {
+        self.finish_assistant_stream();
         let Ok(mut calls) = self.active_calls.lock() else {
             return;
         };
@@ -170,7 +177,15 @@ impl TerminalDisplay {
     }
 
     pub fn render_assistant_delta(&self, text: &str) {
-        self.output(&sanitize_terminal_text(text));
+        if let Ok(mut stream) = self.assistant_stream.lock() {
+            self.output(&stream.push(text));
+        }
+    }
+
+    pub fn finish_assistant_stream(&self) {
+        if let Ok(mut stream) = self.assistant_stream.lock() {
+            self.output(&stream.finish());
+        }
     }
 
     pub fn render_new_message(&self, message: &AgentMessage) {
