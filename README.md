@@ -47,6 +47,21 @@ Agent state is stored under `$HOME/.agent`.
 Pricing data is cached under `$HOME/.agent/pricing`.
 User-level instructions are read from `$HOME/.agent/AGENTS.md`.
 
+## Finding saved conversations
+
+Use `/find browser playwright timeout` to search saved user and assistant messages.
+Results rank by the number of distinct query words found anywhere in a conversation,
+then by how many occur together in one message, then by most recently saved.
+Partial matches are included; repeated words do not increase a result's score.
+Matching is case-insensitive, splits filename components, and ignores common query
+stopwords. It does not infer synonyms or correct typos.
+
+Each result shows an excerpt around a match in its best-matching message and a
+`/resume <session_id>` command. Search excludes the current session, tool output,
+system messages, and compaction archives, and returns at most ten conversations.
+It runs locally without model calls or an index. `/resume` completion remains a
+quick picker based on opening-message previews.
+
 ## Terminal output
 
 Live output uses normal terminal scrollback. Running tools appear as compact,

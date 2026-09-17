@@ -175,8 +175,9 @@ fn session_search_matches_filename_components_in_conversation_text() {
         .find_sessions("working on shasta_private_land.py", 80)
         .expect("search sessions");
 
-    assert_eq!(matches.len(), 1);
+    assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].session_id, "shasta-map");
+    assert_eq!(matches[1].session_id, "shasta-only");
 }
 
 #[test]
@@ -274,6 +275,124 @@ fn session_search_truncates_unicode_excerpts_safely() {
         matches[0]
             .excerpt
             .is_char_boundary(matches[0].excerpt.len())
+    );
+}
+
+#[test]
+fn session_search_ranks_coverage_then_same_message_matches_before_recency() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    // Save the strongest result first so relevance must beat recency.
+    for (index, (id, contents)) in [
+        ("together", vec!["browser playwright timeout"]),
+        ("across-turns", vec!["browser", "playwright timeout"]),
+        (
+            "partial",
+            vec!["playwright timeout", "timeout timeout timeout"],
+        ),
+        ("weak", vec!["browser"]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .save(&Session::new(
+                id.to_string(),
+                contents
+                    .into_iter()
+                    .map(|content| AgentMessage::User {
+                        content: content.to_string(),
+                    })
+                    .collect(),
+            ))
+            .expect("save");
+        std::fs::File::open(store.sessions_dir().join(format!("{id}.json")))
+            .expect("session file")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(index as u64))
+            .expect("set recency");
+    }
+    assert_eq!(store.list_session_ids().expect("list")[0], "weak");
+    let tied = store.find_sessions("browser browser", 80).expect("search");
+    assert_eq!(
+        tied.iter()
+            .map(|m| m.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["weak", "across-turns", "together"]
+    );
+    let matches = store
+        .find_sessions_excluding("browser playwright timeout hanging", 80, None, 3)
+        .expect("search");
+    assert_eq!(
+        matches
+            .iter()
+            .map(|m| m.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["together", "across-turns", "partial"]
+    );
+    assert_eq!(matches[1].excerpt, "playwright timeout");
+}
+
+#[test]
+fn session_search_centers_excerpt_on_late_exact_unicode_match() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    store
+        .save(&Session::new(
+            "late-match".to_string(),
+            vec![AgentMessage::User {
+                content: format!(
+                    "needless {} Fixed SHASTA_private_land.py near café. {}",
+                    "前文 ".repeat(100),
+                    "後文 ".repeat(100)
+                ),
+            }],
+        ))
+        .expect("save");
+    let matches = store.find_sessions("shasta", 80).expect("search");
+    let excerpt = &matches[0].excerpt;
+    assert!(excerpt.contains("SHASTA_private_land.py"), "{excerpt}");
+    assert!(
+        excerpt.starts_with("...") && excerpt.ends_with("..."),
+        "{excerpt}"
+    );
+    assert!(excerpt.chars().count() <= 80);
+    assert!(
+        store
+            .find_sessions("needle", 80)
+            .expect("search")
+            .is_empty()
+    );
+    for limit in 0..8 {
+        let matches = store.find_sessions("shasta", limit).expect("search");
+        assert!(matches[0].excerpt.chars().count() <= limit);
+    }
+}
+
+#[test]
+fn session_search_ignores_system_messages_and_stopword_only_queries() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    store
+        .save(&Session::new(
+            "system-only".to_string(),
+            vec![
+                AgentMessage::System {
+                    content: "[COMPACTED CONTEXT] secret needle".to_string(),
+                },
+                AgentMessage::User {
+                    content: "working on a project".to_string(),
+                },
+            ],
+        ))
+        .expect("save");
+    for query in ["needle", "working on the", "", "..."] {
+        assert!(store.find_sessions(query, 80).expect("search").is_empty());
+    }
+    assert!(
+        store
+            .find_sessions_excluding("project", 80, None, 0)
+            .expect("search")
+            .is_empty()
     );
 }
 

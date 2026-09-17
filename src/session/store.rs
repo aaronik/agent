@@ -199,7 +199,8 @@ impl SessionStore {
             let Ok(session) = self.load(Some(&id)) else {
                 continue;
             };
-            let mut best: Option<(usize, String)> = None;
+            let mut covered = vec![false; query_terms.len()];
+            let mut best: Option<(usize, &str)> = None;
             for message in &session.messages {
                 let content = match message {
                     crate::agent::AgentMessage::User { content }
@@ -209,32 +210,45 @@ impl SessionStore {
                     | crate::agent::AgentMessage::Tool(_) => continue,
                 };
                 let content_terms = searchable_terms(content);
-                let score = query_terms
-                    .iter()
-                    .filter(|term| content_terms.binary_search(term).is_ok())
-                    .count();
-                if score == query_terms.len()
+                let mut score = 0;
+                for (index, term) in query_terms.iter().enumerate() {
+                    if content_terms.binary_search(term).is_ok() {
+                        covered[index] = true;
+                        score += 1;
+                    }
+                }
+                if score > 0
                     && best
                         .as_ref()
                         .is_none_or(|(best_score, _)| score > *best_score)
                 {
-                    best = Some((score, collapse_preview(content, max_excerpt_len)));
+                    best = Some((score, content));
                 }
             }
-            if let Some((score, excerpt)) = best {
+            if let Some((message_score, content)) = best {
+                let coverage = covered.into_iter().filter(|matched| *matched).count();
                 matches.push((
-                    score,
+                    coverage,
+                    message_score,
                     recency,
                     SessionSearchMatch {
                         session_id: id,
-                        excerpt,
+                        excerpt: matching_excerpt(content, &query_terms, max_excerpt_len),
                     },
                 ));
             }
         }
-        matches.sort_by_key(|(score, recency, _)| (std::cmp::Reverse(*score), *recency));
+        // Distinct query-term coverage wins; co-occurrence breaks relevance ties.
+        // Repeated words/turns cannot inflate scores. Recency is only a final tie-break.
+        matches.sort_by_key(|(coverage, message_score, recency, _)| {
+            (
+                std::cmp::Reverse(*coverage),
+                std::cmp::Reverse(*message_score),
+                *recency,
+            )
+        });
         matches.truncate(limit);
-        Ok(matches.into_iter().map(|(_, _, found)| found).collect())
+        Ok(matches.into_iter().map(|(_, _, _, found)| found).collect())
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {
@@ -284,6 +298,42 @@ fn searchable_terms(content: &str) -> Vec<String> {
     terms.sort();
     terms.dedup();
     terms
+}
+
+fn matching_excerpt(content: &str, query_terms: &[String], max_len: usize) -> String {
+    let preview = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = preview.chars().collect();
+    if chars.len() <= max_len {
+        return preview;
+    }
+    if max_len <= 6 {
+        return ".".repeat(max_len);
+    }
+
+    // Use the same tokenization as search, but anchor at the enclosing word so
+    // filename components retain their surrounding filename in the excerpt.
+    let mut anchor = 0;
+    for word in preview.split_inclusive(' ') {
+        if searchable_terms(word)
+            .iter()
+            .any(|term| query_terms.binary_search(term).is_ok())
+        {
+            break;
+        }
+        anchor += word.chars().count();
+    }
+    let budget = max_len - 6; // Reserve space for both omission markers.
+    let start = anchor.saturating_sub(budget / 3).min(chars.len() - budget);
+    let end = start + budget;
+    let mut excerpt = String::new();
+    if start > 0 {
+        excerpt.push_str("...");
+    }
+    excerpt.extend(chars[start..end].iter());
+    if end < chars.len() {
+        excerpt.push_str("...");
+    }
+    excerpt
 }
 
 fn collapse_preview(content: &str, max_len: usize) -> String {
