@@ -159,19 +159,25 @@ fn interactive_start_does_not_replay_latest_session_without_resume() {
         .assert()
         .success();
 
-    let mut interactive = agent_command();
-    let output = interactive
-        .env("HOME", temp_home.path())
-        .args(["--model", "mock"])
-        .output()
-        .expect("interactive output");
-    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    for flags in [vec![], vec!["-t"], vec!["--talk"]] {
+        let mut interactive = agent_command();
+        let output = interactive
+            .env("HOME", temp_home.path())
+            .args(["--model", "mock"])
+            .args(&flags)
+            .output()
+            .expect("interactive output");
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
 
-    assert!(!output.status.success(), "non-TTY input should be rejected");
-    assert!(
-        !stdout.contains("stale output sentinel"),
-        "an implicit text session must not replay the global latest session: {stdout}"
-    );
+        assert!(
+            !output.status.success(),
+            "non-TTY text input and mock voice should be rejected"
+        );
+        assert!(
+            !stdout.contains("stale output sentinel"),
+            "an implicit session ({flags:?}) must not replay the global latest session: {stdout}"
+        );
+    }
 }
 
 #[test]

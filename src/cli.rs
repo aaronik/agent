@@ -1260,20 +1260,15 @@ fn attach_stdin_to_stdout_tty() -> Result<(), Box<dyn Error>> {
 }
 
 fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, Box<dyn Error>> {
-    if !args.new {
-        if let Some(resume) = args.resume.as_deref() {
-            let id = if resume == "__LATEST__" {
-                None
-            } else {
-                Some(resume)
-            };
-            return Ok(store.load(id)?);
-        }
-        if args.talk
-            && let Ok(session) = store.load(None)
-        {
-            return Ok(session);
-        }
+    if !args.new
+        && let Some(resume) = args.resume.as_deref()
+    {
+        let id = if resume == "__LATEST__" {
+            None
+        } else {
+            Some(resume)
+        };
+        return Ok(store.load(id)?);
     }
 
     let mut messages = Vec::new();
@@ -2422,17 +2417,21 @@ mod tests {
                 }],
             ))
             .expect("save session");
-        let args = Args::parse_from(["agent", "--talk", "--resume", "voice-session"]);
+        for argv in [
+            vec!["agent", "--talk", "--resume", "voice-session"],
+            vec!["agent", "-t", "--resume"],
+        ] {
+            let args = Args::parse_from(argv);
+            let session = load_or_create_session(&args, &store).expect("loaded session");
 
-        let session = load_or_create_session(&args, &store).expect("loaded session");
-
-        assert_eq!(session.session_id, "voice-session");
-        assert_eq!(
-            session.messages,
-            vec![AgentMessage::User {
-                content: "remember blue".to_string()
-            }]
-        );
+            assert_eq!(session.session_id, "voice-session");
+            assert_eq!(
+                session.messages,
+                vec![AgentMessage::User {
+                    content: "remember blue".to_string()
+                }]
+            );
+        }
     }
 
     #[test]
@@ -2489,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn talk_without_resume_reuses_latest_session() {
+    fn talk_without_resume_starts_a_new_session() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = SessionStore::with_root(temp.path().join(".agent"));
         store
@@ -2500,12 +2499,19 @@ mod tests {
                 }],
             ))
             .expect("save session");
-        let args = Args::parse_from(["agent", "--talk"]);
+        for flag in ["-t", "--talk"] {
+            let args = Args::parse_from(["agent", flag]);
 
-        let session = load_or_create_session(&args, &store).expect("loaded latest session");
+            let session = load_or_create_session(&args, &store).expect("new session");
 
-        assert_eq!(session.session_id, "latest-voice-session");
-        assert_eq!(session.messages[0].content(), "prior voice turn");
+            assert_ne!(session.session_id, "latest-voice-session");
+            assert!(
+                session
+                    .messages
+                    .iter()
+                    .all(|message| message.content() != "prior voice turn")
+            );
+        }
     }
 
     #[test]
