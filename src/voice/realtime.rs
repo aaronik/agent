@@ -197,10 +197,23 @@ pub fn build_realtime_request(
 }
 
 pub fn session_update_event(config: &RealtimeConfig) -> Value {
+    // Realtime history items omit system messages; send them as instructions instead.
+    // Derive this from the current history on each connection, including reconnects.
+    let instructions = config
+        .history
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .chain(std::iter::once(config.instructions.as_str()))
+        .filter(|content| !content.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut session = json!({
         "type": "realtime",
         "model": config.model,
-        "instructions": realtime_low_verbosity_instructions(&config.instructions),
+        "instructions": realtime_low_verbosity_instructions(&instructions),
         "output_modalities": ["audio"],
         "audio": {
             "input": {

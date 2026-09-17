@@ -56,6 +56,55 @@ fn realtime_session_update_configures_voice_vad_and_interruption() {
 }
 
 #[test]
+fn realtime_session_instructions_include_agents_memory_and_working_directory() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("AGENTS.md"), "Project rule: run tests.").unwrap();
+    let memory = agent_rs::memory::load_all_agents_memory(Some(project.path()));
+    let config = test_config().with_history(vec![
+        AgentMessage::System {
+            content: "Base system prompt".to_string(),
+        },
+        AgentMessage::System { content: memory },
+        AgentMessage::System {
+            content: "[SYSTEM INFO] pwd: /example/project".to_string(),
+        },
+        AgentMessage::User {
+            content: "User content must stay in history".to_string(),
+        },
+    ]);
+
+    let event = session_update_event(&config);
+    let instructions = event["session"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("Base system prompt"));
+    assert!(instructions.contains("Project rule: run tests."));
+    assert!(instructions.contains("[SYSTEM INFO] pwd: /example/project"));
+    assert!(instructions.contains("be helpful"));
+    assert!(instructions.contains("Use low verbosity"));
+    assert!(!instructions.contains("User content must stay in history"));
+    assert_eq!(conversation_item_create_events(&config.history).len(), 1);
+}
+
+#[test]
+fn realtime_reconnect_uses_current_system_messages_without_accumulating_instructions() {
+    let original = test_config().with_history(vec![AgentMessage::System {
+        content: "Old project instructions".to_string(),
+    }]);
+    let reconnected = original.clone().with_history(vec![AgentMessage::System {
+        content: "Updated project instructions".to_string(),
+    }]);
+
+    let event = session_update_event(&reconnected);
+    let instructions = event["session"]["instructions"].as_str().unwrap();
+    assert!(!instructions.contains("Old project instructions"));
+    assert_eq!(
+        instructions.matches("Updated project instructions").count(),
+        1
+    );
+    assert_eq!(session_update_event(&reconnected), event);
+    assert_eq!(reconnected.instructions, original.instructions);
+}
+
+#[test]
 fn realtime_events_drive_audio_transcripts_and_barge_in() {
     let encoded = encode_pcm16_base64(&[11, 12]);
     assert_eq!(
