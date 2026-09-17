@@ -198,7 +198,9 @@ async fn run_with_args_and_prefill(
 
     loop {
         if interaction_mode == InteractionMode::Talk && first_input.is_none() {
-            match crate::voice::session::run_talk_session(
+            // Even an empty or interrupted voice session must be resumable.
+            store.save(&session)?;
+            let talk_result = crate::voice::session::run_talk_session(
                 &store,
                 &mut session,
                 &model_name,
@@ -206,15 +208,19 @@ async fn run_with_args_and_prefill(
                 args.single,
                 allow_git_writes,
             )
-            .await?
-            {
-                crate::voice::session::TalkSessionExit::ToggleText => {
+            .await;
+            match talk_result {
+                Ok(crate::voice::session::TalkSessionExit::ToggleText) => {
                     interaction_mode = InteractionMode::Text;
                     loop_runner = None;
                     print_agent_header(&model_name);
                     continue;
                 }
-                crate::voice::session::TalkSessionExit::Ended => break,
+                Ok(crate::voice::session::TalkSessionExit::Ended) => break,
+                Err(error) => {
+                    println!("sessionId: {}", session.session_id);
+                    return Err(error);
+                }
             }
         }
 

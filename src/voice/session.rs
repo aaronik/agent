@@ -67,7 +67,7 @@ pub async fn run_talk_session(
     if single_response {
         config = config.with_initial_response();
     }
-    let _ctrl_c_exit_trap = CtrlCExitTrap::spawn();
+    let _ctrl_c_exit_trap = CtrlCExitTrap::spawn(session.session_id.clone());
     println!(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
         config.model, config.voice, config.voice_speed
@@ -389,8 +389,8 @@ struct CtrlCExitTrap {
 }
 
 impl CtrlCExitTrap {
-    fn spawn() -> Self {
-        let handle = tokio::spawn(async {
+    fn spawn(session_id: String) -> Self {
+        let handle = tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             eprintln!("\nending voice session");
 
@@ -399,6 +399,8 @@ impl CtrlCExitTrap {
             // trapped in raw terminal mode indefinitely.
             tokio::time::sleep(CTRL_C_FORCE_EXIT_TIMEOUT).await;
             crate::cli::restore_terminal_mode();
+            println!("sessionId: {session_id}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             std::process::exit(ctrl_c_exit_code());
         });
         Self { handle }
@@ -700,6 +702,38 @@ mod tests {
     #[test]
     fn talk_model_keeps_explicit_realtime_model() {
         assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forced_voice_exit_prints_session_id() {
+        const CHILD_ENV: &str = "AGENT_TEST_FORCED_VOICE_EXIT";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let _trap = CtrlCExitTrap::spawn("forced-voice-session".to_string());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                // SAFETY: raising SIGINT in this isolated test subprocess is intentional.
+                unsafe { libc::raise(libc::SIGINT) };
+                std::future::pending::<()>().await;
+            });
+            unreachable!();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "voice::session::tests::forced_voice_exit_prints_session_id",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(130));
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("sessionId: forced-voice-session")
+        );
     }
 
     #[test]

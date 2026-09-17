@@ -56,6 +56,31 @@ fn successful_text_turn_plays_completion_sound() {
 }
 
 #[test]
+fn voice_startup_failure_prints_saved_session_id() {
+    let home = tempfile::tempdir().unwrap();
+    let output = agent_command()
+        .env("HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["--model", "openai:gpt-realtime", "--talk"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("sessionId: "))
+        .expect("voice errors must print the session ID");
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    assert_eq!(store.load(Some(id)).unwrap().session_id, id);
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("OPENAI_API_KEY")
+    );
+}
+
+#[test]
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
