@@ -11,6 +11,8 @@ pub struct Session {
     pub session_id: String,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub messages: Vec<AgentMessage>,
 }
 
@@ -22,8 +24,26 @@ impl Session {
             session_id,
             created_at: now,
             updated_at: now,
+            model: None,
             messages,
         }
+    }
+
+    pub fn saved_model(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        AgentMessage::Assistant(assistant) => {
+                            assistant.model.as_deref().filter(|model| !model.is_empty())
+                        }
+                        _ => None,
+                    })
+            })
     }
 
     pub fn replace_messages(&mut self, messages: Vec<AgentMessage>) {

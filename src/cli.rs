@@ -149,11 +149,20 @@ async fn run_with_args_and_prefill(
 
     let store = SessionStore::new()?;
     let display = Arc::new(TerminalDisplay::new());
-    let mut model_name = effective_model_name(args.model.as_deref());
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
     let mut allow_git_writes = args.allow_git;
 
     let mut session = load_or_create_session(&args, &store)?;
+    let mut model_name = effective_model_name(
+        args.model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .or_else(|| session.saved_model()),
+    );
+    session.model = Some(model_name.clone());
+    if args.resume.is_some() {
+        store.save(&session)?;
+    }
     print_agent_header(&model_name);
     replay_session(&session, &display);
 
@@ -262,7 +271,9 @@ async fn run_with_args_and_prefill(
                     continue;
                 }
                 SlashCommandResult::SwitchModel(new_model) => {
-                    model_name = new_model;
+                    model_name = effective_model_name(Some(&new_model));
+                    session.model = Some(model_name.clone());
+                    store.save(&session)?;
                     loop_runner = None;
                     print_agent_header(&model_name);
                     if args.single {
@@ -1463,6 +1474,7 @@ async fn handle_slash_command(
                 store,
             )?;
             *session = new_session;
+            session.model = Some(model_name.to_string());
             store.save(session)?;
             println!("cleared");
             println!("sessionId: {}", session.session_id);
@@ -1500,8 +1512,10 @@ async fn handle_slash_command(
                 other => Some(other.split('\t').next().unwrap_or(other)),
             };
             *session = store.load(resume_id)?;
+            let resumed_model = session.saved_model().unwrap_or(model_name).to_string();
             replay_session(session, display);
             println!("sessionId: {}", session.session_id);
+            return Ok(SlashCommandResult::SwitchModel(resumed_model));
         }
         "/pricing" => match rest {
             "refresh" => {

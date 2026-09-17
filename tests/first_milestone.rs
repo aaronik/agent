@@ -181,6 +181,112 @@ fn interactive_start_does_not_replay_latest_session_without_resume() {
 }
 
 #[test]
+fn resume_restores_saved_model_unless_explicitly_overridden() {
+    let home = tempfile::tempdir().expect("home");
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "hello"])
+        .assert()
+        .success();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let id = store.load(None).expect("saved session").session_id;
+
+    for resume in [vec!["-r"], vec!["-r", id.as_str()]] {
+        agent_command()
+            .env("HOME", home.path())
+            .env("AGENT_MODEL", "openai:other-default")
+            .args(["--single"])
+            .args(resume)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("model: mock"));
+    }
+    agent_command()
+        .env("HOME", home.path())
+        .args([
+            "-r",
+            &id,
+            "--model",
+            "mock:override",
+            "--single",
+            "hello again",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("model: mock:override"));
+    agent_command()
+        .env("HOME", home.path())
+        .args(["-r", "--single"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("model: mock:override"));
+}
+
+#[test]
+fn resume_legacy_session_uses_last_assistant_model_or_default() {
+    let home = tempfile::tempdir().expect("home");
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    store.ensure_dirs().expect("session directory");
+    for (messages, expected) in [
+        (
+            json!([
+                {"role": "assistant", "content": "old", "tool_calls": [], "model": "openai:old"},
+                {"role": "assistant", "content": "latest", "tool_calls": [], "model": "ollama:kept"},
+                {"role": "user", "content": "interrupted"}
+            ]),
+            "ollama:kept",
+        ),
+        (
+            json!([{"role": "user", "content": "hello"}]),
+            "mock:default",
+        ),
+    ] {
+        let mut payload = serde_json::to_value(agent_rs::session::Session::new(
+            "legacy".to_string(),
+            Vec::new(),
+        ))
+        .expect("session json");
+        payload.as_object_mut().unwrap().remove("model");
+        payload["messages"] = messages;
+        std::fs::write(
+            store.sessions_dir().join("legacy.json"),
+            payload.to_string(),
+        )
+        .expect("legacy session");
+        agent_command()
+            .env("HOME", home.path())
+            .env("AGENT_MODEL", "mock:default")
+            .args(["-r", "legacy", "--single"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!("model: {expected}")));
+    }
+}
+
+#[test]
+fn model_switch_is_saved_without_another_turn_and_survives_new_session() {
+    let home = tempfile::tempdir().expect("home");
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "hello"])
+        .assert()
+        .success();
+    agent_command()
+        .env("HOME", home.path())
+        .args(["-r", "--single", "/models mock:switched"])
+        .assert()
+        .success();
+    for query in ["/session", "/new", "/session"] {
+        agent_command()
+            .env("HOME", home.path())
+            .args(["-r", "--single", query])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("model: mock:switched"));
+    }
+}
+
+#[test]
 fn resume_replay_shows_tool_commands() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
@@ -215,9 +321,10 @@ fn slash_resume_replays_conversation_output() {
     let mut resume = agent_command();
     resume
         .env("HOME", temp_home.path())
-        .args(["--model", "mock", "--single", "/resume latest"])
+        .args(["--model", "mock:other", "--single", "/resume latest"])
         .assert()
         .success()
+        .stdout(predicates::str::contains("model: mock\n"))
         .stdout(predicates::str::contains("run echo hi"))
         .stdout(predicates::str::contains("Tool completed: hi"));
 }
