@@ -88,6 +88,10 @@ struct ModelPricing {
     #[serde(default, deserialize_with = "deserialize_optional_f64")]
     input_cost_per_token: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_read_input_token_cost: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_creation_input_token_cost: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
     output_cost_per_token: Option<f64>,
     #[serde(default)]
     aliases: Vec<String>,
@@ -117,11 +121,36 @@ impl ModelPricing {
             return None;
         }
 
+        let input_rate = self.input_cost_per_token.unwrap_or(0.0);
+        let (cached, written) = cache_token_counts(usage);
+        let ordinary = usage.input_tokens - cached - written;
         Some(
-            (usage.input_tokens as f64 * self.input_cost_per_token.unwrap_or(0.0))
+            (ordinary as f64 * input_rate)
+                + (cached as f64 * self.cache_read_input_token_cost.unwrap_or(input_rate))
+                + (written as f64 * self.cache_creation_input_token_cost.unwrap_or(input_rate))
                 + (usage.output_tokens as f64 * self.output_cost_per_token.unwrap_or(0.0)),
         )
     }
+}
+
+/// Counts are included in total input tokens, not additional tokens.
+pub fn cache_token_counts(usage: &Usage) -> (u64, u64) {
+    let details = usage.raw.as_ref().and_then(|raw| {
+        raw.get("input_tokens_details")
+            .or_else(|| raw.get("prompt_tokens_details"))
+    });
+    let cached = details
+        .and_then(|value| value.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let written = details
+        .and_then(|value| value.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if cached > usage.input_tokens || written > usage.input_tokens - cached {
+        return (0, 0);
+    }
+    (cached, written)
 }
 
 pub async fn refresh_pricing_cache(root: &Path) -> Result<PricingRefreshReport, PricingError> {

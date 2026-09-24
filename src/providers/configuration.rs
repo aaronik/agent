@@ -2,7 +2,8 @@ use std::env;
 
 use crate::agent::{AgentMessage, Usage};
 use crate::pricing::{
-    context_window_from_cached_litellm_pricing, cost_from_cached_litellm_pricing,
+    cache_token_counts, context_window_from_cached_litellm_pricing,
+    cost_from_cached_litellm_pricing,
 };
 use crate::providers::{
     MockProvider, OpenAiCompatibleProvider, Provider, ProviderConfig, ProviderFlavor,
@@ -139,11 +140,28 @@ pub fn format_cost_and_context_line(
         .checked_div(max_context_tokens)
         .unwrap_or(0);
 
+    let cached_tokens: u64 = messages
+        .iter()
+        .map(|message| match message {
+            AgentMessage::Assistant(assistant) => assistant
+                .usage
+                .as_ref()
+                .map(|usage| cache_token_counts(usage).0)
+                .unwrap_or(0),
+            AgentMessage::Tool(result) => result
+                .subagent_usages
+                .iter()
+                .map(|subagent| cache_token_counts(&subagent.usage).0)
+                .sum(),
+            _ => 0,
+        })
+        .sum();
     format!(
-        "Cost: ${:.4}   Context {}% ({}/{} tokens)   Model: {}{}",
+        "Cost: ${:.4}   Context {}% ({} C/{} I/{} T)   Model: {}{}",
         normalized_cost(total_session_cost_usd(messages, raw_model)),
         pct,
-        format_number(remaining),
+        format_number(cached_tokens as usize),
+        format_number(used),
         format_number(max_context_tokens),
         raw_model,
         if allow_git_writes {

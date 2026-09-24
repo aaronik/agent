@@ -467,6 +467,31 @@ fn prompt_metadata_uses_each_response_model_for_mixed_model_costs() {
 }
 
 #[test]
+fn prompt_metadata_reports_cached_input_tokens() {
+    let messages = vec![AgentMessage::Assistant(AssistantMessage {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        usage: Some(Usage {
+            input_tokens: 2_000,
+            output_tokens: 20,
+            raw: Some(json!({"input_tokens_details":{"cached_tokens":1024}})),
+        }),
+        model: None,
+        metadata: Default::default(),
+    })];
+    let line = format_cost_and_context_line(&messages, "mock", false);
+    let used = agent_rs::agent::count_tokens(&messages, "mock");
+    assert!(
+        line.contains(&format!(
+            "Context {}% (1,024 C/{used} I/16,384 T)",
+            (16_384usize.saturating_sub(used) * 100) / 16_384
+        )),
+        "{line}"
+    );
+    assert!(!line.contains("Cached input:"), "{line}");
+}
+
+#[test]
 fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
     let messages = vec![AgentMessage::Assistant(AssistantMessage {
         content: String::new(),
@@ -483,7 +508,7 @@ fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
     let line = format_cost_and_context_line(&messages, "openai:gpt-5.2", true);
 
     assert!(line.contains("Cost: $1.2345"));
-    assert!(line.contains("/400,000 tokens)"));
+    assert!(line.contains("/400,000 T)"));
     assert!(line.contains("Model: openai:gpt-5.2   git:allowed"));
 }
 
@@ -495,7 +520,7 @@ fn prompt_metadata_does_not_exhaust_gpt_6_context_at_33k_tokens() {
     let line = format_cost_and_context_line(&messages, "openai:gpt-6-sol", false);
 
     assert!(!line.contains("Context 0%"), "{line}");
-    assert!(line.contains("/1,050,000 tokens)"), "{line}");
+    assert!(line.contains("/1,050,000 T)"), "{line}");
 }
 
 #[test]
@@ -524,6 +549,14 @@ fn cached_model_context_uses_input_and_output_limits() {
 fn prompt_metadata_omits_git_indicator_when_writes_are_disallowed() {
     let line = format_cost_and_context_line(&[], "mock", false);
 
+    let used = agent_rs::agent::count_tokens(&[], "mock");
+    assert!(
+        line.contains(&format!(
+            "Context {}% (0 C/{used} I/16,384 T)",
+            (16_384usize.saturating_sub(used) * 100) / 16_384
+        )),
+        "{line}"
+    );
     assert!(!line.contains("git:allowed"));
 }
 

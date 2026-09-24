@@ -92,6 +92,50 @@ fn cached_pricing_file_prices_sessions_without_network() {
     );
 }
 
+#[test]
+fn openai_cache_usage_uses_litellm_read_and_write_rates() {
+    let pricing_map = parse_pricing_map(
+        r#"{"gpt-test":{"input_cost_per_token":0.000001,"cache_read_input_token_cost":0.0000001,"cache_creation_input_token_cost":0.00000125,"output_cost_per_token":0.000003}}"#,
+    )
+    .unwrap();
+    let usage = Usage {
+        input_tokens: 2_000,
+        output_tokens: 100,
+        raw: Some(json!({"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":600}})),
+    };
+    let cost = cost_from_pricing_map(&pricing_map, "openai:gpt-test", &usage).unwrap();
+    assert!((cost - 0.00173).abs() < 1e-12, "{cost}");
+
+    let chat_usage = Usage {
+        raw: Some(json!({"prompt_tokens_details":{"cached_tokens":800}})),
+        ..usage.clone()
+    };
+    let cost = cost_from_pricing_map(&pricing_map, "openai:gpt-test", &chat_usage).unwrap();
+    assert!((cost - 0.00158).abs() < 1e-12, "{cost}");
+}
+
+#[test]
+fn missing_cache_price_or_invalid_counts_never_invent_discounts() {
+    let pricing_map = parse_pricing_map(
+        r#"{"gpt-test":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000003}}"#,
+    )
+    .unwrap();
+    for raw in [
+        json!({"input_tokens_details":{"cached_tokens":800}}),
+        json!({"input_tokens_details":{"cached_tokens":2001,"cache_write_tokens":10}}),
+    ] {
+        let usage = Usage {
+            input_tokens: 2_000,
+            output_tokens: 100,
+            raw: Some(raw),
+        };
+        assert_eq!(
+            cost_from_pricing_map(&pricing_map, "openai:gpt-test", &usage),
+            Some(0.0023)
+        );
+    }
+}
+
 #[tokio::test]
 async fn refresh_pricing_cache_writes_validated_litellm_map() {
     let server = MockServer::start().await;
