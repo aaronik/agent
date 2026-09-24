@@ -91,9 +91,23 @@ struct ModelPricing {
     output_cost_per_token: Option<f64>,
     #[serde(default)]
     aliases: Vec<String>,
+    #[serde(default)]
+    max_input_tokens: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    max_tokens: Option<usize>,
 }
 
 impl ModelPricing {
+    fn context_window_tokens(&self) -> Option<usize> {
+        match (self.max_input_tokens, self.max_output_tokens) {
+            (Some(input), Some(output)) => input.checked_add(output).filter(|&total| total > 0),
+            (Some(input), None) if input > 0 => Some(input),
+            (None, _) => self.max_tokens.filter(|&total| total > 0),
+            _ => None,
+        }
+    }
     fn has_text_pricing(&self) -> bool {
         self.input_cost_per_token.is_some() || self.output_cost_per_token.is_some()
     }
@@ -179,6 +193,19 @@ fn pricing_http_client_with_timeouts(
 
 pub fn pricing_cache_path(root: &Path) -> PathBuf {
     root.join(PRICING_DIR).join(PRICING_CACHE_FILE)
+}
+
+pub fn context_window_from_cache_at(root: &Path, raw_model: &str) -> Option<usize> {
+    let payload = fs::read_to_string(pricing_cache_path(root)).ok()?;
+    let pricing_map = parse_pricing_map(&payload).ok()?;
+    pricing_map
+        .pricing_for_model(raw_model)?
+        .context_window_tokens()
+}
+
+pub fn context_window_from_cached_litellm_pricing(raw_model: &str) -> Option<usize> {
+    let root = dirs::home_dir()?.join(".agent");
+    context_window_from_cache_at(&root, raw_model)
 }
 
 pub fn cost_from_cached_litellm_pricing(raw_model: &str, usage: &Usage) -> Option<f64> {

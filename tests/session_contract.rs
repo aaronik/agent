@@ -1,4 +1,5 @@
 use agent_rs::agent::{AgentMessage, AssistantMessage, ToolCall, ToolResult, ToolStatus, Usage};
+use agent_rs::pricing::{context_window_from_cache_at, pricing_cache_path};
 use agent_rs::providers::format_cost_and_context_line;
 use agent_rs::session::{Session, SessionStore};
 use serde_json::json;
@@ -484,6 +485,39 @@ fn prompt_metadata_recomputes_cost_and_context_from_session_messages() {
     assert!(line.contains("Cost: $1.2345"));
     assert!(line.contains("/400,000 tokens)"));
     assert!(line.contains("Model: openai:gpt-5.2   git:allowed"));
+}
+
+#[test]
+fn prompt_metadata_does_not_exhaust_gpt_6_context_at_33k_tokens() {
+    let messages = vec![AgentMessage::User {
+        content: "word ".repeat(33_000),
+    }];
+    let line = format_cost_and_context_line(&messages, "openai:gpt-6-sol", false);
+
+    assert!(!line.contains("Context 0%"), "{line}");
+    assert!(line.contains("/1,050,000 tokens)"), "{line}");
+}
+
+#[test]
+fn cached_model_context_uses_input_and_output_limits() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join(".agent");
+    let path = pricing_cache_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"gpt-6-sol":{"max_input_tokens":922000,"max_output_tokens":128000,"max_tokens":128000,"aliases":["gpt-6-sol-latest"]},"unknown":{"input_cost_per_token":0.01}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        context_window_from_cache_at(&root, "openai:gpt-6-sol"),
+        Some(1_050_000)
+    );
+    assert_eq!(
+        context_window_from_cache_at(&root, "gpt-6-sol-latest"),
+        Some(1_050_000)
+    );
+    assert_eq!(context_window_from_cache_at(&root, "unknown"), None);
 }
 
 #[test]

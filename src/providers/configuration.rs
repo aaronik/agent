@@ -1,7 +1,9 @@
 use std::env;
 
 use crate::agent::{AgentMessage, Usage};
-use crate::pricing::cost_from_cached_litellm_pricing;
+use crate::pricing::{
+    context_window_from_cached_litellm_pricing, cost_from_cached_litellm_pricing,
+};
 use crate::providers::{
     MockProvider, OpenAiCompatibleProvider, Provider, ProviderConfig, ProviderFlavor,
 };
@@ -113,6 +115,12 @@ pub fn context_window_tokens(raw_model: &str) -> usize {
     }
     if model.contains("gpt-3.5-turbo") {
         return 16_384;
+    }
+    if let Some(window) = context_window_from_cached_litellm_pricing(raw_model) {
+        return window;
+    }
+    if model.contains("gpt-6") || model.contains("gpt6") {
+        return 1_050_000;
     }
 
     DEFAULT_CONTEXT_TOKENS
