@@ -21,7 +21,7 @@ pub struct LiveRenderer {
     mode: String,
     prompt: String,
     frame: usize,
-    running_tools: Vec<(String, String)>,
+    running_tools: Vec<(String, String, Option<String>)>,
 }
 
 impl std::fmt::Debug for LiveRenderer {
@@ -152,12 +152,27 @@ impl LiveRenderer {
         let summary = working_input_preview(&format!(
             "[> Running] {}  {}",
             call.name,
-            super::format_args_lines(call).join("  ")
+            super::format_args_lines(call)
+                .into_iter()
+                .filter(|line| !line.starts_with("intent="))
+                .collect::<Vec<_>>()
+                .join("  ")
         ));
-        if let Some((_, preview)) = self.running_tools.iter_mut().find(|(id, _)| id == &call.id) {
+        let intent = call
+            .arguments
+            .get("intent")
+            .and_then(serde_json::Value::as_str)
+            .filter(|intent| !intent.is_empty())
+            .map(|intent| format!("            {}", working_input_preview(intent)));
+        if let Some((_, preview, old_intent)) = self
+            .running_tools
+            .iter_mut()
+            .find(|(id, _, _)| id == &call.id)
+        {
             *preview = summary;
+            *old_intent = intent;
         } else {
-            self.running_tools.push((call.id.clone(), summary));
+            self.running_tools.push((call.id.clone(), summary, intent));
         }
         out.push_str(&self.draw());
         out
@@ -165,7 +180,7 @@ impl LiveRenderer {
 
     pub fn tool_result(&mut self, id: &str, completed: &str) -> String {
         self.running_tools
-            .retain(|(running_id, _)| running_id != id);
+            .retain(|(running_id, _, _)| running_id != id);
         // output() clears the old transient area before appending the result,
         // then redraws only the tools that are still running.
         self.output(completed)
@@ -180,21 +195,24 @@ impl LiveRenderer {
             return Vec::new();
         }
         let width = usize::from(self.width - 1);
-        let overflow = self.running_tools.len() > budget;
-        let shown = if overflow { budget - 1 } else { budget };
-        let mut lines: Vec<_> = self
-            .running_tools
-            .iter()
-            .take(shown)
-            .map(|(_, text)| {
-                if text.width() > width {
-                    format!("{}…", truncate_to_width(text, width - 1))
-                } else {
-                    text.clone()
-                }
-            })
-            .collect();
-        if overflow {
+        let mut lines = Vec::new();
+        let mut shown = 0;
+        for (_, summary, intent) in &self.running_tools {
+            // Keep a row for the overflow indicator when calls remain.
+            let remaining = self.running_tools.len() - shown - 1;
+            let reserved = usize::from(remaining > 0);
+            if lines.len() + 1 + reserved > budget {
+                break;
+            }
+            lines.push(truncate_to_width(summary, width));
+            if let Some(intent) = intent
+                && lines.len() + 1 + reserved <= budget
+            {
+                lines.push(truncate_to_width(intent, width));
+            }
+            shown += 1;
+        }
+        if shown < self.running_tools.len() {
             lines.push(truncate_to_width(
                 &format!(
                     "[> Running] … {} more tools",

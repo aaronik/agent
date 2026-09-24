@@ -651,6 +651,41 @@ fn running_tools_are_transient_even_across_output_and_footer_growth() {
 }
 
 #[test]
+fn running_preview_shows_intent_on_separate_line() {
+    let mut terminal = vt100::Parser::new(12, 80, 1000);
+    let mut live = LiveRenderer::new(80, 12);
+    feed(&mut terminal, live.start("status"));
+    feed(
+        &mut terminal,
+        live.tool_start(&ToolCall {
+            id: "intent".into(),
+            name: "run_shell_command".into(),
+            arguments: json!({
+                "cmd": "sleep 1",
+                "intent": "Check the output",
+                "timeout": 30
+            }),
+        }),
+    );
+    let visible = terminal.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| line.contains("[> Running]"))
+        .unwrap();
+    assert!(lines[first].contains("cmd=sleep 1"), "{visible}");
+    assert!(!lines[first].contains("Check the output"), "{visible}");
+    assert!(
+        lines[first + 1].contains("            Check the output"),
+        "{visible}"
+    );
+    assert!(!visible.contains("intent:"), "{visible}");
+    feed(&mut terminal, live.tool_result("intent", "completed\n"));
+    feed(&mut terminal, live.finish());
+    assert!(!transcript(&mut terminal).contains("Check the output"));
+}
+
+#[test]
 fn running_preview_tracks_call_ids_and_cancellation_cleans_up() {
     let mut terminal = vt100::Parser::new(12, 80, 1000);
     let mut live = LiveRenderer::new(80, 12);
