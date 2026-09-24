@@ -19,8 +19,8 @@ cargo run -- --model mock --single "run echo hi"
 Run with OpenAI:
 
 ```sh
-OPENAI_API_KEY=... cargo run -- --model openai:gpt-5.6-terra
-cargo run -- --model openai:gpt-5.6-terra --single --image screenshot.png "What is wrong here?"
+OPENAI_API_KEY=... cargo run -- --model openai:gpt-6-sol
+cargo run -- --model openai:gpt-6-sol --single --image screenshot.png "What is wrong here?"
 ```
 
 Run with Ollama (using a vision-capable model):

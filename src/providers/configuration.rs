@@ -8,7 +8,7 @@ use crate::providers::{
     MockProvider, OpenAiCompatibleProvider, Provider, ProviderConfig, ProviderFlavor,
 };
 
-pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+pub const DEFAULT_MODEL: &str = "gpt-6-sol";
 pub const DEFAULT_CONTEXT_TOKENS: usize = 16_384;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

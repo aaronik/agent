@@ -91,11 +91,11 @@ struct ModelPricing {
     output_cost_per_token: Option<f64>,
     #[serde(default)]
     aliases: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
     max_input_tokens: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
     max_output_tokens: Option<usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
     max_tokens: Option<usize>,
 }
 
@@ -244,6 +244,18 @@ fn model_candidates(raw_model: &str) -> Vec<String> {
     }
     candidates.dedup();
     candidates
+}
+
+fn deserialize_optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Number(number)) => number.as_u64().and_then(|n| usize::try_from(n).ok()),
+        Some(Value::String(raw)) => raw.parse::<usize>().ok(),
+        _ => None,
+    })
 }
 
 fn deserialize_optional_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>

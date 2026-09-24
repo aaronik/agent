@@ -36,6 +36,35 @@ fn litellm_pricing_map_prices_prefixed_models_and_aliases() {
 }
 
 #[test]
+fn descriptive_token_limits_do_not_disable_cached_pricing_or_context() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join(".agent");
+    let cache_path = pricing_cache_path(&root);
+    std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cache_path,
+        r#"{
+            "sample_spec": {"max_input_tokens": "max input tokens", "max_output_tokens": "max output tokens", "max_tokens": "legacy parameter"},
+            "gpt-6-sol": {"input_cost_per_token": 0.000002, "output_cost_per_token": 0.00001, "max_input_tokens": 922000, "max_output_tokens": 128000}
+        }"#,
+    )
+    .unwrap();
+    let usage = Usage {
+        input_tokens: 33_000,
+        output_tokens: 100,
+        raw: None,
+    };
+    assert_eq!(
+        cost_from_cache_at(&root, "openai:gpt-6-sol", &usage),
+        Some(0.067)
+    );
+    assert_eq!(
+        agent_rs::pricing::context_window_from_cache_at(&root, "openai:gpt-6-sol"),
+        Some(1_050_000)
+    );
+}
+
+#[test]
 fn cached_pricing_file_prices_sessions_without_network() {
     let temp = tempfile::tempdir().expect("temp dir");
     let root = temp.path().join(".agent");
