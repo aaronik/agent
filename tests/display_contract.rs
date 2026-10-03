@@ -20,9 +20,21 @@ fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
+            if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x07' || (next == '\x1b' && chars.peek() == Some(&'\\')) {
+                        if next == '\x1b' {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            } else {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
                 }
             }
         } else {
@@ -58,6 +70,218 @@ fn assistant_markdown_renders_common_markdown_features() {
 }
 
 #[test]
+fn assistant_markdown_links_keep_visible_destinations_in_replay_and_stream() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let source = "See [docs](https://example.com/docs) and [local](./README.md).\n";
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    let plain = strip_ansi(&replay);
+    assert!(plain.contains("docs"), "{plain:?}");
+    assert!(plain.contains("https://example.com/docs"), "{plain:?}");
+    assert!(plain.contains("./README.md"), "{plain:?}");
+    assert!(!plain.contains("](https://"), "{plain:?}");
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for character in source.chars() {
+        rendered.push_str(&stream.push(&character.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+    let protected = TerminalDisplay::new().format_assistant_content(
+        "`[not a link](https://example.com)` and [漢字🙂](https://example.com/a_(b))",
+    );
+    let plain = strip_ansi(&protected);
+    assert!(
+        plain.contains("[not a link](https://example.com)"),
+        "{plain:?}"
+    );
+    assert!(
+        plain.contains("漢字🙂 (https://example.com/a_(b))"),
+        "{plain:?}"
+    );
+}
+
+#[test]
+fn assistant_markdown_links_are_clickable_and_safe() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let source = "See [docs](https://example.com/docs) and [local](./README.md).\n";
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    assert!(
+        replay.contains("\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\"),
+        "{replay:?}"
+    );
+    assert!(!replay.contains("\x1b]8;;./README.md"));
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for character in source.chars() {
+        rendered.push_str(&stream.push(&character.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+
+    let protected = TerminalDisplay::new().format_assistant_content(
+        "`[not a link](https://example.com)` [漢字🙂](https://example.com/a_(b)) [bad](javascript:alert(1))",
+    );
+    assert!(
+        protected.contains("\x1b]8;;https://example.com/a_(b)\x1b\\漢字🙂\x1b]8;;\x1b\\"),
+        "{protected:?}"
+    );
+    assert!(!protected.contains("\x1b]8;;javascript:"), "{protected:?}");
+    assert_eq!(protected.matches("\x1b]8;;").count(), 2, "{protected:?}");
+    let multiple = TerminalDisplay::new()
+        .format_assistant_content("[first](https://example.com/1) [second](https://example.com/2)");
+    assert!(
+        multiple.contains("\x1b]8;;https://example.com/1\x1b\\first\x1b]8;;\x1b\\"),
+        "{multiple:?}"
+    );
+    assert!(
+        multiple.contains("\x1b]8;;https://example.com/2\x1b\\second\x1b]8;;\x1b\\"),
+        "{multiple:?}"
+    );
+    assert_eq!(multiple.matches("\x1b]8;;").count(), 4);
+}
+
+#[test]
+fn assistant_strikethrough_renders_in_replay_and_stream() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let source = "Keep ~~obsolete~~ and `~~literal~~` intact.\n";
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    assert_eq!(
+        strip_ansi(&replay),
+        "Keep obsolete and ~~literal~~ intact.\n"
+    );
+    assert!(replay.contains("\x1b[9mobsolete"), "{replay:?}");
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for character in source.chars() {
+        rendered.push_str(&stream.push(&character.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+}
+
+#[test]
+fn assistant_tables_align_and_stream_without_raw_markdown() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let source =
+        "Before\n\n| Name | Value |\n| :--- | ---: |\n| 漢字 | 42 |\n| test | 7 |\n\nAfter\n";
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    let plain = strip_ansi(&replay);
+    assert!(plain.contains("Before"));
+    assert!(plain.contains("After"));
+    assert!(!plain.contains(":---"), "{plain:?}");
+    let rows: Vec<_> = plain
+        .lines()
+        .filter(|line| line.contains("漢字") || line.contains("test") || line.contains("Name"))
+        .collect();
+    assert_eq!(rows.len(), 3, "{plain:?}");
+    let separators: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.match_indices('│')
+                .map(|(index, _)| row[..index].width())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(separators[0].len() >= 3, "{plain:?}");
+    assert_eq!(separators[0], separators[1]);
+    assert_eq!(separators[1], separators[2]);
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for character in source.chars() {
+        rendered.push_str(&stream.push(&character.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+}
+
+#[test]
+fn streamed_tables_without_outer_pipes_and_lone_pipe_prose() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+    let display = TerminalDisplay::new();
+    for source in [
+        "Name | Value\n--- | ---\nAlice | 10\nBob | 20\n",
+        "Name | Value\n--- | ---\nAlice | 10\nBob | 20",
+        "ordinary | prose\nnext line\n",
+    ] {
+        let mut stream = AssistantMarkdownStream::default();
+        let mut rendered = String::new();
+        for character in source.chars() {
+            rendered.push_str(&stream.push(&character.to_string()));
+        }
+        rendered.push_str(&stream.finish());
+        assert_eq!(
+            rendered,
+            display
+                .format_assistant_content(source)
+                .trim_end_matches('\n')
+                .to_string()
+                + if source.ends_with('\n') { "\n" } else { "" },
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn streamed_prose_renders_inline_markdown_across_chunks() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let display = TerminalDisplay::new();
+    for source in [
+        "Use `code`, **bold**, and _italics_.\n",
+        "Start **bold\ncontinues** after.\n",
+        "Paragraph with `inline` and **strong**.\n\nNext _line_.",
+    ] {
+        let mut stream = AssistantMarkdownStream::default();
+        let mut rendered = String::new();
+        for character in source.chars() {
+            rendered.push_str(&stream.push(&character.to_string()));
+        }
+        rendered.push_str(&stream.finish());
+        assert_eq!(
+            rendered,
+            display
+                .format_assistant_content(source)
+                .trim_end_matches('\n')
+                .to_string()
+                + if source.ends_with('\n') { "\n" } else { "" },
+            "{source}"
+        );
+        assert!(!strip_ansi(&rendered).contains("**"), "{rendered}");
+    }
+}
+
+#[test]
+fn replay_inline_markdown_uses_distinct_terminal_styles() {
+    let rendered = TerminalDisplay::new().format_assistant_content("`code` **bold** _italic_");
+    assert_eq!(strip_ansi(&rendered).trim(), "code bold italic");
+    assert!(
+        rendered.contains("\x1b[48;5;"),
+        "inline code has no background: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("\x1b[1m"),
+        "bold has no style: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("\x1b[3m"),
+        "italic has no style: {rendered:?}"
+    );
+    let protected = TerminalDisplay::new().format_assistant_content(
+        "`_literal_` escaped \\_word\\_ and some_identifier plus _italic_",
+    );
+    assert!(
+        strip_ansi(&protected)
+            .contains("_literal_ escaped \\_word\\_ and some_identifier plus italic"),
+        "{protected:?}"
+    );
+    assert!(protected.contains("\x1b[3m"));
+}
+
+#[test]
 fn streamed_fences_render_like_replay_across_chunk_boundaries() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
 
@@ -83,15 +307,21 @@ fn streamed_fences_render_like_replay_across_chunk_boundaries() {
             display.format_assistant_content(source),
             "{source}"
         );
-        assert_eq!(stream.push("next response"), "next response");
-        assert!(stream.finish().is_empty());
+        assert_eq!(stream.push("next response"), "");
+        assert_eq!(
+            stream.finish(),
+            display
+                .format_assistant_content("next response")
+                .trim_end_matches('\n')
+        );
     }
 }
 
 #[test]
-fn streaming_prose_remains_immediate_and_fence_like_text_is_preserved() {
+fn streaming_prose_waits_for_complete_lines_and_preserves_fence_like_text() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
 
+    let display = TerminalDisplay::new();
     for source in [
         "ordinary prose",
         "inline ``` is not a block\n",
@@ -105,19 +335,30 @@ fn streaming_prose_remains_immediate_and_fence_like_text_is_preserved() {
             rendered.push_str(&stream.push(&character.to_string()));
         }
         rendered.push_str(&stream.finish());
-        assert_eq!(rendered, source);
+        if source == "```bad`info\n" {
+            assert_eq!(rendered, source);
+        } else {
+            assert_eq!(
+                rendered,
+                display
+                    .format_assistant_content(source)
+                    .trim_end_matches('\n')
+                    .to_string()
+                    + if source.ends_with('\n') { "\n" } else { "" },
+                "{source}"
+            );
+        }
     }
     let mut stream = AssistantMarkdownStream::default();
-    assert_eq!(stream.push("hello"), "hello");
-    assert_eq!(stream.push(" world\n"), " world\n");
+    assert!(stream.push("hello").is_empty());
+    assert_eq!(stream.push(" world\n"), "hello world\n");
     assert!(stream.push("``").is_empty());
     assert!(stream.push("`python\nprint('hi')\n").is_empty());
     let rendered = stream.push("```\nAfter");
     assert!(rendered.contains("\x1b[38;2;"));
     assert!(strip_ansi(&rendered).contains("print('hi')"));
-    assert!(strip_ansi(&rendered).trim_end().ends_with("After"));
     assert!(!rendered.contains("```"));
-    assert!(stream.finish().is_empty());
+    assert!(strip_ansi(&stream.finish()).contains("After"));
 }
 
 #[test]

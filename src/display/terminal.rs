@@ -681,7 +681,70 @@ struct ActiveMarkdownCodeBlock {
 }
 
 fn render_markdown_with_termimad(content: &str) -> String {
-    format!("{}", termimad::MadSkin::default_dark().term_text(content))
+    // minimad (termimad's parser) recognizes *emphasis* but not _emphasis_.
+    // Use CommonMark spans so code, escaped underscores, and identifiers stay intact.
+    use pulldown_cmark::{Event, Parser, Tag};
+    let mut normalized = content.as_bytes().to_vec();
+    let mut links = Vec::new();
+    let mut clickable = Vec::new();
+    // Private-use sentinels survive termimad's formatting. Never interpret them
+    // if they already occur in model text.
+    let can_mark_links = !content.contains(['\u{e000}', '\u{e001}', '\u{e002}', '\u{e003}']);
+    for (event, range) in Parser::new(content).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Emphasis)
+                if normalized.get(range.start) == Some(&b'_')
+                    && normalized.get(range.end.saturating_sub(1)) == Some(&b'_') =>
+            {
+                normalized[range.start] = b'*';
+                normalized[range.end - 1] = b'*';
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let source = &content[range.clone()];
+                if source.starts_with('[')
+                    && let Some(label_end) = source.find("](")
+                {
+                    let label = &source[1..label_end];
+                    let destination = dest_url.as_ref();
+                    let safe_url = url::Url::parse(destination).ok().filter(|url| {
+                        matches!(url.scheme(), "http" | "https")
+                            && url.username().is_empty()
+                            && url.password().is_none()
+                            && !destination.chars().any(char::is_control)
+                    });
+                    if can_mark_links && safe_url.is_some() {
+                        let index = clickable.len();
+                        clickable.push(destination.to_string());
+                        links.push((
+                            range,
+                            format!("\u{e000}{index}\u{e001}{label}\u{e002}{index}\u{e003} ({destination})"),
+                        ));
+                    } else {
+                        links.push((range, format!("{label} ({destination})")));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Work backwards so byte offsets from the CommonMark parser remain valid.
+    for (range, replacement) in links.into_iter().rev() {
+        normalized.splice(range, replacement.into_bytes());
+    }
+    let normalized =
+        String::from_utf8(normalized).expect("ASCII marker replacements preserve UTF-8");
+    let mut rendered = format!(
+        "{}",
+        termimad::MadSkin::default_dark().term_text(&normalized)
+    );
+    for (index, destination) in clickable.iter().enumerate() {
+        rendered = rendered.replace(
+            &format!("\u{e000}{index}\u{e001}"),
+            &format!("\x1b]8;;{destination}\x1b\\"),
+        );
+        rendered = rendered.replace(&format!("\u{e002}{index}\u{e003}"), "\x1b]8;;\x1b\\");
+    }
+    rendered
 }
 
 fn markdown_code_blocks(content: &str) -> Vec<MarkdownCodeBlock> {
