@@ -5,12 +5,25 @@ use std::path::{Path, PathBuf};
 const MAX_IMPORT_DEPTH: usize = 5;
 
 pub fn load_all_agents_memory(start_dir: Option<&Path>) -> String {
-    find_all_agents_md_files(start_dir)
+    load_all_agents_memory_with_files(start_dir).0
+}
+
+pub fn load_all_agents_memory_with_files(start_dir: Option<&Path>) -> (String, Vec<PathBuf>) {
+    let mut loaded = Vec::new();
+    let memory = find_all_agents_md_files(start_dir)
         .into_iter()
-        .filter_map(|path| read_agents_md(&path, 0, &mut HashSet::new()).ok())
-        .filter(|content| !content.is_empty())
+        .filter_map(|path| {
+            let mut files = Vec::new();
+            let content = read_agents_md(&path, 0, &mut HashSet::new(), &mut files).ok()?;
+            if content.is_empty() {
+                return None;
+            }
+            loaded.extend(files);
+            Some(content)
+        })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    (memory, loaded)
 }
 
 pub fn find_all_agents_md_files(start_dir: Option<&Path>) -> Vec<PathBuf> {
@@ -35,6 +48,7 @@ fn read_agents_md(
     path: &Path,
     current_depth: usize,
     seen: &mut HashSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
 ) -> Result<String, std::io::Error> {
     if current_depth > MAX_IMPORT_DEPTH {
         return Ok(String::new());
@@ -47,11 +61,12 @@ fn read_agents_md(
     seen.insert(path.clone());
 
     let content = fs::read_to_string(&path)?;
+    files.push(path.clone());
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut parts = vec![content.clone()];
     for import_path in parse_import_paths(&content) {
         let resolved = resolve_import(base_dir, &import_path);
-        let imported = read_agents_md(&resolved, current_depth + 1, seen)?;
+        let imported = read_agents_md(&resolved, current_depth + 1, seen, files)?;
         if !imported.is_empty() {
             parts.push(imported);
         }

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
 use crate::display::TerminalDisplay;
-use crate::memory::load_all_agents_memory;
+use crate::memory::load_all_agents_memory_with_files;
 use crate::pricing::refresh_pricing_cache;
 use crate::providers::{
     Provider, build_provider, effective_model_name, format_cost_and_context_line, list_models,
@@ -152,7 +152,7 @@ async fn run_with_args_and_prefill(
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
     let mut allow_git_writes = args.allow_git;
 
-    let mut session = load_or_create_session(&args, &store)?;
+    let (mut session, loaded_agents_files) = load_or_create_session_with_files(&args, &store)?;
     let mut model_name = effective_model_name(
         args.model
             .as_deref()
@@ -164,6 +164,10 @@ async fn run_with_args_and_prefill(
         store.save(&session)?;
     }
     print_agent_header(&model_name);
+    println!("sessionId: {}", session.session_id);
+    if args.resume.is_none() || args.new {
+        print_agents_files(&loaded_agents_files);
+    }
     replay_session(&session, &display);
 
     if args.talk && (!args.images.is_empty() || !args.query.is_empty()) {
@@ -449,7 +453,6 @@ async fn run_with_args_and_prefill(
         }
     }
 
-    println!("sessionId: {}", session.session_id);
     Ok(())
 }
 
@@ -1277,6 +1280,13 @@ fn attach_stdin_to_stdout_tty() -> Result<(), Box<dyn Error>> {
 }
 
 fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, Box<dyn Error>> {
+    Ok(load_or_create_session_with_files(args, store)?.0)
+}
+
+fn load_or_create_session_with_files(
+    args: &Args,
+    store: &SessionStore,
+) -> Result<(Session, Vec<PathBuf>), Box<dyn Error>> {
     if !args.new
         && let Some(resume) = args.resume.as_deref()
     {
@@ -1285,14 +1295,14 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
         } else {
             Some(resume)
         };
-        return Ok(store.load(id)?);
+        return Ok((store.load(id)?, Vec::new()));
     }
 
     let mut messages = Vec::new();
     messages.push(AgentMessage::System {
         content: system_prompt(),
     });
-    let memory = load_all_agents_memory(None);
+    let (memory, files) = load_all_agents_memory_with_files(None);
     if !memory.is_empty() {
         messages.push(AgentMessage::System { content: memory });
     }
@@ -1300,7 +1310,18 @@ fn load_or_create_session(args: &Args, store: &SessionStore) -> Result<Session, 
         content: format!("[SYSTEM INFO] pwd: {}", std::env::current_dir()?.display()),
     });
 
-    Ok(Session::new(store.new_session_id(), messages))
+    Ok((Session::new(store.new_session_id(), messages), files))
+}
+
+fn print_agents_files(files: &[PathBuf]) {
+    if files.is_empty() {
+        println!("AGENTS.md files: none");
+    } else {
+        println!("AGENTS.md files:");
+        for file in files {
+            println!("  {}", file.display());
+        }
+    }
 }
 
 fn print_agent_header(model_name: &str) {
@@ -1461,7 +1482,7 @@ async fn handle_slash_command(
             );
         }
         "/clear" | "/new" => {
-            let new_session = load_or_create_session(
+            let (new_session, loaded_agents_files) = load_or_create_session_with_files(
                 &Args {
                     new: true,
                     resume: None,
@@ -1484,6 +1505,7 @@ async fn handle_slash_command(
             store.save(session)?;
             println!("cleared");
             println!("sessionId: {}", session.session_id);
+            print_agents_files(&loaded_agents_files);
         }
         "/find" => {
             if rest.is_empty() {

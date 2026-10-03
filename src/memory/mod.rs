@@ -1,3 +1,3 @@
 pub mod agents;
 
-pub use agents::load_all_agents_memory;
+pub use agents::{load_all_agents_memory, load_all_agents_memory_with_files};

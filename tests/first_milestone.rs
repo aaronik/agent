@@ -355,6 +355,117 @@ fn slash_resume_replays_conversation_output() {
 }
 
 #[test]
+fn startup_lists_agents_files_below_session_id() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".agent")).unwrap();
+    let project_file = project.path().join("AGENTS.md");
+    let user_file = home.path().join(".agent/AGENTS.md");
+    std::fs::write(&project_file, "project instructions").unwrap();
+    std::fs::write(&user_file, "user instructions").unwrap();
+
+    let output = agent_command()
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "run echo hi"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let header = lines
+        .iter()
+        .position(|line| *line == "AGENTS.md files:")
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(lines[header + 1].trim())
+            .canonicalize()
+            .unwrap(),
+        project_file.canonicalize().unwrap()
+    );
+    assert_eq!(
+        std::path::Path::new(lines[header + 2].trim())
+            .canonicalize()
+            .unwrap(),
+        user_file.canonicalize().unwrap()
+    );
+    let first_id = stdout.find("sessionId: ").unwrap();
+    let files = stdout.find("AGENTS.md files:").unwrap();
+    let response = stdout.find("Tool completed: hi").unwrap();
+    assert!(first_id < files && files < response, "{stdout}");
+}
+
+#[test]
+fn clear_lists_freshly_loaded_agents_files_below_new_session_id() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let file = project.path().join("AGENTS.md");
+    std::fs::write(&file, "project instructions").unwrap();
+    let output = agent_command()
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "/clear"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let clear = stdout.find("cleared\nsessionId: ").unwrap();
+    let lines = stdout[clear..].lines().collect::<Vec<_>>();
+    assert_eq!(lines[2], "AGENTS.md files:");
+    assert_eq!(
+        std::path::Path::new(lines[3].trim())
+            .canonicalize()
+            .unwrap(),
+        file.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn startup_lists_imported_agents_files() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let imported = project.path().join("nested/AGENTS.md");
+    std::fs::create_dir_all(imported.parent().unwrap()).unwrap();
+    std::fs::write(project.path().join("AGENTS.md"), "@nested/AGENTS.md").unwrap();
+    std::fs::write(&imported, "nested instructions").unwrap();
+    let output = agent_command()
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "/help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let header = lines
+        .iter()
+        .position(|line| *line == "AGENTS.md files:")
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(lines[header + 2].trim())
+            .canonicalize()
+            .unwrap(),
+        imported.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn startup_reports_no_agents_files_when_none_loaded() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let output = agent_command()
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "/help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("sessionId: "));
+    assert!(stdout.contains("AGENTS.md files: none"), "{stdout}");
+}
+
+#[test]
 fn new_session_loads_agents_md_memory_file() {
     let temp_home = tempfile::tempdir().expect("temp home");
     let project = tempfile::tempdir().expect("project");
