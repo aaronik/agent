@@ -892,6 +892,34 @@ fn running_tools_are_transient_even_across_output_and_footer_growth() {
 }
 
 #[test]
+fn running_preview_wraps_full_command_across_rows() {
+    let mut terminal = vt100::Parser::new(18, 40, 1000);
+    let mut live = LiveRenderer::new(40, 18);
+    feed(&mut terminal, live.start("status"));
+    let command = format!("echo {} END-MARKER", "abcd ".repeat(14));
+    feed(
+        &mut terminal,
+        live.tool_start(&ToolCall {
+            id: "long".into(),
+            name: "run_shell_command".into(),
+            arguments: json!({"cmd": command, "intent": "Inspect output"}),
+        }),
+    );
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("[> Running]"), "{visible}");
+    assert!(
+        visible.replace('\n', "").contains("END-MARKER"),
+        "{visible}"
+    );
+    assert!(visible.contains("Inspect output"), "{visible}");
+    assert!(!visible.contains('…'), "{visible}");
+    feed(&mut terminal, live.tool_result("long", "completed\n"));
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(!history.contains("END-MARKER"), "{history}");
+}
+
+#[test]
 fn running_preview_shows_intent_on_separate_line() {
     let mut terminal = vt100::Parser::new(12, 80, 1000);
     let mut live = LiveRenderer::new(80, 12);

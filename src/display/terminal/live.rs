@@ -10,6 +10,19 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{RESET, SPINNER_FRAMES, char_byte_index, truncate_to_width, working_input_preview};
 
+fn wrap_preview(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for grapheme in text.graphemes(true) {
+        if lines.last().expect("one line").width() + grapheme.width() > width {
+            lines.push(String::new());
+        }
+        if grapheme.width() <= width {
+            lines.last_mut().expect("one line").push_str(grapheme);
+        }
+    }
+    lines
+}
+
 pub struct LiveRenderer {
     terminal: vt100::Parser,
     width: u16,
@@ -188,9 +201,7 @@ impl LiveRenderer {
 
     fn tool_lines(&self, input_rows: usize) -> Vec<String> {
         // Preserve the input viewport, status, separator, and an output row.
-        let budget = usize::from(self.height)
-            .saturating_sub(input_rows + 3)
-            .min(3);
+        let budget = usize::from(self.height).saturating_sub(input_rows + 3);
         if budget == 0 || self.width < 6 {
             return Vec::new();
         }
@@ -198,17 +209,35 @@ impl LiveRenderer {
         let mut lines = Vec::new();
         let mut shown = 0;
         for (_, summary, intent) in &self.running_tools {
-            // Keep a row for the overflow indicator when calls remain.
+            // Reserve space for the intent and an overflow indicator for other calls.
             let remaining = self.running_tools.len() - shown - 1;
-            let reserved = usize::from(remaining > 0);
-            if lines.len() + 1 + reserved > budget {
+            let reserved = usize::from(remaining > 0) + usize::from(intent.is_some());
+            if lines.len() + 1 + usize::from(remaining > 0) > budget {
                 break;
             }
-            lines.push(truncate_to_width(summary, width));
+            let summary_rows = wrap_preview(summary, width);
+            let available = budget.saturating_sub(lines.len() + reserved).max(1);
+            if summary_rows.len() > available {
+                lines.extend(summary_rows.into_iter().take(available));
+                if let Some(last) = lines.last_mut() {
+                    *last = format!("{}…", truncate_to_width(last, width.saturating_sub(1)));
+                }
+            } else {
+                lines.extend(summary_rows);
+            }
             if let Some(intent) = intent
-                && lines.len() + 1 + reserved <= budget
+                && lines.len() < budget.saturating_sub(usize::from(remaining > 0))
             {
-                lines.push(truncate_to_width(intent, width));
+                let intent_rows = wrap_preview(intent, width);
+                let available = budget - lines.len() - usize::from(remaining > 0);
+                if intent_rows.len() > available {
+                    lines.extend(intent_rows.into_iter().take(available));
+                    if let Some(last) = lines.last_mut() {
+                        *last = format!("{}…", truncate_to_width(last, width.saturating_sub(1)));
+                    }
+                } else {
+                    lines.extend(intent_rows);
+                }
             }
             shown += 1;
         }
