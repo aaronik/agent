@@ -42,6 +42,8 @@ fn is_context_length_error(message: &str) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+// async_trait adds #[must_use] to boxed futures, which are already must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn complete(

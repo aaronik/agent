@@ -171,12 +171,12 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
 }
 
 pub async fn shutdown_browser_session() {
-    let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
+    let Some(session_mutex) = BROWSER_SESSION.get() else {
+        return;
+    };
     let session = session_mutex.lock().await.take();
     if let Some(session) = session {
         close_session(session).await;
-    } else {
-        cleanup_stale_chrome_code_sign_clones();
     }
 }
 

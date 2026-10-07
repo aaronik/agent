@@ -561,6 +561,44 @@ fn command_buffer_flag_is_single_turn_and_prints_only_final_response() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn exiting_without_browser_does_not_scan_chrome_clones() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("isolated temporary root");
+    let temp_dir = root.path().join("T");
+    let clone = root
+        .path()
+        .join("X/com.google.Chrome.code_sign_clone/code_sign_clone.test");
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::create_dir_all(&clone).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let lsof_log = root.path().join("lsof.log");
+    let lsof = bin.join("lsof");
+    std::fs::write(
+        &lsof,
+        "#!/bin/sh\nprintf 'called\\n' >> \"$AGENT_LSOF_LOG\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    for args in [vec!["--help"], vec!["--model", "mock", "--single", "/help"]] {
+        agent_command()
+            .env("TMPDIR", &temp_dir)
+            .env("PATH", &path)
+            .env("HOME", root.path())
+            .env("AGENT_LSOF_LOG", &lsof_log)
+            .args(args)
+            .assert()
+            .success();
+    }
+    assert!(!lsof_log.exists(), "unused browser must not trigger lsof");
+    assert!(clone.exists(), "unrelated clones must not be deleted");
+}
+
+#[test]
 fn command_buffer_flag_is_available_in_help() {
     let mut cmd = agent_command();
     cmd.env_remove("OPENAI_API_KEY")
