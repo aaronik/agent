@@ -64,6 +64,9 @@ quick picker based on opening-message previews.
 
 ## Terminal output
 
+During a running text turn, type a note and press Enter to steer the agent's next model request. Notes are saved in the session; they do not interrupt an in-flight request or tool. Unsubmitted text remains in the next prompt.
+
+
 Live output uses normal terminal scrollback. Running tools appear as compact,
 transient previews above the input footer; only completed panels enter scrollback.
 Previews are shortened to fit (at most three rows total, with an overflow count)

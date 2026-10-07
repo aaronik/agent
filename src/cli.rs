@@ -321,13 +321,15 @@ async fn run_with_args_and_prefill(
             format_cost_and_context_line(&session.messages, &model_name, allow_git_writes);
         display.render_turn_submitted(&status_line);
         let cancellation_token = CancellationToken::new();
+        let (steering_tx, steering_rx) = std::sync::mpsc::channel();
         let esc_abort = if args.single {
             EscAbortWatcher::disabled()
         } else {
-            EscAbortWatcher::spawn_with_display(
+            EscAbortWatcher::spawn_with_steering(
                 cancellation_token.clone(),
                 Some(Arc::clone(&display)),
                 load_prompt_history(&store).unwrap_or_default(),
+                steering_tx,
             )
         };
         let observed_messages = RefCell::new(Vec::new());
@@ -338,9 +340,10 @@ async fn run_with_args_and_prefill(
             result = loop_runner
                 .as_ref()
                 .expect("loop runner initialized")
-                .run_turn_cancellable_with_event_observer(
+                .run_turn_cancellable_with_steering(
                     &session.messages,
                     &cancellation_token,
+                    &steering_rx,
                     |event| {
                         if let crate::agent::ProviderEvent::TextDelta { text } = event
                             && let Ok(mut assistant) = streamed_assistant_for_events.lock()
@@ -699,6 +702,7 @@ impl WorkingVimMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkingInputAction {
     Redraw,
+    Submit,
     Abort,
     Ignored,
 }
@@ -789,6 +793,9 @@ impl WorkingVimEditor {
 
     fn apply_insert(&mut self, code: CrosstermKeyCode) -> WorkingInputAction {
         match code {
+            CrosstermKeyCode::Enter if !self.text().trim().is_empty() => {
+                return WorkingInputAction::Submit;
+            }
             CrosstermKeyCode::Esc => self.mode = WorkingVimMode::Normal,
             CrosstermKeyCode::Up => self.history_previous(),
             CrosstermKeyCode::Down => self.history_next(),
@@ -831,6 +838,9 @@ impl WorkingVimEditor {
             };
         }
         match code {
+            CrosstermKeyCode::Enter if !self.text().trim().is_empty() => {
+                return WorkingInputAction::Submit;
+            }
             CrosstermKeyCode::Esc => return WorkingInputAction::Abort,
             CrosstermKeyCode::Up => self.history_previous(),
             CrosstermKeyCode::Down => self.history_next(),
@@ -1063,6 +1073,20 @@ impl EscAbortWatcher {
         display: Option<Arc<TerminalDisplay>>,
         history: Vec<String>,
     ) -> Self {
+        Self::spawn_with_steering(
+            cancellation_token,
+            display,
+            history,
+            std::sync::mpsc::channel().0,
+        )
+    }
+
+    fn spawn_with_steering(
+        cancellation_token: CancellationToken,
+        display: Option<Arc<TerminalDisplay>>,
+        history: Vec<String>,
+        steering: std::sync::mpsc::Sender<String>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let editor = Arc::new(std::sync::Mutex::new(WorkingVimEditor::with_history(
             history,
@@ -1104,6 +1128,22 @@ impl EscAbortWatcher {
                                     WorkingInputAction::Abort => {
                                         cancellation_token.cancel();
                                         break;
+                                    }
+                                    WorkingInputAction::Submit => {
+                                        let text = editor.text();
+                                        if steering.send(text).is_ok() {
+                                            editor.characters.clear();
+                                            editor.cursor = 0;
+                                            editor.history_index = None;
+                                            editor.history_draft = None;
+                                            if let Some(display) = &display {
+                                                display.update_working_input(
+                                                    "",
+                                                    0,
+                                                    editor.mode.label(),
+                                                );
+                                            }
+                                        }
                                     }
                                     WorkingInputAction::Redraw => {
                                         if let Some(display) = &display {
@@ -2589,6 +2629,26 @@ mod tests {
         assert_eq!(editor.text(), "previous");
         assert_eq!(editor.cursor, "previous".chars().count());
         assert_eq!(editor.mode, WorkingVimMode::Normal);
+    }
+
+    #[test]
+    fn working_input_enter_submits_only_nonempty_note() {
+        let mut editor = WorkingVimEditor::default();
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Enter)),
+            WorkingInputAction::Ignored
+        );
+        editor.apply(Event::Paste("change course".into()));
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Enter)),
+            WorkingInputAction::Submit
+        );
+        assert_eq!(editor.text(), "change course");
+        editor.apply(key_event(CrosstermKeyCode::Esc));
+        assert_eq!(
+            editor.apply(key_event(CrosstermKeyCode::Enter)),
+            WorkingInputAction::Submit
+        );
     }
 
     #[test]

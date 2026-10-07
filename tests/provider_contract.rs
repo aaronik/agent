@@ -499,6 +499,120 @@ async fn agent_loop_observes_text_deltas_before_the_final_message() {
 }
 
 #[tokio::test]
+async fn steering_note_submitted_while_streaming_reaches_next_request() {
+    use std::sync::{Arc, Mutex};
+    let (sender, receiver) = std::sync::mpsc::channel();
+    #[derive(Clone)]
+    struct SteeringProvider {
+        sender: std::sync::mpsc::Sender<String>,
+        requests: Arc<Mutex<Vec<Vec<AgentMessage>>>>,
+    }
+    #[async_trait]
+    impl Provider for SteeringProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            let request_number = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(messages.to_vec());
+                requests.len()
+            };
+            if request_number == 1 {
+                self.sender.send("please adjust".into()).unwrap();
+            }
+            Ok(AssistantMessage {
+                content: format!("response {request_number}"),
+                tool_calls: vec![],
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runner = AgentLoop::new(
+        SteeringProvider {
+            sender,
+            requests: requests.clone(),
+        },
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 3,
+            model: "mock".into(),
+        },
+    );
+    let mut observed = Vec::new();
+    let result = runner
+        .run_turn_cancellable_with_steering(
+            &[AgentMessage::User {
+                content: "start".into(),
+            }],
+            &CancellationToken::new(),
+            &receiver,
+            |_| {},
+            |message| observed.push(message.clone()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.new_messages, observed);
+    assert_eq!(result.final_text, "response 2");
+    assert_eq!(result.new_messages.len(), 3);
+    assert_eq!(
+        result.new_messages[1],
+        AgentMessage::User {
+            content: "please adjust".into()
+        }
+    );
+    assert_eq!(
+        requests.lock().unwrap()[1].last(),
+        Some(&result.new_messages[1])
+    );
+}
+
+#[tokio::test]
+async fn steering_notes_arriving_during_tools_keep_provider_history_valid() {
+    // Notes sent before the request must be included even when the prior response had no tools.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender.send("one".to_string()).unwrap();
+    sender.send("two".to_string()).unwrap();
+    let runner = AgentLoop::new(
+        agent_rs::providers::MockProvider::default(),
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 3,
+            model: "mock".into(),
+        },
+    );
+    let result = runner
+        .run_turn_cancellable_with_steering(
+            &[AgentMessage::User {
+                content: "hello".into(),
+            }],
+            &CancellationToken::new(),
+            &receiver,
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.new_messages[..2],
+        [
+            AgentMessage::User {
+                content: "one".into()
+            },
+            AgentMessage::User {
+                content: "two".into()
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn agent_loop_records_model_on_assistant_responses() {
     #[derive(Clone, Debug)]
     struct FinalProvider;

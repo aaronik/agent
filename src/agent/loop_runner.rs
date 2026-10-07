@@ -87,6 +87,31 @@ where
         &self,
         starting_messages: &[AgentMessage],
         cancellation_token: &CancellationToken,
+        on_event: E,
+        on_message: F,
+        on_tool_start: G,
+    ) -> Result<AgentTurnResult, ProviderError>
+    where
+        E: FnMut(&ProviderEvent) + Send,
+        F: FnMut(&AgentMessage),
+        G: FnMut(&ToolCall),
+    {
+        self.run_turn_cancellable_with_steering(
+            starting_messages,
+            cancellation_token,
+            &std::sync::mpsc::channel().1,
+            on_event,
+            on_message,
+            on_tool_start,
+        )
+        .await
+    }
+
+    pub async fn run_turn_cancellable_with_steering<E, F, G>(
+        &self,
+        starting_messages: &[AgentMessage],
+        cancellation_token: &CancellationToken,
+        steering: &std::sync::mpsc::Receiver<String>,
         mut on_event: E,
         mut on_message: F,
         mut on_tool_start: G,
@@ -105,6 +130,7 @@ where
 
         for _ in 0..self.config.max_turns {
             check_cancelled(cancellation_token)?;
+            drain_steering(steering, &mut messages, &mut new_messages, &mut on_message);
             let mut events = Vec::new();
             let mut receive_event = |event| {
                 on_event(&event);
@@ -153,6 +179,9 @@ where
             new_messages.push(assistant_message);
 
             if tool_calls.is_empty() {
+                if drain_steering(steering, &mut messages, &mut new_messages, &mut on_message) {
+                    continue;
+                }
                 return Ok(AgentTurnResult {
                     new_messages,
                     final_text,
@@ -184,6 +213,26 @@ where
 
         Err(ProviderError::MaxTurnsExceeded(self.config.max_turns))
     }
+}
+
+fn drain_steering<F: FnMut(&AgentMessage)>(
+    steering: &std::sync::mpsc::Receiver<String>,
+    messages: &mut Vec<AgentMessage>,
+    new_messages: &mut Vec<AgentMessage>,
+    on_message: &mut F,
+) -> bool {
+    let mut received = false;
+    while let Ok(content) = steering.try_recv() {
+        if content.trim().is_empty() {
+            continue;
+        }
+        let message = AgentMessage::User { content };
+        on_message(&message);
+        messages.push(message.clone());
+        new_messages.push(message);
+        received = true;
+    }
+    received
 }
 
 fn check_cancelled(cancellation_token: &CancellationToken) -> Result<(), ProviderError> {
