@@ -250,6 +250,7 @@ fn with_intent_parameter(mut parameters: Value) -> Value {
         .entry("properties")
         .or_insert_with(|| Value::Object(Map::new()));
     if let Value::Object(properties) = properties {
+        let previous = std::mem::take(properties);
         properties.insert(
             "intent".to_string(),
             json!({
@@ -258,15 +259,15 @@ fn with_intent_parameter(mut parameters: Value) -> Value {
                 "description": "why this tool is being called; state the intention in 80 characters or fewer."
             }),
         );
+        properties.extend(previous);
     }
 
     let required = schema
         .entry("required")
         .or_insert_with(|| Value::Array(Vec::new()));
-    if let Value::Array(required) = required
-        && !required.iter().any(|field| field == "intent")
-    {
-        required.push(Value::String("intent".to_string()));
+    if let Value::Array(required) = required {
+        required.retain(|field| field != "intent");
+        required.insert(0, Value::String("intent".to_string()));
     }
 
     parameters

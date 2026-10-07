@@ -162,30 +162,34 @@ impl LiveRenderer {
     /// stable order and update by ID so overlapping calls complete independently.
     pub fn tool_start(&mut self, call: &crate::agent::ToolCall) -> String {
         let mut out = self.clear();
-        let summary = working_input_preview(&format!(
-            "[> Running] {}  {}",
-            call.name,
-            super::format_args_lines(call)
-                .into_iter()
-                .filter(|line| !line.starts_with("intent="))
-                .collect::<Vec<_>>()
-                .join("  ")
-        ));
         let intent = call
             .arguments
             .get("intent")
             .and_then(serde_json::Value::as_str)
-            .filter(|intent| !intent.is_empty())
-            .map(|intent| format!("            {}", working_input_preview(intent)));
-        if let Some((_, preview, old_intent)) = self
+            .filter(|intent| !intent.is_empty());
+        let summary = working_input_preview(&format!(
+            "[> Running] {}{}",
+            call.name,
+            intent
+                .map(|intent| format!("  {intent}"))
+                .unwrap_or_default()
+        ));
+        let args = super::format_args_lines(call)
+            .into_iter()
+            .filter(|line| !line.starts_with("intent="))
+            .collect::<Vec<_>>()
+            .join("  ");
+        let details =
+            (!args.is_empty()).then(|| format!("            {}", working_input_preview(&args)));
+        if let Some((_, preview, old_details)) = self
             .running_tools
             .iter_mut()
             .find(|(id, _, _)| id == &call.id)
         {
             *preview = summary;
-            *old_intent = intent;
+            *old_details = details;
         } else {
-            self.running_tools.push((call.id.clone(), summary, intent));
+            self.running_tools.push((call.id.clone(), summary, details));
         }
         out.push_str(&self.draw());
         out
@@ -208,10 +212,10 @@ impl LiveRenderer {
         let width = usize::from(self.width - 1);
         let mut lines = Vec::new();
         let mut shown = 0;
-        for (_, summary, intent) in &self.running_tools {
-            // Reserve space for the intent and an overflow indicator for other calls.
+        for (_, summary, details) in &self.running_tools {
+            // Reserve space for the arguments and an overflow indicator for other calls.
             let remaining = self.running_tools.len() - shown - 1;
-            let reserved = usize::from(remaining > 0) + usize::from(intent.is_some());
+            let reserved = usize::from(remaining > 0) + usize::from(details.is_some());
             if lines.len() + 1 + usize::from(remaining > 0) > budget {
                 break;
             }
@@ -225,18 +229,18 @@ impl LiveRenderer {
             } else {
                 lines.extend(summary_rows);
             }
-            if let Some(intent) = intent
+            if let Some(details) = details
                 && lines.len() < budget.saturating_sub(usize::from(remaining > 0))
             {
-                let intent_rows = wrap_preview(intent, width);
+                let detail_rows = wrap_preview(details, width);
                 let available = budget - lines.len() - usize::from(remaining > 0);
-                if intent_rows.len() > available {
-                    lines.extend(intent_rows.into_iter().take(available));
+                if detail_rows.len() > available {
+                    lines.extend(detail_rows.into_iter().take(available));
                     if let Some(last) = lines.last_mut() {
                         *last = format!("{}…", truncate_to_width(last, width.saturating_sub(1)));
                     }
                 } else {
-                    lines.extend(intent_rows);
+                    lines.extend(detail_rows);
                 }
             }
             shown += 1;

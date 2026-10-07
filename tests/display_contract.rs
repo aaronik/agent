@@ -893,8 +893,8 @@ fn running_tools_are_transient_even_across_output_and_footer_growth() {
 
 #[test]
 fn running_preview_wraps_full_command_across_rows() {
-    let mut terminal = vt100::Parser::new(18, 40, 1000);
-    let mut live = LiveRenderer::new(40, 18);
+    let mut terminal = vt100::Parser::new(18, 60, 1000);
+    let mut live = LiveRenderer::new(60, 18);
     feed(&mut terminal, live.start("status"));
     let command = format!("echo {} END-MARKER", "abcd ".repeat(14));
     feed(
@@ -942,12 +942,13 @@ fn running_preview_shows_intent_on_separate_line() {
         .iter()
         .position(|line| line.contains("[> Running]"))
         .unwrap();
-    assert!(lines[first].contains("cmd=sleep 1"), "{visible}");
-    assert!(!lines[first].contains("Check the output"), "{visible}");
+    assert!(lines[first].contains("Check the output"), "{visible}");
+    assert!(!lines[first].contains("cmd=sleep 1"), "{visible}");
     assert!(
-        lines[first + 1].contains("            Check the output"),
+        lines[first + 1].contains("            cmd=sleep 1"),
         "{visible}"
     );
+    assert!(lines[first + 1].contains("timeout=30"), "{visible}");
     assert!(!visible.contains("intent:"), "{visible}");
     feed(&mut terminal, live.tool_result("intent", "completed\n"));
     feed(&mut terminal, live.finish());

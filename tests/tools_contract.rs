@@ -124,6 +124,36 @@ async fn registry_exposes_and_executes_active_tool_surface() {
                 .iter()
                 .any(|field| field == "intent")
         );
+        assert_eq!(
+            parameters["properties"]
+                .as_object()
+                .expect("tool properties")
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("intent"),
+            "{} should list intent first in its properties",
+            definition.name
+        );
+        assert_eq!(
+            parameters["required"]
+                .as_array()
+                .expect("required array")
+                .first(),
+            Some(&json!("intent")),
+            "{} should require intent first",
+            definition.name
+        );
+        let serialized = serde_json::to_string(parameters).expect("serialize tool schema");
+        let properties = serialized
+            .split("\"properties\":{")
+            .nth(1)
+            .expect("properties object");
+        assert!(
+            properties.starts_with("\"intent\":"),
+            "{} should send intent first to providers",
+            definition.name
+        );
         assert!(definition.description.contains("intent"));
     }
 
