@@ -69,7 +69,7 @@ impl ToolRegistry {
             definition::<GenImageArgs>("gen_image", "Generate images with the OpenAI image API."),
             definition::<CommunicateArgs>(
                 "communicate",
-                "Communicate progress or intermediate status to the user.",
+                "Send a brief, user-visible progress update. Use this proactively before starting a multi-step task, at meaningful milestones or when the plan changes, before lengthy checks, and when blocked or waiting. Say what you are doing or what happened. Do not use it for every tool call or a trivial task. This is an intermediate update, not the final answer.",
             ),
             definition::<BrowserControlArgs>(
                 "browser_control",

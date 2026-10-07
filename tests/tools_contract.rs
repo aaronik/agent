@@ -62,6 +62,18 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     assert!(search_replace_description.contains("Prefer this over `write_file`"));
     assert!(search_replace_description.contains("original text can be matched exactly"));
 
+    let communicate_description = registry
+        .definitions()
+        .iter()
+        .find(|definition| definition.name == "communicate")
+        .expect("communicate definition")
+        .description
+        .as_str();
+    assert!(communicate_description.contains("before starting a multi-step task"));
+    assert!(communicate_description.contains("when the plan changes"));
+    assert!(communicate_description.contains("before lengthy checks"));
+    assert!(communicate_description.contains("Do not use it for every tool call"));
+
     let browser_definition = registry
         .definitions()
         .iter()
