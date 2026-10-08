@@ -56,6 +56,27 @@ fn realtime_session_update_configures_voice_vad_and_interruption() {
 }
 
 #[test]
+fn wake_word_session_waits_for_explicit_response() {
+    let config = test_config().with_wake_word("Computer".to_string());
+    let event = session_update_event(&config);
+    let detection = &event["session"]["audio"]["input"]["turn_detection"];
+    assert_eq!(detection["create_response"], false);
+    assert_eq!(detection["interrupt_response"], false);
+    assert_eq!(
+        session_update_event(&test_config())["session"]["audio"]["input"]["turn_detection"]["create_response"],
+        true
+    );
+}
+
+#[test]
+fn transcription_contains_item_id_for_ignored_turn_deletion() {
+    assert_eq!(
+        parse_realtime_event(r#"{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_42","transcript":"Computer, status?"}"#).unwrap(),
+        RealtimeEvent::UserTranscript { transcript: "Computer, status?".to_string(), item_id: "item_42".to_string() }
+    );
+}
+
+#[test]
 fn realtime_session_instructions_include_agents_memory_and_working_directory() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("AGENTS.md"), "Project rule: run tests.").unwrap();
@@ -118,7 +139,7 @@ fn realtime_events_drive_audio_transcripts_and_barge_in() {
     );
     assert_eq!(
         parse_realtime_event(r#"{"type":"conversation.item.input_audio_transcription.completed","transcript":"hello"}"#).unwrap(),
-        RealtimeEvent::UserTranscript("hello".to_string())
+        RealtimeEvent::UserTranscript { transcript: "hello".to_string(), item_id: String::new() }
     );
 }
 
@@ -220,6 +241,56 @@ fn realtime_tool_output_events_match_ga_shape() {
         })
     );
     assert_eq!(response_create_event(), json!({"type": "response.create"}));
+}
+
+#[tokio::test]
+async fn wake_word_protocol_deletes_audio_item_then_sends_command_and_response() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let update: serde_json::Value =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        assert_eq!(
+            update["session"]["audio"]["input"]["turn_detection"]["create_response"],
+            false
+        );
+        socket.send(Message::Text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"audio_1","transcript":"Computer, status?"}).to_string().into())).await.unwrap();
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            events.push(
+                serde_json::from_str::<serde_json::Value>(
+                    &socket.next().await.unwrap().unwrap().into_text().unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(
+            events[0],
+            json!({"type":"conversation.item.delete","item_id":"audio_1"})
+        );
+        assert_eq!(events[1]["item"]["content"][0]["text"], "status?");
+        assert_eq!(events[2], response_create_event());
+    });
+    let mut config = test_config().with_wake_word("Computer".to_string());
+    config.base_url = format!("ws://{address}/v1/realtime");
+    let mut client = agent_rs::voice::realtime::RealtimeClient::connect(&config)
+        .await
+        .unwrap();
+    let event = client.next_event().await.unwrap().unwrap();
+    assert!(
+        matches!(event, RealtimeEvent::UserTranscript { ref item_id, .. } if item_id == "audio_1")
+    );
+    client.delete_item("audio_1").await.unwrap();
+    client.create_user_text("status?").await.unwrap();
+    client.create_response().await.unwrap();
+    server.await.unwrap();
 }
 
 #[test]
@@ -336,5 +407,6 @@ fn test_config() -> agent_rs::voice::realtime::RealtimeConfig {
         tools: Vec::new(),
         history: Vec::new(),
         initial_response: false,
+        wake_word: None,
     }
 }

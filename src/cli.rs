@@ -65,6 +65,13 @@ pub struct Args {
     #[arg(short = 't', long = "talk", help = "Start a realtime voice session")]
     pub talk: bool,
     #[arg(
+        short = 'w',
+        long = "wake-word",
+        value_name = "WORD",
+        help = "Only respond when a spoken turn begins with WORD (requires --talk)"
+    )]
+    pub wake_word: Option<String>,
+    #[arg(
         short = 'c',
         long = "command",
         help = "Run one turn and print only the final response for zsh print -z wrappers"
@@ -105,6 +112,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
+    if args.wake_word.is_some() && !args.talk {
+        return Err("--wake-word requires --talk".into());
+    }
+    if args
+        .wake_word
+        .as_ref()
+        .is_some_and(|word| word.trim().is_empty())
+    {
+        return Err("--wake-word cannot be empty".into());
+    }
     if args.new && args.resume.is_some() {
         return Err("--new cannot be used with --resume".into());
     }
@@ -211,6 +228,7 @@ async fn run_with_args_and_prefill(
                 &system_prompt(),
                 args.single,
                 allow_git_writes,
+                args.wake_word.as_deref(),
             )
             .await;
             match talk_result {
@@ -648,6 +666,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             update_pricing: false,
             single: true,
             talk: false,
+            wake_word: None,
             command: false,
             resume: None,
             new: true,
@@ -1533,6 +1552,7 @@ async fn handle_slash_command(
                     list_models: false,
                     update_pricing: false,
                     talk: false,
+                    wake_word: None,
                     command: false,
                     allow_git: *allow_git_writes,
                     no_completion_sound: args.no_completion_sound,
@@ -2417,6 +2437,22 @@ mod tests {
     fn parses_new_short_flag() {
         let args = Args::parse_from(["agent", "-n"]);
         assert!(args.new);
+    }
+
+    #[test]
+    fn wake_word_requires_talk_and_nonempty_value() {
+        let args = Args::parse_from(["agent", "--wake-word", "Computer"]);
+        assert_eq!(
+            validate_args(&args).unwrap_err().to_string(),
+            "--wake-word requires --talk"
+        );
+        let args = Args::parse_from(["agent", "--talk", "-w", "  "]);
+        assert_eq!(
+            validate_args(&args).unwrap_err().to_string(),
+            "--wake-word cannot be empty"
+        );
+        let args = Args::parse_from(["agent", "--talk", "-w", "Computer"]);
+        assert!(validate_args(&args).is_ok());
     }
 
     #[test]

@@ -46,6 +46,32 @@ enum InputAudioAction {
     BargeIn,
 }
 
+#[derive(Default)]
+struct WakeResponseGate {
+    active: bool,
+    pending: Option<String>,
+}
+
+impl WakeResponseGate {
+    fn queue_command(&mut self, command: &str) -> bool {
+        if self.active {
+            let should_cancel = self.pending.is_none();
+            self.pending = Some(command.to_string());
+            should_cancel
+        } else {
+            self.active = true;
+            false
+        }
+    }
+
+    fn response_done(&mut self) -> Option<String> {
+        self.active = false;
+        let command = self.pending.take()?;
+        self.active = true;
+        Some(command)
+    }
+}
+
 enum TalkLoopAction {
     Continue,
     Reconnect(RealtimeError),
@@ -61,9 +87,13 @@ pub async fn run_talk_session(
     base_system_prompt: &str,
     single_response: bool,
     allow_git_writes: bool,
+    wake_word: Option<&str>,
 ) -> Result<TalkSessionExit, Box<dyn Error>> {
     let mut config =
         talk_config(model_name, base_system_prompt)?.with_history(session.messages.clone());
+    if let Some(word) = wake_word {
+        config = config.with_wake_word(word.trim().to_string());
+    }
     if single_response {
         config = config.with_initial_response();
     }
@@ -72,9 +102,15 @@ pub async fn run_talk_session(
         "\n[agent voice]\nmodel: {}\nvoice: {}\nspeed: {:.2}x",
         config.model, config.voice, config.voice_speed
     );
-    println!(
-        "Speak normally. Interrupt by talking over the assistant. Press Esc to cancel the current response. Press Ctrl-T to return to text mode. Press Ctrl-C to exit.\n"
-    );
+    if let Some(word) = wake_word {
+        println!(
+            "Begin each request with '{word}'. Other speech is ignored. Press Esc to cancel the current response. Press Ctrl-T for text mode. Press Ctrl-C to exit.\n"
+        );
+    } else {
+        println!(
+            "Speak normally. Interrupt by talking over the assistant. Press Esc to cancel the current response. Press Ctrl-T to return to text mode. Press Ctrl-C to exit.\n"
+        );
+    }
 
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<i16>>();
     let audio = AudioIo::start(audio_tx)?;
@@ -88,6 +124,10 @@ pub async fn run_talk_session(
     };
     let display = TerminalDisplay::new();
     let mut input_gate = InputAudioGate::default();
+    let mut wake_response_gate = WakeResponseGate {
+        active: config.initial_response && config.wake_word.is_some(),
+        ..Default::default()
+    };
     let mut cancellation_token = CancellationToken::new();
     let mut esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
@@ -99,6 +139,7 @@ pub async fn run_talk_session(
             audio_rx: &mut audio_rx,
             control_rx: &mut control_rx,
             input_gate: &mut input_gate,
+            wake_response_gate: &mut wake_response_gate,
             audio: &audio,
             playback: &playback,
             tools: &tools,
@@ -109,6 +150,7 @@ pub async fn run_talk_session(
             cancellation_token: &cancellation_token,
             allow_git_writes,
             single_response,
+            wake_word: config.wake_word.as_deref(),
         })
         .await
         {
@@ -117,7 +159,10 @@ pub async fn run_talk_session(
                 eprintln!("[voice warning] {err}; reconnecting...");
                 audio.clear_playback();
                 match RealtimeClient::connect(&reconnect_config(&config, session)).await {
-                    Ok(reconnected_client) => client = reconnected_client,
+                    Ok(reconnected_client) => {
+                        client = reconnected_client;
+                        wake_response_gate = WakeResponseGate::default();
+                    }
                     Err(err) => {
                         esc_abort.stop().await;
                         control_watcher.stop().await;
@@ -143,6 +188,7 @@ pub async fn run_talk_session(
             print_status("cancelled");
             audio.clear_playback();
             let _ = client.cancel_response().await;
+            wake_response_gate.pending = None;
             esc_abort.stop().await;
             cancellation_token = CancellationToken::new();
             esc_abort = EscAbortWatcher::spawn(cancellation_token.clone());
@@ -200,6 +246,7 @@ struct TalkLoopTick<'a> {
     audio_rx: &'a mut mpsc::UnboundedReceiver<Vec<i16>>,
     control_rx: &'a mut mpsc::UnboundedReceiver<VoiceControlEvent>,
     input_gate: &'a mut InputAudioGate,
+    wake_response_gate: &'a mut WakeResponseGate,
     audio: &'a AudioIo,
     playback: &'a crate::voice::audio::PlaybackQueue,
     tools: &'a ToolRegistry,
@@ -210,12 +257,14 @@ struct TalkLoopTick<'a> {
     cancellation_token: &'a CancellationToken,
     allow_git_writes: bool,
     single_response: bool,
+    wake_word: Option<&'a str>,
 }
 
 async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
     tokio::select! {
         Some(samples) = context.audio_rx.recv() => {
-            match context.input_gate.action(context.playback, &samples) {
+            let action = context.input_gate.action(context.playback, &samples, context.wake_word.is_some());
+            match action {
                 InputAudioAction::SuppressEcho => return TalkLoopAction::Continue,
                 InputAudioAction::BargeIn => {
                     context.audio.clear_playback();
@@ -246,6 +295,7 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                 Err(err) => return TalkLoopAction::Error(err.into()),
             };
             let response_completed = context.single_response
+                && context.wake_response_gate.pending.is_none()
                 && matches!(&event, RealtimeEvent::ResponseDone { tool_calls, .. } if tool_calls.is_empty());
             let mut event_context = RealtimeEventContext {
                 client: context.client,
@@ -258,6 +308,8 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
                 session: context.session,
                 cancellation_token: context.cancellation_token,
                 allow_git_writes: context.allow_git_writes,
+                wake_word: context.wake_word,
+                wake_response_gate: context.wake_response_gate,
             };
             match handle_realtime_event(event, &mut event_context).await {
                 Ok(()) if response_completed => {
@@ -297,6 +349,24 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
     }
 }
 
+fn wake_word_command<'a>(transcript: &'a str, wake_word: &str) -> Option<&'a str> {
+    let transcript = transcript.trim_start();
+    let prefix = transcript.get(..wake_word.len())?;
+    if !prefix.eq_ignore_ascii_case(wake_word) {
+        return None;
+    }
+    let rest = transcript.get(wake_word.len()..)?;
+    if !rest.is_empty()
+        && !rest.starts_with(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+    {
+        return None;
+    }
+    let command = rest
+        .trim_start_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .trim();
+    (!command.is_empty()).then_some(command)
+}
+
 fn is_recoverable_realtime_error(err: &RealtimeError) -> bool {
     match err {
         RealtimeError::Connection(message) => is_recoverable_realtime_connection_message(message),
@@ -330,6 +400,8 @@ struct RealtimeEventContext<'a> {
     session: &'a mut Session,
     cancellation_token: &'a CancellationToken,
     allow_git_writes: bool,
+    wake_word: Option<&'a str>,
+    wake_response_gate: &'a mut WakeResponseGate,
 }
 
 async fn handle_realtime_event(
@@ -337,17 +409,47 @@ async fn handle_realtime_event(
     context: &mut RealtimeEventContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     match event {
+        RealtimeEvent::AudioDelta(_) if context.wake_response_gate.pending.is_some() => {}
         RealtimeEvent::AudioDelta(samples) => context.playback.push_pcm16(&samples),
-        RealtimeEvent::SpeechStarted => {
+        RealtimeEvent::SpeechStarted if context.wake_word.is_none() => {
             context.audio.clear_playback();
             print_status("interrupted");
         }
-        RealtimeEvent::UserTranscript(transcript) => {
-            if !transcript.trim().is_empty() {
-                println!("\nYou: {}", transcript.trim());
-                context.session.messages.push(AgentMessage::User {
-                    content: transcript,
-                });
+        RealtimeEvent::SpeechStarted => {}
+        RealtimeEvent::UserTranscript {
+            transcript,
+            item_id,
+        } => {
+            let content = if let Some(word) = context.wake_word {
+                let command = wake_word_command(&transcript, word);
+                if item_id.is_empty() {
+                    return Err(RealtimeError::InvalidEvent(
+                        "transcription missing item_id in wake-word mode".into(),
+                    )
+                    .into());
+                }
+                context.client.delete_item(&item_id).await?;
+                let Some(command) = command else {
+                    return Ok(());
+                };
+                context.audio.clear_playback();
+                if context.wake_response_gate.queue_command(command) {
+                    context.client.cancel_response().await?;
+                    print_status("interrupted");
+                } else {
+                    context.client.create_user_text(command).await?;
+                    context.client.create_response().await?;
+                }
+                command.to_string()
+            } else {
+                transcript.trim().to_string()
+            };
+            if !content.is_empty() {
+                println!("\nYou: {content}");
+                context
+                    .session
+                    .messages
+                    .push(AgentMessage::User { content });
                 context.store.save(context.session)?;
             }
         }
@@ -378,6 +480,12 @@ async fn handle_realtime_event(
                 context.model_name,
                 context.allow_git_writes,
             );
+            if context.wake_word.is_some()
+                && let Some(command) = context.wake_response_gate.response_done()
+            {
+                context.client.create_user_text(&command).await?;
+                context.client.create_response().await?;
+            }
         }
         RealtimeEvent::Other(_) => {}
     }
@@ -590,8 +698,15 @@ impl InputAudioGate {
         &mut self,
         playback: &crate::voice::audio::PlaybackQueue,
         samples: &[i16],
+        wake_word_enabled: bool,
     ) -> InputAudioAction {
-        input_audio_action_with_volume(playback, samples, self.system_volume.current())
+        if wake_word_enabled {
+            // VoiceProcessingIO handles speaker echo; dropping quiet audio here can
+            // remove the wake word before the server can transcribe it.
+            InputAudioAction::Forward
+        } else {
+            input_audio_action_with_volume(playback, samples, self.system_volume.current())
+        }
     }
 }
 
@@ -692,6 +807,37 @@ fn rms(samples: &[i16]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_word_interrupt_waits_for_cancelled_response_before_restart() {
+        let mut gate = WakeResponseGate::default();
+        assert!(!gate.queue_command("first"));
+        assert!(gate.active);
+        assert!(gate.queue_command("second"));
+        assert_eq!(gate.pending.as_deref(), Some("second"));
+        assert!(!gate.queue_command("third"));
+        assert_eq!(gate.response_done().as_deref(), Some("third"));
+        assert!(gate.active);
+        assert_eq!(gate.response_done(), None);
+        assert!(!gate.active);
+    }
+
+    #[test]
+    fn wake_word_only_matches_complete_first_word_and_requires_command() {
+        assert_eq!(
+            wake_word_command("Computer, what's the time?", "computer"),
+            Some("what's the time?")
+        );
+        assert_eq!(
+            wake_word_command("  JARVIS: status", "Jarvis"),
+            Some("status")
+        );
+        assert_eq!(wake_word_command("Hi Computer, status", "Computer"), None);
+        assert_eq!(wake_word_command("Computerized status", "Computer"), None);
+        assert_eq!(wake_word_command("Computer", "Computer"), None);
+        assert_eq!(wake_word_command("Computer!", "Computer"), None);
+        assert_eq!(wake_word_command("Computér, status", "Computer"), None);
+    }
 
     #[test]
     fn talk_model_uses_voice_default_for_text_models() {
@@ -834,6 +980,25 @@ mod tests {
         assert_eq!(assistant.content, "");
         assert_eq!(assistant.usage.as_ref().expect("usage").output_tokens, 3);
         assert_eq!(assistant.model.as_deref(), Some("gpt-realtime"));
+    }
+
+    #[test]
+    fn wake_word_audio_is_forwarded_even_during_playback() {
+        let playback = crate::voice::audio::PlaybackQueue::default();
+        playback.push_pcm16(&[1000; 240]);
+        let mut input_gate = InputAudioGate::default();
+        assert_eq!(
+            input_gate.action(&playback, &[200; 240], true),
+            InputAudioAction::Forward
+        );
+        assert_eq!(
+            input_gate.action(&playback, &[8000; 240], true),
+            InputAudioAction::Forward
+        );
+        assert_eq!(
+            input_audio_action_with_volume(&playback, &[200; 240], Some(1.0)),
+            InputAudioAction::SuppressEcho
+        );
     }
 
     #[test]

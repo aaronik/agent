@@ -55,6 +55,18 @@ impl RealtimeClient {
         self.send_json(json!({ "type": "response.cancel" })).await
     }
 
+    pub async fn delete_item(&mut self, item_id: &str) -> Result<(), RealtimeError> {
+        self.send_json(json!({ "type": "conversation.item.delete", "item_id": item_id }))
+            .await
+    }
+
+    pub async fn create_user_text(&mut self, text: &str) -> Result<(), RealtimeError> {
+        self.send_json(json!({
+            "type": "conversation.item.create",
+            "item": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] }
+        })).await
+    }
+
     pub async fn send_function_call_output(
         &mut self,
         call_id: &str,
@@ -106,6 +118,7 @@ pub struct RealtimeConfig {
     pub tools: Vec<ToolDefinition>,
     pub history: Vec<AgentMessage>,
     pub initial_response: bool,
+    pub wake_word: Option<String>,
 }
 
 impl RealtimeConfig {
@@ -134,7 +147,13 @@ impl RealtimeConfig {
             tools: Vec::new(),
             history: Vec::new(),
             initial_response: false,
+            wake_word: None,
         }
+    }
+
+    pub fn with_wake_word(mut self, wake_word: String) -> Self {
+        self.wake_word = Some(wake_word);
+        self
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
@@ -156,7 +175,10 @@ impl RealtimeConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RealtimeEvent {
     AudioDelta(Vec<i16>),
-    UserTranscript(String),
+    UserTranscript {
+        transcript: String,
+        item_id: String,
+    },
     AssistantTranscript(String),
     SpeechStarted,
     ResponseDone {
@@ -229,8 +251,8 @@ pub fn session_update_event(config: &RealtimeConfig) -> Value {
                     "threshold": 0.5,
                     "prefix_padding_ms": 300,
                     "silence_duration_ms": 500,
-                    "create_response": true,
-                    "interrupt_response": true
+                    "create_response": config.wake_word.is_none(),
+                    "interrupt_response": config.wake_word.is_none()
                 }
             },
             "output": {
@@ -351,13 +373,18 @@ pub fn parse_realtime_event(text: &str) -> Result<RealtimeEvent, RealtimeError> 
             Ok(RealtimeEvent::AudioDelta(decode_pcm16_base64(delta)?))
         }
         "conversation.item.input_audio_transcription.completed" => {
-            Ok(RealtimeEvent::UserTranscript(
-                value
+            Ok(RealtimeEvent::UserTranscript {
+                transcript: value
                     .get("transcript")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-            ))
+                item_id: value
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
         }
         "response.audio_transcript.done" | "response.output_audio_transcript.done" => {
             Ok(RealtimeEvent::AssistantTranscript(
@@ -497,6 +524,7 @@ mod tests {
             tools: Vec::new(),
             history: Vec::new(),
             initial_response: false,
+            wake_word: None,
         }
     }
 

@@ -33,7 +33,16 @@ cargo run -- --model ollama:llava --single --image photo.jpg "Describe this imag
 `--image PATH` works in text, `--single`, and `--command` modes and may be repeated.
 For a voice conversation, start with `--talk --image photo.jpg "What should I notice?"`,
 then discuss the image naturally. To speak one prompt and exit after its response, use
-`--talk --single "What should I notice?"`. In an interactive text chat, drag an image from Finder into the
+`--talk --single "What should I notice?"`. To require a spoken wake word at the beginning of each new request, run
+`cargo run -- --talk --wake-word Computer` (or `-w Jarvis`). For example, “Computer, what time is it?”
+triggers a reply; “What time is it, Computer?” does not. Matching ignores case, and the wake word is
+removed from the request. Microphone audio still goes to OpenAI for transcription; non-matching turns
+are removed from the realtime conversation. Speaking a new wake-word request during a reply stops
+playback and replaces that reply once the new request has been transcribed; unlike ordinary talk
+mode, it cannot interrupt at the instant you start speaking. Microphone audio continues to be sent
+for transcription while the agent is speaking. An initial typed query still gets an
+immediate response.
+In an interactive text chat, drag an image from Finder into the
 prompt, optionally add a question, and press Enter. This works on any turn, including resumed
 chats. PNG, JPEG, GIF, and WebP files are supported. The selected model must support vision.
 
