@@ -2,6 +2,14 @@
 
 My personal agent harness - starts up instantly, has talk mode, the tools I need including signed in chrome browser.
 
+## Live tabs in your existing Chrome (unpacked extension)
+
+1. In your normal Chrome profile open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select this repo's `chrome-extension` directory. No second profile or Chrome restart is needed. Open its toolbar popup and switch **Allow Agent to control its tabs** on (off by default). The choice persists across Chrome restarts.
+2. Run `cargo run -- --model openai:gpt-6-sol` (or your usual tool-capable model). The enabled extension automatically connects once an agent calls `chrome_tab`; ask it to call `chrome_tab` with `action=status` if you want to check. Use `action=open` with a URL; new tabs join a green tab group labeled **Agent**. Use the returned `tab_id` for snapshot/click/type/scroll/navigate/close; snapshots include the tab's group title and color so grouping can be verified. Multiple harness processes can share the same bridge while its owning process stays open. If the extension shows *Waiting*, allow up to 30 seconds or reload it. Chrome may show a connection-refused warning if the agent bridge is not running; the extension retries only on its 30-second alarm.
+3. To stop access, switch **Allow Agent to control its tabs** off in the popup (or disable the extension in `chrome://extensions`). Switching off prevents tab actions but keeps a status-only bridge connection, so the harness can distinguish off from an unloaded extension; already opened tabs stay open. The extension can only act on tabs *it opened* since it was installed (ownership survives service-worker sleep); it cannot list or inspect pre-existing tabs. Reload the extension after changing its files.
+
+The local bridge listens on `127.0.0.1:17777` while at least one hosting agent runs. There is no pairing secret: **any process on your machine can call the bridge while the extension is enabled**. Tab IDs are selectors, not authorization; the extension enforces only the narrower boundary that it must have opened a tab before acting on it. The extension requests broad HTTP(S), tabs, tabGroups, scripting, storage and alarms permissions because Chrome does not enforce that boundary for us. Treat other locally running software as trusted. This is a minimal DOM-based browser tool (not Playwright): dynamic sites may require repeated snapshots after navigation, and browser UI/internal pages are inaccessible. The existing `browser_control` tool still uses a separate profile; use `chrome_tab` to avoid profile copying.
+
 ## Commands
 
 ```sh

@@ -38,6 +38,7 @@ async fn registry_exposes_and_executes_active_tool_surface() {
             "gen_image",
             "communicate",
             "browser_control",
+            "chrome_tab",
             "spawn",
         ]
     );
@@ -114,6 +115,21 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     assert_eq!(
         browser_definition.parameters["properties"]["signed_in"]["type"],
         "boolean"
+    );
+
+    let live_tab = registry
+        .definitions()
+        .iter()
+        .find(|d| d.name == "chrome_tab")
+        .unwrap();
+    assert!(
+        live_tab
+            .description
+            .contains("only tabs opened by this tool")
+    );
+    assert_eq!(
+        live_tab.parameters["properties"]["action"]["type"],
+        "string"
     );
 
     for definition in registry.definitions() {
@@ -623,6 +639,22 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
 
     assert!(output.contains("playwright is not installed or not found in PATH"));
     assert!(output.contains("browser_control cannot work"));
+}
+
+#[tokio::test]
+async fn chrome_tab_rejects_unowned_tab_requests_before_connecting() {
+    let registry = ToolRegistry::new();
+    let result = registry
+        .execute(
+            "id".into(),
+            "chrome_tab",
+            json!({
+                "intent": "test tab validation", "action": "snapshot"
+            }),
+        )
+        .await;
+    assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
+    assert!(result.content.contains("tab_id is required"));
 }
 
 #[cfg(unix)]

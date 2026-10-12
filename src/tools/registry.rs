@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::agent::{CancellationToken, ToolResult, ToolStatus};
 use crate::tools::browser::{BrowserControlArgs, browser_control};
+use crate::tools::chrome_tab::{ChromeTabArgs, chrome_tab};
 use crate::tools::communicate::{CommunicateArgs, communicate};
 use crate::tools::fetch::{FetchArgs, fetch};
 use crate::tools::files::{
@@ -74,6 +75,10 @@ impl ToolRegistry {
             definition::<BrowserControlArgs>(
                 "browser_control",
                 "Control Chrome with DevTools enabled and run Playwright JavaScript against it. By default, every new session is anonymous and uses an empty, isolated browser profile with no user cookies, accounts, extensions, or browsing data. Set signed_in=true only when the user explicitly requests access to their signed-in Chrome session; this copies the selected local Chrome profile into an isolated temporary directory. For complex SPAs, do not wait for full page load or networkidle; use waitUntil: 'domcontentloaded' (or 'commit' when only the navigation response is needed), then wait for specific locators or readiness signals. The browser session persists across calls by default; set close=true when done, or reset=true to start fresh. Visibility is only for showing a window to the human user: it does not improve model vision, image loading, or rendering, and screenshots work headlessly. Never set visible=true merely to inspect images or screenshots; set it only if the user directly asks to see the browser window. Requires global playwright in PATH.",
+            ),
+            definition::<ChromeTabArgs>(
+                "chrome_tab",
+                "Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url), navigate (tab_id,url), snapshot (tab_id), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). Never inspect pre-existing tabs. This is distinct from browser_control, which launches a separate browser.",
             ),
         ];
         if include_spawn {
@@ -170,6 +175,10 @@ impl ToolRegistry {
             },
             "browser_control" => match serde_json::from_value::<BrowserControlArgs>(arguments) {
                 Ok(args) => browser_control(args).await,
+                Err(err) => Err(format!("invalid tool arguments: {err}")),
+            },
+            "chrome_tab" => match serde_json::from_value::<ChromeTabArgs>(arguments) {
+                Ok(args) => chrome_tab(args).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {

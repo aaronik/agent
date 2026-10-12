@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Live Tabs</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="panel">
+    <header class="header">
+      <span class="brand-mark" aria-hidden="true">A</span>
+      <div>
+        <h1>Agent</h1>
+        <p class="subtitle">Live browser tabs</p>
+      </div>
+    </header>
+
+    <label class="control" for="enabled">
+      <span class="control-copy">
+        <span class="control-title">Browser access</span>
+        <span class="control-detail">Allow Agent to control its tabs</span>
+      </span>
+      <span class="switch">
+        <input type="checkbox" id="enabled">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+
+    <div class="connection" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="state">Checking connection…</span>
+    </div>
+    <p class="note">Only tabs opened by Agent are accessible. Turning access off leaves your tabs open.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
