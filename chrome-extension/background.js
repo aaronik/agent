@@ -101,7 +101,7 @@ async function handle(request) {
   const {action, tab_id: id} = request;
   if (action === 'open') {
     const url = safeUrl(request.url);
-    const tab = await chrome.tabs.create({url, active: true});
+    const tab = await chrome.tabs.create({url, active: false});
     owned.add(tab.id);
     await persistOwned();
     await groupAgentTab(tab);

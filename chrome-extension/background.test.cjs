@@ -9,6 +9,7 @@ function harness(savedEnabled = false) {
   const local = {enabled: savedEnabled};
   const session = {ownedTabs: []};
   const tabs = new Map([[3, {id: 3, url: 'https://private.example', windowId: 1, groupId: -1}]]);
+  const createCalls = [];
   const sockets = [];
   const timers = [];
   const groups = new Map();
@@ -31,7 +32,12 @@ function harness(savedEnabled = false) {
     tabs: {
       onRemoved: {addListener() {}},
       async get(id) { if (!tabs.has(id)) throw Error('missing tab'); return tabs.get(id); },
-      async create({url}) { const tab = {id: nextId++, url, windowId: 1, groupId: -1}; tabs.set(tab.id, tab); return tab; },
+      async create(options) {
+        createCalls.push(options);
+        const tab = {id: nextId++, url: options.url, windowId: 1, groupId: -1};
+        tabs.set(tab.id, tab);
+        return tab;
+      },
       async group({tabIds, groupId}) {
         const id = groupId ?? nextGroupId++;
         const group = groups.get(id) ?? {id, windowId: tabs.get(tabIds[0]).windowId, title: '', color: 'grey'};
@@ -54,7 +60,7 @@ function harness(savedEnabled = false) {
   const context = vm.createContext({chrome, WebSocket: Socket, URL, setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, console});
   vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8') + '\nthis.testHandle = handle; this.testReady = ready;', context);
   const send = message => new Promise(resolve => listener(message, {}, resolve));
-  return {context, send, sockets, local, tabs, groups, timers, alarm: () => alarmListener({name: 'bridge-check'})};
+  return {context, send, sockets, local, tabs, createCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'})};
 }
 
 test('disabled by default; enable connects, disable closes and blocks all commands', async () => {
@@ -75,6 +81,14 @@ test('disabled by default; enable connects, disable closes and blocks all comman
   await assert.rejects(h.context.testHandle({action: 'snapshot', tab_id: 4}), /disabled/i);
   await assert.rejects(h.context.testHandle({action: 'open', url: 'https://example.org'}), /disabled/i);
   assert.equal(h.sockets.length, 1);
+});
+
+test('open creates a background tab without selecting it', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  await h.context.testHandle({action: 'open', url: 'https://example.org'});
+  assert.equal(h.createCalls.length, 1);
+  assert.equal(h.createCalls[0].active, false);
 });
 
 test('new tabs join a green Agent group without grouping pre-existing tabs', async () => {

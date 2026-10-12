@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -16,6 +15,7 @@ use uuid::Uuid;
 static BROWSER_SESSION: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserControlArgs {
     /// JavaScript to run inside an async function with `browser`, `context`, and `page` available.
     /// Use normal Playwright APIs, e.g. `await page.goto("https://example.com"); return await page.title();`.
@@ -26,9 +26,6 @@ pub struct BrowserControlArgs {
     /// on follow-up calls to keep the browser exactly where the previous call left it.
     #[serde(default)]
     pub url: Option<String>,
-    /// Use the user’s signed-in Chrome profile. Set this only when the user explicitly requests it.
-    #[serde(default)]
-    pub signed_in: bool,
     /// Maximum time in seconds for the Playwright script.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
@@ -65,7 +62,6 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
     let needs_start = match session_guard.as_mut() {
         Some(session) => {
             session.visible != args.visible
-                || session.signed_in != args.signed_in
                 || session
                     .child
                     .try_wait()
@@ -79,8 +75,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
         if let Some(session) = session_guard.take() {
             close_session(session).await;
         }
-        *session_guard =
-            Some(start_session(args.url.as_deref(), args.visible, args.signed_in).await?);
+        *session_guard = Some(start_session(args.url.as_deref(), args.visible).await?);
     }
 
     let Some(session) = session_guard.as_ref() else {
@@ -180,46 +175,15 @@ pub async fn shutdown_browser_session() {
     }
 }
 
-async fn start_session(
-    url: Option<&str>,
-    visible: bool,
-    signed_in: bool,
-) -> Result<BrowserSession, String> {
+async fn start_session(url: Option<&str>, visible: bool) -> Result<BrowserSession, String> {
     let chrome = chrome_path()?;
     let temp = TempDirGuard::new()?;
     let user_data_dir = temp.path.join("chrome-user-data");
     fs::create_dir_all(&user_data_dir)
         .map_err(|err| format!("failed to create temporary Chrome profile: {err}"))?;
 
-    let profile_directory = if signed_in {
-        let profile = chrome_profile_dir(None)?;
-        let profile_directory = profile
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                format!(
-                    "Chrome profile path has no directory name: {}",
-                    profile.display()
-                )
-            })?
-            .to_string();
-        copy_dir_recursive(&profile, &user_data_dir.join(&profile_directory))
-            .map_err(|err| format!("failed to copy Chrome profile {}: {err}", profile.display()))?;
-        copy_local_state(&profile, &user_data_dir)?;
-        profile_directory
-    } else {
-        "Default".to_string()
-    };
-
     let port = available_port()?;
-    let mut child = launch_chrome(
-        &chrome,
-        &user_data_dir,
-        &profile_directory,
-        port,
-        url,
-        visible,
-    )?;
+    let mut child = launch_chrome(&chrome, &user_data_dir, port, url, visible)?;
 
     if let Err(err) = wait_for_cdp(port, &mut child).await {
         let _ = child.kill().await;
@@ -231,7 +195,6 @@ async fn start_session(
         child,
         temp,
         visible,
-        signed_in,
     })
 }
 
@@ -309,20 +272,13 @@ fn append_session_status(mut output: String, closed: bool) -> String {
 fn launch_chrome(
     chrome: &Path,
     user_data_dir: &Path,
-    profile_directory: &str,
     port: u16,
     url: Option<&str>,
     visible: bool,
 ) -> Result<Child, String> {
     let mut command = Command::new(chrome);
     command
-        .args(chrome_launch_args(
-            user_data_dir,
-            profile_directory,
-            port,
-            url,
-            visible,
-        ))
+        .args(chrome_launch_args(user_data_dir, port, url, visible))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         // Put Chrome and its helpers in their own process group so shutdown cannot
@@ -336,14 +292,13 @@ fn launch_chrome(
 
 fn chrome_launch_args(
     user_data_dir: &Path,
-    profile_directory: &str,
     port: u16,
     url: Option<&str>,
     visible: bool,
 ) -> Vec<String> {
     let mut args = vec![
         format!("--user-data-dir={}", user_data_dir.display()),
-        format!("--profile-directory={profile_directory}"),
+        "--profile-directory=Default".to_string(),
         format!("--remote-debugging-port={port}"),
         "--remote-debugging-address=127.0.0.1".to_string(),
         "--no-first-run".to_string(),
@@ -501,146 +456,6 @@ fn chrome_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn chrome_profile_dir(selector: Option<&str>) -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("AGENT_BROWSER_CHROME_PROFILE_DIR") {
-        let path = PathBuf::from(path);
-        if path.is_dir() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "AGENT_BROWSER_CHROME_PROFILE_DIR does not point to a directory: {}",
-            path.display()
-        ));
-    }
-
-    let user_data_dir = chrome_user_data_dir()?;
-    let env_selector = std::env::var("AGENT_BROWSER_CHROME_PROFILE").ok();
-    let selector = selector
-        .or(env_selector.as_deref())
-        .filter(|value| !value.trim().is_empty());
-    resolve_profile_in_user_data_dir(&user_data_dir, selector)
-}
-
-fn chrome_user_data_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
-    if cfg!(target_os = "macos") {
-        Ok(home.join("Library/Application Support/Google/Chrome"))
-    } else if cfg!(target_os = "windows") {
-        let local_app_data = std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map_err(|_| {
-                "LOCALAPPDATA is not set; set AGENT_BROWSER_CHROME_PROFILE_DIR".to_string()
-            })?;
-        Ok(local_app_data.join("Google/Chrome/User Data"))
-    } else {
-        Ok(home.join(".config/google-chrome"))
-    }
-}
-
-fn resolve_profile_in_user_data_dir(
-    user_data_dir: &Path,
-    selector: Option<&str>,
-) -> Result<PathBuf, String> {
-    if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
-        let explicit_path = PathBuf::from(selector);
-        if explicit_path.is_dir() {
-            return Ok(explicit_path);
-        }
-
-        let by_directory = user_data_dir.join(selector);
-        if by_directory.is_dir() {
-            return Ok(by_directory);
-        }
-
-        let matches = matching_profiles_from_local_state(user_data_dir, selector);
-        match matches.as_slice() {
-            [profile] => return Ok(user_data_dir.join(profile)),
-            [] => {}
-            _ => {
-                return Err(format!(
-                    "Chrome profile selector {selector:?} matched multiple profiles: {}",
-                    matches.join(", ")
-                ));
-            }
-        }
-
-        return Err(format!(
-            "could not find Chrome profile matching {selector:?} under {}; use a profile directory name like 'Profile 8', a signed-in email from Chrome Local State, or set AGENT_BROWSER_CHROME_PROFILE_DIR",
-            user_data_dir.display()
-        ));
-    }
-
-    let default = user_data_dir.join("Default");
-    if default.is_dir() {
-        Ok(default)
-    } else {
-        Err(format!(
-            "could not find Chrome Default profile at {}; set AGENT_BROWSER_CHROME_PROFILE_DIR",
-            default.display()
-        ))
-    }
-}
-
-fn matching_profiles_from_local_state(user_data_dir: &Path, selector: &str) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(user_data_dir.join("Local State")) else {
-        return Vec::new();
-    };
-    let Ok(local_state) = serde_json::from_str::<Value>(&contents) else {
-        return Vec::new();
-    };
-    let Some(info_cache) = local_state
-        .pointer("/profile/info_cache")
-        .and_then(Value::as_object)
-    else {
-        return Vec::new();
-    };
-
-    let selector = selector.to_lowercase();
-    info_cache
-        .iter()
-        .filter_map(|(profile_dir, info)| {
-            let matched = ["user_name", "email", "name", "gaia_name"]
-                .into_iter()
-                .filter_map(|field| info.get(field).and_then(Value::as_str))
-                .any(|value| value.eq_ignore_ascii_case(&selector))
-                || profile_dir.eq_ignore_ascii_case(&selector);
-            if matched && user_data_dir.join(profile_dir).is_dir() {
-                Some(profile_dir.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn copy_local_state(profile: &Path, user_data_dir: &Path) -> Result<(), String> {
-    let Some(parent) = profile.parent() else {
-        return Ok(());
-    };
-    let source = parent.join("Local State");
-    if source.is_file() {
-        fs::copy(&source, user_data_dir.join("Local State"))
-            .map_err(|err| format!("failed to copy Chrome Local State: {err}"))?;
-    }
-    Ok(())
-}
-
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let metadata = entry.file_type()?;
-        if metadata.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else {
-            fs::copy(&source_path, &destination_path)?;
-        }
-    }
-    Ok(())
-}
-
 fn available_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|err| format!("failed to allocate local debugging port: {err}"))?;
@@ -678,7 +493,6 @@ struct BrowserSession {
     child: Child,
     temp: TempDirGuard,
     visible: bool,
-    signed_in: bool,
 }
 
 struct TempDirGuard {
@@ -726,7 +540,6 @@ mod tests {
             child,
             temp,
             visible: false,
-            signed_in: false,
         });
         drop(session_guard);
 
@@ -737,7 +550,7 @@ mod tests {
 
     #[test]
     fn chrome_launch_args_default_to_headless() {
-        let args = chrome_launch_args(Path::new("/tmp/profile"), "Default", 9222, None, false);
+        let args = chrome_launch_args(Path::new("/tmp/profile"), 9222, None, false);
 
         assert!(args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--disable-gpu".to_string()));
@@ -747,7 +560,6 @@ mod tests {
     fn chrome_launch_args_can_show_browser_explicitly() {
         let args = chrome_launch_args(
             Path::new("/tmp/profile"),
-            "Default",
             9222,
             Some("https://example.com"),
             true,

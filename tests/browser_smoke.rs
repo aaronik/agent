@@ -6,7 +6,6 @@ async fn browser_control_live_headless_manual() {
     let output = browser_control(BrowserControlArgs {
         javascript: "return await page.title();".to_string(),
         url: Some("data:text/html,<title>manual-headless-smoke</title>".to_string()),
-        signed_in: false,
         timeout: 15,
         close: true,
         reset: true,

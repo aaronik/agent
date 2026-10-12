@@ -74,11 +74,11 @@ impl ToolRegistry {
             ),
             definition::<BrowserControlArgs>(
                 "browser_control",
-                "Control Chrome with DevTools enabled and run Playwright JavaScript against it. By default, every new session is anonymous and uses an empty, isolated browser profile with no user cookies, accounts, extensions, or browsing data. Set signed_in=true only when the user explicitly requests access to their signed-in Chrome session; this copies the selected local Chrome profile into an isolated temporary directory. For complex SPAs, do not wait for full page load or networkidle; use waitUntil: 'domcontentloaded' (or 'commit' when only the navigation response is needed), then wait for specific locators or readiness signals. The browser session persists across calls by default; set close=true when done, or reset=true to start fresh. Visibility is only for showing a window to the human user: it does not improve model vision, image loading, or rendering, and screenshots work headlessly. Never set visible=true merely to inspect images or screenshots; set it only if the user directly asks to see the browser window. Requires global playwright in PATH.",
+                "Fallback for anonymous, isolated Playwright browsing when live Chrome is unavailable or the task requires Playwright JavaScript. Prefer chrome_tab for normal browsing, especially signed-in sites, because it uses the user's existing Chrome profile without copying it. This tool always launches a fresh empty profile with no user cookies, accounts, extensions, or browsing data. Never use it for signed-in browsing. For complex SPAs, do not wait for full page load or networkidle; use waitUntil: 'domcontentloaded' (or 'commit' when only the navigation response is needed), then wait for specific locators or readiness signals. The browser session persists across calls by default; set close=true when done, or reset=true to start fresh. Visibility is only for showing a window to the human user: it does not improve model vision, image loading, or rendering, and screenshots work headlessly. Never set visible=true merely to inspect images or screenshots; set it only if the user directly asks to see the browser window. Requires global playwright in PATH.",
             ),
             definition::<ChromeTabArgs>(
                 "chrome_tab",
-                "Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url), navigate (tab_id,url), snapshot (tab_id), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). Never inspect pre-existing tabs. This is distinct from browser_control, which launches a separate browser.",
+                "Preferred tool for normal browser tasks and signed-in sites. Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url), navigate (tab_id,url), snapshot (tab_id), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). Never inspect pre-existing tabs. This is distinct from browser_control, which launches a separate browser.",
             ),
         ];
         if include_spawn {
@@ -173,10 +173,16 @@ impl ToolRegistry {
                 Ok(args) => communicate(args).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
-            "browser_control" => match serde_json::from_value::<BrowserControlArgs>(arguments) {
-                Ok(args) => browser_control(args).await,
-                Err(err) => Err(format!("invalid tool arguments: {err}")),
-            },
+            "browser_control" => {
+                if arguments.get("signed_in").is_some() {
+                    Err("browser_control no longer accepts signed_in; use chrome_tab for signed-in browsing in the user's existing Chrome.".to_string())
+                } else {
+                    match serde_json::from_value::<BrowserControlArgs>(arguments) {
+                        Ok(args) => browser_control(args).await,
+                        Err(err) => Err(format!("invalid tool arguments: {err}")),
+                    }
+                }
+            }
             "chrome_tab" => match serde_json::from_value::<ChromeTabArgs>(arguments) {
                 Ok(args) => chrome_tab(args).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),

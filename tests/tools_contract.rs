@@ -81,10 +81,11 @@ async fn registry_exposes_and_executes_active_tool_surface() {
         .find(|definition| definition.name == "browser_control")
         .expect("browser_control definition");
     assert!(browser_definition.description.contains("anonymous"));
+    assert!(browser_definition.description.contains("chrome_tab"));
     assert!(
         browser_definition
             .description
-            .contains("only when the user explicitly requests")
+            .contains("Never use it for signed-in browsing")
     );
     assert!(
         browser_definition
@@ -112,9 +113,11 @@ async fn registry_exposes_and_executes_active_tool_surface() {
             .pointer("/properties/profile")
             .is_none()
     );
-    assert_eq!(
-        browser_definition.parameters["properties"]["signed_in"]["type"],
-        "boolean"
+    assert!(
+        browser_definition
+            .parameters
+            .pointer("/properties/signed_in")
+            .is_none()
     );
 
     let live_tab = registry
@@ -628,7 +631,6 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     let output = browser_control(BrowserControlArgs {
         javascript: "return await page.title();".to_string(),
         url: Some("https://example.com".to_string()),
-        signed_in: false,
         timeout: 1,
         close: false,
         reset: false,
@@ -639,6 +641,23 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
 
     assert!(output.contains("playwright is not installed or not found in PATH"));
     assert!(output.contains("browser_control cannot work"));
+}
+
+#[tokio::test]
+async fn browser_control_rejects_retired_signed_in_argument_before_launching_chrome() {
+    let registry = ToolRegistry::new();
+    let result = registry
+        .execute(
+            "browser".into(),
+            "browser_control",
+            json!({
+                "intent": "reject profile copy", "javascript": "return 'test';", "signed_in": true
+            }),
+        )
+        .await;
+    assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
+    assert!(result.content.contains("signed_in"));
+    assert!(result.content.contains("chrome_tab"));
 }
 
 #[tokio::test]
