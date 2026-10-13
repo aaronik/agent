@@ -84,7 +84,7 @@ impl ToolRegistry {
         if include_spawn {
             definitions.push(definition::<SpawnArgs>(
                 "spawn",
-                "Spawn a focused single-invocation agent. Optionally pass model as an exact model ID from /models (e.g. openai:gpt-4o or ollama:llama3:latest); invalid or unavailable models return an error before any subagents launch. When omitted, use the configured spawn model.",
+                "Spawn focused single-invocation agents. Pass agents: [{task, model?, conversation_id?}, ...] for one or more tasks in parallel (results follow input order). Model must be an exact ID from /models (e.g. openai:gpt-4o); invalid models fail before any agent launches. Omitted models use the configured spawn model.",
             ));
         }
 

@@ -11,7 +11,7 @@ use agent_rs::tools::files::{
 use agent_rs::tools::image::{GenImageArgs, gen_image};
 use agent_rs::tools::registry::ToolRegistry;
 use agent_rs::tools::shell::{RunShellCommandArgs, run_shell_command};
-use agent_rs::tools::spawn::{SpawnArgs, spawn};
+use agent_rs::tools::spawn::{SpawnAgent, SpawnArgs, spawn};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -706,15 +706,24 @@ async fn spawn_model_override_must_be_in_models_list() {
         .iter()
         .find(|tool| tool.name == "spawn")
         .unwrap();
-    assert!(definition.parameters["properties"].get("model").is_some());
+    let properties = definition.parameters["properties"].as_object().unwrap();
+    assert_eq!(properties.len(), 2);
+    assert!(properties.contains_key("agents"));
+    assert!(properties.contains_key("intent"));
+    assert!(
+        definition.parameters["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("agents"))
+    );
 
     let result = registry
         .execute(
             "selected".into(),
             "spawn",
             json!({
-                "intent": "test selected model", "task": "assigned task", "model": "ollama:test:latest",
-                "conversation_id": "existing-session", "num_subagents": 2
+                "intent": "test selected model", "agents": [{"task": "assigned task", "model": "ollama:test:latest",
+                "conversation_id": "existing-session"}]
             }),
         )
         .await;
@@ -724,11 +733,11 @@ async fn spawn_model_override_must_be_in_models_list() {
             .content
             .matches("--model\nollama:test:latest")
             .count(),
-        2
+        1
     );
     assert_eq!(
         result.content.matches("--resume\nexisting-session").count(),
-        2
+        1
     );
     assert!(!result.content.contains("mock"));
 
@@ -746,7 +755,7 @@ async fn spawn_model_override_must_be_in_models_list() {
                 "invalid".into(),
                 "spawn",
                 json!({
-                    "intent": "test unavailable model", "task": "must not launch", "model": model
+                    "intent": "test unavailable model", "agents": [{"task": "must not launch", "model": model}]
                 }),
             )
             .await;
@@ -769,12 +778,88 @@ async fn spawn_model_override_must_be_in_models_list() {
             "unavailable".into(),
             "spawn",
             json!({
-                "intent": "test unavailable model", "task": "must not launch", "model": "ollama:test:latest"
+                "intent": "test unavailable model", "agents": [{"task": "must not launch", "model": "ollama:test:latest"}]
             }),
         )
         .await;
     assert_eq!(result.status, ToolStatus::Error);
     assert!(result.content.contains("/models"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_agents_run_distinct_tasks_with_individual_options_in_order() {
+    use agent_rs::agent::ToolStatus;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "test:latest"}]
+        })))
+        .mount(&server)
+        .await;
+    let _url = EnvGuard::set("OLLAMA_URL", &server.uri());
+    let _key = EnvGuard::remove("OPENAI_API_KEY");
+    let _default = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let script = directory.path().join("spawn-arguments.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("write stand-in");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make stand-in executable");
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().unwrap());
+    let registry = ToolRegistry::new();
+    let schema = &registry
+        .definitions()
+        .iter()
+        .find(|tool| tool.name == "spawn")
+        .unwrap()
+        .parameters;
+    assert!(schema["properties"].get("agents").is_some());
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+
+    let result = registry.execute("batch".into(), "spawn", json!({
+        "intent": "test distinct tasks",
+        "agents": [
+            {"task": "first instruction", "model": "ollama:test:latest", "conversation_id": "existing-session"},
+            {"task": "second instruction"}
+        ]
+    })).await;
+    assert_eq!(result.status, ToolStatus::Success, "{}", result.content);
+    let (first, second) = result
+        .content
+        .split_once("\n\n[SPAWNED AGENT OUTPUT]")
+        .expect("two outputs");
+    assert!(first.contains("--model\nollama:test:latest"), "{first}");
+    assert!(first.contains("--resume\nexisting-session"), "{first}");
+    assert!(first.contains("first instruction"), "{first}");
+    assert!(!first.contains("second instruction"));
+    assert!(second.contains("--model\nmock"), "{second}");
+    assert!(second.contains("second instruction"), "{second}");
+    assert!(!second.contains("--resume"));
+}
+
+#[tokio::test]
+async fn spawn_agents_reject_invalid_batches_before_launch() {
+    use agent_rs::agent::ToolStatus;
+    let registry = ToolRegistry::new();
+    for args in [
+        json!({"intent": "validate batch", "agents": []}),
+        json!({"intent": "validate batch", "agents": [{"task": "one"}], "task": "two"}),
+        json!({"intent": "validate batch", "agents": [{"task": "one"}], "num_subagents": 2}),
+        json!({"intent": "validate batch", "agents": [{"task": "one"}], "model": "bad"}),
+        json!({"intent": "validate batch", "agents": [{"task": "one"}], "conversation_id": "old"}),
+        json!({"intent": "validate batch"}),
+        json!({"intent": "validate batch", "agents": [{"task": "  "}]}),
+        json!({"intent": "validate batch", "agents": [{"task": "one"}, {"task": ""}]}),
+        json!({"intent": "validate batch", "agents": [{"task": "one", "unexpected": true}]}),
+    ] {
+        let result = registry.execute("invalid".into(), "spawn", args).await;
+        assert_eq!(result.status, ToolStatus::Error, "{}", result.content);
+        assert!(!result.content.contains("[SPAWNED AGENT OUTPUT]"));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -809,10 +894,11 @@ async fn spawn_does_not_play_completion_sound() {
     let _model = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
 
     spawn(SpawnArgs {
-        model: None,
-        task: "run echo hi".to_string(),
-        conversation_id: None,
-        num_subagents: 1,
+        agents: vec![SpawnAgent {
+            task: "run echo hi".to_string(),
+            model: None,
+            conversation_id: None,
+        }],
     })
     .await
     .expect("spawn");
@@ -830,10 +916,11 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     let _guard = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
 
     let output = spawn(SpawnArgs {
-        model: None,
-        task: "run echo hi".to_string(),
-        conversation_id: None,
-        num_subagents: 1,
+        agents: vec![SpawnAgent {
+            task: "run echo hi".to_string(),
+            model: None,
+            conversation_id: None,
+        }],
     })
     .await
     .expect("spawn");
@@ -844,9 +931,38 @@ async fn spawn_uses_shared_agent_loop_with_mock_provider() {
     assert!(output.contains("[CONVERSATION ID]"));
 }
 
+#[tokio::test]
+async fn spawn_agents_execute_distinct_commands_with_mock_provider() {
+    use agent_rs::agent::ToolStatus;
+
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let _model = EnvGuard::set("AGENT_SPAWN_MODEL", "mock");
+    let home = tempfile::tempdir().expect("temporary home");
+    let _home = EnvGuard::set("HOME", home.path().to_str().expect("home path"));
+    let result = ToolRegistry::new()
+        .execute(
+            "distinct".into(),
+            "spawn",
+            json!({
+                "intent": "verify distinct mock agent commands",
+                "agents": [
+                    {"task": "run echo first-batch-result"},
+                    {"task": "run echo second-batch-result"}
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(result.status, ToolStatus::Success, "{}", result.content);
+    assert_eq!(result.content.matches("[SPAWNED AGENT OUTPUT]").count(), 2);
+    assert_eq!(result.content.matches("Tool completed: hi").count(), 2);
+    assert!(result.content.contains("run echo first-batch-result"));
+    assert!(result.content.contains("run echo second-batch-result"));
+    assert!(result.content.find("first-batch-result") < result.content.find("second-batch-result"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
+async fn spawn_runs_requested_agents_in_parallel_with_distinct_tasks() {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
@@ -861,16 +977,25 @@ async fn spawn_runs_requested_subagents_in_parallel_with_the_same_task() {
 
     let started = std::time::Instant::now();
     let output = spawn(SpawnArgs {
-        model: None,
-        task: "same assigned task".to_string(),
-        conversation_id: None,
-        num_subagents: 5,
+        agents: (0..5)
+            .map(|index| SpawnAgent {
+                task: format!("assigned task {index}"),
+                model: None,
+                conversation_id: None,
+            })
+            .collect(),
     })
     .await
     .expect("spawn");
 
     assert!(started.elapsed() < Duration::from_millis(600));
-    assert_eq!(output.matches("same assigned task").count(), 5, "{output}");
+    for index in 0..5 {
+        assert_eq!(
+            output.matches(&format!("assigned task {index}")).count(),
+            1,
+            "{output}"
+        );
+    }
     assert_eq!(output.matches("--no-subagent").count(), 5);
 }
 
@@ -896,10 +1021,11 @@ async fn spawn_does_not_hang_when_a_descendant_keeps_output_pipes_open() {
     let output = timeout(
         Duration::from_secs(1),
         spawn(SpawnArgs {
-            model: None,
-            task: "ignored".to_string(),
-            conversation_id: None,
-            num_subagents: 1,
+            agents: vec![SpawnAgent {
+                task: "ignored".to_string(),
+                model: None,
+                conversation_id: None,
+            }],
         }),
     )
     .await
@@ -910,15 +1036,31 @@ async fn spawn_does_not_hang_when_a_descendant_keeps_output_pipes_open() {
 }
 
 #[tokio::test]
-async fn spawn_rejects_zero_subagents() {
-    let result = spawn(SpawnArgs {
-        model: None,
-        task: "ignored".to_string(),
-        conversation_id: None,
-        num_subagents: 0,
-    })
-    .await;
-    assert_eq!(result, Err("num_subagents must be at least 1".to_string()));
+async fn spawn_rejects_removed_num_subagents_argument() {
+    use agent_rs::agent::ToolStatus;
+    let registry = ToolRegistry::new();
+    let schema = &registry
+        .definitions()
+        .iter()
+        .find(|tool| tool.name == "spawn")
+        .unwrap()
+        .parameters;
+    assert!(schema["properties"].get("num_subagents").is_none());
+    let result = registry
+        .execute(
+            "old".into(),
+            "spawn",
+            json!({
+                "intent": "reject removed argument", "agents": [{"task": "must not run"}], "num_subagents": 2
+            }),
+        )
+        .await;
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(
+        result.content.contains("num_subagents"),
+        "{}",
+        result.content
+    );
 }
 
 #[cfg(unix)]
@@ -936,10 +1078,11 @@ async fn spawn_marks_its_child_as_disallowing_subagents() {
     let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().expect("script path"));
 
     let output = spawn(SpawnArgs {
-        model: None,
-        task: "assigned task".to_string(),
-        conversation_id: None,
-        num_subagents: 1,
+        agents: vec![SpawnAgent {
+            task: "assigned task".to_string(),
+            model: None,
+            conversation_id: None,
+        }],
     })
     .await
     .expect("spawn");
@@ -980,7 +1123,7 @@ async fn cancelling_spawn_terminates_its_process_group() {
                 .execute_cancellable(
                     "spawn-cancel".to_string(),
                     "spawn",
-                    json!({ "task": "ignored", "intent": "exercise cancellation" }),
+                    json!({ "agents": [{"task": "ignored"}], "intent": "exercise cancellation" }),
                     &cancellation,
                 )
                 .await

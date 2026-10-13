@@ -15,19 +15,21 @@ use crate::providers::{effective_model_name, list_models};
 use crate::session::SessionStore;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnArgs {
+    /// One or more subagents, each with its own task and optional model/session.
+    pub agents: Vec<SpawnAgent>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnAgent {
     pub task: String,
     /// Exact model ID from /models; omitted to use the configured spawn model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
-    #[serde(default = "default_num_subagents")]
-    pub num_subagents: usize,
-}
-
-fn default_num_subagents() -> usize {
-    1
 }
 
 pub async fn spawn(args: SpawnArgs) -> Result<String, String> {
@@ -47,25 +49,33 @@ pub async fn spawn_cancellable_with_usage(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
-    if args.num_subagents == 0 {
-        return Err("num_subagents must be at least 1".to_string());
+    let agents = args.agents;
+    if agents.is_empty() {
+        return Err("agents must contain at least one agent".to_string());
     }
-
-    if let Some(model) = &args.model {
+    if agents.iter().any(|agent| agent.task.trim().is_empty()) {
+        return Err("each agent must have a non-empty task".to_string());
+    }
+    if agents.iter().any(|agent| agent.model.is_some()) {
         let available = tokio::select! {
             _ = cancellation_token.cancelled() => return Err("tool call cancelled".to_string()),
             models = list_models() => models,
         };
-        if !available.contains(model) {
-            return Err(format!(
-                "Invalid or unavailable model {model:?}: not present in /models. Use an exact model ID from /models."
-            ));
+        for model in agents.iter().filter_map(|agent| agent.model.as_ref()) {
+            if !available.contains(model) {
+                return Err(format!(
+                    "Invalid or unavailable model {model:?}: not present in /models. Use an exact model ID from /models."
+                ));
+            }
         }
     }
 
-    let results =
-        join_all((0..args.num_subagents).map(|_| spawn_one(args.clone(), cancellation_token)))
-            .await;
+    let results = join_all(
+        agents
+            .into_iter()
+            .map(|agent| spawn_one(agent, cancellation_token)),
+    )
+    .await;
     let mut outputs = Vec::with_capacity(results.len());
     let mut usages = Vec::new();
     for result in results {
@@ -77,7 +87,7 @@ pub async fn spawn_cancellable_with_usage(
 }
 
 async fn spawn_one(
-    args: SpawnArgs,
+    args: SpawnAgent,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
     let raw_model = args.model.clone().unwrap_or_else(|| {
