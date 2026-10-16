@@ -17,6 +17,11 @@ test('popup has a dark green theme and a keyboard-accessible slider', () => {
   assert.doesNotMatch(css, /display:\s*none/);
 });
 
+test('popup periodically refreshes its connection status', () => {
+  const script = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  assert.match(script, /setInterval\(refresh,\s*\d+\)/);
+});
+
 test('slider preserves enabled and connection statuses', async () => {
   let enabled = false;
   let change;
@@ -29,7 +34,7 @@ test('slider preserves enabled and connection statuses', async () => {
     return {enabled, connected: enabled};
   }}};
   vm.runInNewContext(fs.readFileSync(__dirname + '/popup.js', 'utf8'), {
-    chrome, document: {body: {dataset: {}}, getElementById: id => elements[id]},
+    chrome, setInterval() {}, document: {body: {dataset: {}}, getElementById: id => elements[id]},
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(elements.state.textContent, 'Off');

@@ -12,10 +12,14 @@ use tokio_tungstenite::tungstenite::{
     Message,
     handshake::server::{Request, Response},
 };
+use uuid::Uuid;
 
 const PORT: u16 = 17777;
 const ADDRESS: &str = "ws://127.0.0.1:17777/agent";
-static BRIDGE: OnceLock<Result<Bridge, String>> = OnceLock::new();
+// Chrome retries on a 30s alarm after its initial bounded reconnect burst.
+const FIRST_CONNECTION_WAIT: Duration = Duration::from_secs(35);
+static BRIDGE: OnceLock<Result<(), String>> = OnceLock::new();
+static LEASE: OnceLock<Arc<Mutex<Option<Lease>>>> = OnceLock::new();
 type PendingRequest = (Value, oneshot::Sender<Value>);
 type Connection = Arc<Mutex<ConnectionState>>;
 
@@ -25,9 +29,8 @@ struct ConnectionState {
     enabled: bool,
 }
 
-struct Bridge {
-    // Only the process that owns the listener receives connections from Chrome.
-    connection: Option<Connection>,
+struct Lease {
+    socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -53,19 +56,10 @@ pub struct ChromeTabArgs {
 
 pub async fn chrome_tab(args: ChromeTabArgs) -> Result<String, String> {
     validate(&args)?;
-    let bridge = match BRIDGE.get_or_init(|| start_bridge().map_err(|e| e.to_string())) {
-        Ok(bridge) => bridge,
-        Err(err) => return Err(err.clone()),
-    };
-    let reply = if let Some(connection) = &bridge.connection {
-        dispatch(
-            connection,
-            serde_json::to_value(args).map_err(|e| e.to_string())?,
-        )
-        .await?
-    } else {
-        request_host(serde_json::to_value(args).map_err(|e| e.to_string())?).await?
-    };
+    if let Err(err) = BRIDGE.get_or_init(|| start_bridge().map_err(|e| e.to_string())) {
+        return Err(err.clone());
+    }
+    let reply = request_host(serde_json::to_value(args).map_err(|e| e.to_string())?).await?;
     if let Some(error) = reply.get("error").and_then(Value::as_str) {
         Err(error.to_string())
     } else {
@@ -78,7 +72,7 @@ pub async fn chrome_tab(args: ChromeTabArgs) -> Result<String, String> {
 fn validate(args: &ChromeTabArgs) -> Result<(), String> {
     match args.action.as_str() {
         "status" | "open" | "navigate" | "snapshot" | "click" | "type" | "scroll" | "close" => {}
-        _ => return Err("unknown chrome_tab action".into()),
+        _ => return Err("unknown browser action".into()),
     }
     if !matches!(args.action.as_str(), "status" | "open") && args.tab_id.is_none() {
         return Err("tab_id is required for this action".into());
@@ -99,7 +93,7 @@ fn validate(args: &ChromeTabArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn start_bridge() -> std::io::Result<Bridge> {
+fn start_bridge() -> std::io::Result<()> {
     match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, PORT)) {
         Ok(listener) => {
             listener.set_nonblocking(true)?;
@@ -112,13 +106,9 @@ fn start_bridge() -> std::io::Result<Bridge> {
                     tokio::spawn(async move { serve_peer(stream, connection).await });
                 }
             });
-            Ok(Bridge {
-                connection: Some(connection),
-            })
+            Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            Ok(Bridge { connection: None })
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -134,15 +124,36 @@ fn status(connected: bool, enabled: bool) -> Value {
 }
 
 async fn dispatch(connection: &Connection, request: Value) -> Result<Value, String> {
-    let state = connection.lock().await;
-    if request["action"] == "status" {
-        return Ok(status(state.sender.is_some(), state.enabled));
-    }
-    let sender = state.sender.clone().ok_or("Chrome extension not connected. Reload the extension in chrome://extensions and try again.")?;
-    if !state.enabled {
-        return Err("Chrome extension access switch is switched off. Turn it on in the popup to allow browser actions.".into());
-    }
-    drop(state);
+    // The first call may start the bridge before the extension reconnects.
+    // Wait through the extension's 30-second alarm retry on first use.
+    let is_status = request["action"] == "status";
+    let is_cleanup = request["action"] == "close_owner";
+    let deadline = time::Instant::now()
+        + if is_cleanup {
+            Duration::from_secs(2)
+        } else {
+            FIRST_CONNECTION_WAIT
+        };
+    let sender = loop {
+        let state = connection.lock().await;
+        if is_status && state.sender.is_some() {
+            return Ok(status(true, state.enabled));
+        }
+        if let Some(sender) = state.sender.clone() {
+            if !state.enabled && !is_cleanup {
+                return Err("Chrome extension access switch is switched off. Turn it on in the popup to allow browser actions.".into());
+            }
+            break sender;
+        }
+        drop(state);
+        if time::Instant::now() >= deadline {
+            if is_status {
+                return Ok(status(false, false));
+            }
+            return Err("Chrome extension not connected. Check the extension popup and retry; the bridge may have just started.".into());
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    };
     let (tx, rx) = oneshot::channel();
     sender
         .send((request, tx))
@@ -154,22 +165,70 @@ async fn dispatch(connection: &Connection, request: Value) -> Result<Value, Stri
         .map_err(|_| "Chrome extension disconnected".to_string())
 }
 
-async fn request_host(request: Value) -> Result<Value, String> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(ADDRESS)
+async fn connect_lease(address: &str) -> Result<Lease, String> {
+    let (mut socket, _) = tokio_tungstenite::connect_async(address)
         .await
         .map_err(|_| {
             "Cannot reach Chrome bridge on 127.0.0.1:17777; retry after the other agent exits."
                 .to_string()
         })?;
-    ws.send(Message::Text(request.to_string().into()))
+    let owner = Uuid::new_v4().to_string();
+    socket
+        .send(Message::Text(
+            json!({"owner":owner,"protocol":2}).to_string().into(),
+        ))
         .await
         .map_err(|e| e.to_string())?;
-    let reply = time::timeout(Duration::from_secs(26), ws.next())
-        .await
-        .map_err(|_| "Chrome bridge did not respond".to_string())?
-        .ok_or("Chrome bridge disconnected")?
-        .map_err(|e| e.to_string())?;
-    serde_json::from_str(reply.to_text().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    let reply = time::timeout(Duration::from_secs(2), socket.next()).await;
+    if !matches!(reply, Ok(Some(Ok(Message::Text(ref text)))) if serde_json::from_str::<Value>(text).ok().is_some_and(|value| value["protocol"] == 2))
+    {
+        return Err("incompatible Chrome bridge on 127.0.0.1:17777. Exit the older agent process holding port 17777, then restart the agent; reloading the extension alone does not update the bridge.".into());
+    }
+    Ok(Lease { socket })
+}
+
+async fn request_host(request: Value) -> Result<Value, String> {
+    let lease = LEASE.get_or_init(|| Arc::new(Mutex::new(None)));
+    let mut lease = lease.lock().await;
+    if lease.is_none() {
+        *lease = Some(connect_lease(ADDRESS).await?);
+    }
+    let current = lease.as_mut().expect("lease initialized");
+    let result = async {
+        current
+            .socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let reply = time::timeout(Duration::from_secs(26), current.socket.next())
+            .await
+            .map_err(|_| "Chrome bridge did not respond".to_string())?
+            .ok_or("Chrome bridge disconnected")?
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str(reply.to_text().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+    .await;
+    if result.is_err() {
+        *lease = None;
+    }
+    result
+}
+
+pub async fn shutdown_chrome_tab_session() {
+    if let Some(lease) = LEASE.get()
+        && let Some(mut lease) = lease.lock().await.take()
+    {
+        let _ = time::timeout(Duration::from_secs(3), async {
+            lease
+                .socket
+                .send(Message::Text(json!({"release":true}).to_string().into()))
+                .await?;
+            // The bridge acknowledges only after the extension removes this owner's tabs.
+            let _ = lease.socket.next().await;
+            lease.socket.close(None).await
+        })
+        .await;
+    }
 }
 
 #[allow(clippy::result_large_err)] // tungstenite requires a large ErrorResponse from this callback.
@@ -187,25 +246,84 @@ async fn serve_peer(stream: TcpStream, connection: Connection) {
         check_origin(req, response)
     })
     .await;
-    let Ok(mut ws) = ws else { return };
+    let Ok(ws) = ws else { return };
     let Ok(role) = role_rx.await else { return };
     if role == "extension" {
         serve_extension(ws, connection).await;
     } else {
-        let Ok(Some(Ok(Message::Text(first)))) =
-            time::timeout(Duration::from_secs(5), ws.next()).await
-        else {
-            return;
+        serve_agent(ws, connection).await;
+    }
+}
+
+async fn serve_agent(
+    mut ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+    connection: Connection,
+) {
+    let Ok(Some(Ok(Message::Text(first)))) = time::timeout(Duration::from_secs(5), ws.next()).await
+    else {
+        return;
+    };
+    let Ok(hello) = serde_json::from_str::<Value>(&first) else {
+        return;
+    };
+    let Some(owner) = hello
+        .get("owner")
+        .and_then(Value::as_str)
+        .filter(|id| Uuid::parse_str(id).is_ok())
+    else {
+        return;
+    };
+    let owner = owner.to_string();
+    if hello["protocol"] != 2 {
+        return;
+    }
+    if ws
+        .send(Message::Text(json!({"protocol":2}).to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    while let Some(Ok(Message::Text(text))) = ws.next().await {
+        let Ok(mut request) = serde_json::from_str::<Value>(&text) else {
+            break;
         };
-        let Ok(request) = serde_json::from_str::<Value>(&first) else {
-            return;
-        };
+        if request["release"] == true {
+            break;
+        }
+        if request["action"] == "close_owner" {
+            let _ = ws
+                .send(Message::Text(
+                    json!({"error":"internal-only action"}).to_string().into(),
+                ))
+                .await;
+            continue;
+        }
+        if request["action"] == "open" {
+            request["owner"] = Value::String(owner.clone());
+        }
         let reply = match dispatch(&connection, request).await {
             Ok(reply) => reply,
             Err(error) => json!({"error":error}),
         };
-        let _ = ws.send(Message::Text(reply.to_string().into())).await;
+        if ws
+            .send(Message::Text(reply.to_string().into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
     }
+    let _ = time::timeout(
+        Duration::from_secs(2),
+        dispatch(&connection, json!({"action":"close_owner", "owner":owner})),
+    )
+    .await;
+    let _ = ws
+        .send(Message::Text(
+            json!({"cleanup_done":true}).to_string().into(),
+        ))
+        .await;
 }
 
 async fn serve_extension(
@@ -389,6 +507,23 @@ mod tests {
             .unwrap();
         client
             .send(Message::Text(
+                json!({"owner":Uuid::new_v4().to_string(),"protocol":2})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let hello = time::timeout(Duration::from_secs(2), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(hello.to_text().unwrap()).unwrap()["protocol"],
+            2
+        );
+        client
+            .send(Message::Text(
                 json!({"action":"open", "url":"https://example.org"})
                     .to_string()
                     .into(),
@@ -407,6 +542,234 @@ mod tests {
         );
         responder.await.unwrap();
         host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lease_rejects_older_bridge_protocol_before_sending_action() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let hello = ws.next().await.unwrap().unwrap();
+            assert!(hello.to_text().unwrap().contains("owner"));
+            // An old bridge treats the owner frame as a command and returns an error.
+            ws.send(Message::Text(
+                json!({"error":"Tab not opened by Agent; access denied"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            if let Ok(Some(Ok(Message::Text(text)))) =
+                time::timeout(Duration::from_millis(100), ws.next()).await
+            {
+                panic!("sent action to incompatible bridge: {text}");
+            }
+        });
+        let err = connect_lease(&address)
+            .await
+            .err()
+            .expect("old bridge must be refused");
+        assert!(err.contains("incompatible Chrome bridge"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_disconnect_notifies_extension_to_close_only_its_tabs() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let server = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let (mut agent, _) = tokio_tungstenite::connect_async(format!("{address}/agent"))
+            .await
+            .unwrap();
+        agent
+            .send(Message::Text(
+                json!({"owner":Uuid::new_v4().to_string(),"protocol":2})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let hello = agent.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(hello.to_text().unwrap()).unwrap()["protocol"],
+            2
+        );
+        agent
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!owner.is_empty());
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":42}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        agent.next().await.unwrap().unwrap();
+        agent
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = time::timeout(Duration::from_secs(2), extension.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let ack = agent.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap()["cleanup_done"],
+            true
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abrupt_agent_disconnect_still_requests_owner_cleanup() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let server = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        let (mut agent, _) = tokio_tungstenite::connect_async(format!("{address}/agent"))
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        agent
+            .send(Message::Text(
+                json!({"owner":owner,"protocol":2}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        drop(agent);
+        let cleanup = time::timeout(Duration::from_secs(2), extension.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":0}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn first_call_wait_covers_extension_alarm_retry() {
+        assert!(FIRST_CONNECTION_WAIT > Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn first_status_waits_briefly_for_extension_to_reconnect() {
+        let connection: Connection = Default::default();
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { dispatch(&connection, json!({"action":"status"})).await }
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        {
+            let mut state = connection.lock().await;
+            state.sender = Some(mpsc::channel::<PendingRequest>(1).0);
+            state.enabled = true;
+        }
+        let response = pending.await.unwrap().unwrap();
+        assert!(response["result"].as_str().unwrap().contains("switched on"));
+    }
+
+    #[tokio::test]
+    async fn first_browser_action_waits_for_extension_to_reconnect() {
+        let connection: Connection = Default::default();
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                dispatch(
+                    &connection,
+                    json!({"action":"open", "url":"https://example.org"}),
+                )
+                .await
+            }
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        let (tx, mut rx) = mpsc::channel::<PendingRequest>(8);
+        {
+            let mut state = connection.lock().await;
+            state.sender = Some(tx);
+            state.enabled = true;
+        }
+        let responder = tokio::spawn(async move {
+            let (_, reply) = rx.recv().await.unwrap();
+            reply.send(json!({"result":{"tab_id":42}})).unwrap();
+        });
+        assert_eq!(pending.await.unwrap().unwrap()["result"]["tab_id"], 42);
+        responder.await.unwrap();
     }
 
     #[test]

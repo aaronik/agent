@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use agent_rs::tools::browser::{BrowserControlArgs, browser_control};
+use agent_rs::tools::browser::{PlaywrightBrowserSessionArgs, playwright_browser_session};
 use agent_rs::tools::fetch::{FetchArgs, fetch};
 use agent_rs::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
@@ -37,8 +37,8 @@ async fn registry_exposes_and_executes_active_tool_surface() {
             "search_replace",
             "gen_image",
             "communicate",
-            "browser_control",
-            "chrome_tab",
+            "anonymous_browser_session",
+            "browser",
             "spawn",
         ]
     );
@@ -78,10 +78,10 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     let browser_definition = registry
         .definitions()
         .iter()
-        .find(|definition| definition.name == "browser_control")
-        .expect("browser_control definition");
+        .find(|definition| definition.name == "anonymous_browser_session")
+        .expect("anonymous_browser_session definition");
     assert!(browser_definition.description.contains("anonymous"));
-    assert!(browser_definition.description.contains("chrome_tab"));
+    assert!(browser_definition.description.contains("browser"));
     assert!(
         browser_definition
             .description
@@ -123,8 +123,18 @@ async fn registry_exposes_and_executes_active_tool_surface() {
     let live_tab = registry
         .definitions()
         .iter()
-        .find(|d| d.name == "chrome_tab")
+        .find(|d| d.name == "browser")
         .unwrap();
+    assert!(
+        live_tab
+            .description
+            .contains("Default tool for all browser activity")
+    );
+    assert!(
+        live_tab
+            .description
+            .contains("use anonymous_browser_session only")
+    );
     assert!(
         live_tab
             .description
@@ -625,10 +635,10 @@ async fn gen_image_uses_configured_openai_endpoint() {
 }
 
 #[tokio::test]
-async fn browser_control_fails_fast_when_playwright_missing_from_path() {
+async fn playwright_browser_session_fails_fast_when_playwright_missing_from_path() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _path = EnvGuard::set("PATH", "");
-    let output = browser_control(BrowserControlArgs {
+    let output = playwright_browser_session(PlaywrightBrowserSessionArgs {
         javascript: "return await page.title();".to_string(),
         url: Some("https://example.com".to_string()),
         timeout: 1,
@@ -640,16 +650,16 @@ async fn browser_control_fails_fast_when_playwright_missing_from_path() {
     .expect_err("missing playwright should fail before Chrome/profile checks");
 
     assert!(output.contains("playwright is not installed or not found in PATH"));
-    assert!(output.contains("browser_control cannot work"));
+    assert!(output.contains("anonymous_browser_session cannot work"));
 }
 
 #[tokio::test]
-async fn browser_control_rejects_retired_signed_in_argument_before_launching_chrome() {
+async fn playwright_browser_session_rejects_retired_signed_in_argument_before_launching_chrome() {
     let registry = ToolRegistry::new();
     let result = registry
         .execute(
             "browser".into(),
-            "browser_control",
+            "anonymous_browser_session",
             json!({
                 "intent": "reject profile copy", "javascript": "return 'test';", "signed_in": true
             }),
@@ -657,7 +667,7 @@ async fn browser_control_rejects_retired_signed_in_argument_before_launching_chr
         .await;
     assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
     assert!(result.content.contains("signed_in"));
-    assert!(result.content.contains("chrome_tab"));
+    assert!(result.content.contains("browser"));
 }
 
 #[tokio::test]
@@ -666,7 +676,7 @@ async fn chrome_tab_rejects_unowned_tab_requests_before_connecting() {
     let result = registry
         .execute(
             "id".into(),
-            "chrome_tab",
+            "browser",
             json!({
                 "intent": "test tab validation", "action": "snapshot"
             }),
@@ -674,6 +684,18 @@ async fn chrome_tab_rejects_unowned_tab_requests_before_connecting() {
         .await;
     assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
     assert!(result.content.contains("tab_id is required"));
+
+    for old_name in ["chrome_tab", "browser_control"] {
+        let result = registry
+            .execute(
+                "old".into(),
+                old_name,
+                json!({"intent": "check retired name"}),
+            )
+            .await;
+        assert_eq!(result.status, agent_rs::agent::ToolStatus::Error);
+        assert!(result.content.contains("unknown tool"));
+    }
 }
 
 #[cfg(unix)]

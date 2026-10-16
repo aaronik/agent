@@ -15,3 +15,4 @@ toggle.addEventListener('change', async () => {
   toggle.disabled = false;
 });
 refresh();
+setInterval(refresh, 2000);

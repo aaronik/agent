@@ -16,7 +16,7 @@ static BROWSER_SESSION: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new(
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserControlArgs {
+pub struct PlaywrightBrowserSessionArgs {
     /// JavaScript to run inside an async function with `browser`, `context`, and `page` available.
     /// Use normal Playwright APIs, e.g. `await page.goto("https://example.com"); return await page.title();`.
     #[serde(default)]
@@ -42,12 +42,14 @@ pub struct BrowserControlArgs {
     pub visible: bool,
 }
 
-pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String> {
+pub async fn playwright_browser_session(
+    args: PlaywrightBrowserSessionArgs,
+) -> Result<String, String> {
     let playwright = find_playwright().ok_or_else(|| {
-        "playwright is not installed or not found in PATH; browser_control cannot work. Install Playwright globally (for example: npm install -g playwright) and retry.".to_string()
+        "playwright is not installed or not found in PATH; anonymous_browser_session cannot work. Install Playwright globally (for example: npm install -g playwright) and retry.".to_string()
     })?;
     let node = find_executable("node").ok_or_else(|| {
-        "node is not installed or not found in PATH; browser_control requires Node.js to run Playwright.".to_string()
+        "node is not installed or not found in PATH; anonymous_browser_session requires Node.js to run Playwright.".to_string()
     })?;
 
     let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
@@ -126,7 +128,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
                 close_session(session).await;
             }
             return Err(format!(
-                "Playwright browser_control timed out after {}s",
+                "Playwright anonymous_browser_session timed out after {}s",
                 args.timeout
             ));
         }
@@ -150,7 +152,7 @@ pub async fn browser_control(args: BrowserControlArgs) -> Result<String, String>
                 "Playwright script completed successfully with no output. Browser session closed."
                     .to_string()
             } else {
-                "Playwright script completed successfully with no output. Browser session remains open; call browser_control with close=true when done.".to_string()
+                "Playwright script completed successfully with no output. Browser session remains open; call anonymous_browser_session with close=true when done.".to_string()
             }
         } else {
             append_session_status(combined, args.close)
@@ -263,7 +265,7 @@ fn append_session_status(mut output: String, closed: bool) -> String {
         output.push_str("[browser session closed]");
     } else {
         output.push_str(
-            "[browser session remains open; call browser_control with close=true when done]",
+            "[browser session remains open; call anonymous_browser_session with close=true when done]",
         );
     }
     output

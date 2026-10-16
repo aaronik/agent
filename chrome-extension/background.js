@@ -1,32 +1,49 @@
 // Only tab IDs created by this extension can be used for browser actions.
 const owned = new Set();
+const owners = new Map();
 let socket;
+let lastAttempt = -Infinity;
+let retryTimer;
+let retriesLeft = 2;
 let enabled = false;
 const ready = Promise.all([
   chrome.storage.local.get('enabled'),
-  chrome.storage.session.get('ownedTabs'),
-]).then(async ([preferences, {ownedTabs = []}]) => {
+  chrome.storage.session.get(['ownedTabs', 'tabOwners']),
+]).then(async ([preferences, {ownedTabs = [], tabOwners = {}}]) => {
   enabled = preferences.enabled === true;
 
   for (const id of ownedTabs) {
-    try { await chrome.tabs.get(id); owned.add(id); } catch { /* closed while worker slept */ }
+    try {
+      await chrome.tabs.get(id);
+      owned.add(id);
+      if (tabOwners[id]) owners.set(id, tabOwners[id]);
+    } catch { /* closed while worker slept */ }
   }
   await persistOwned();
 });
-function persistOwned() { return chrome.storage.session.set({ownedTabs: [...owned]}); }
+function persistOwned() {
+  return chrome.storage.session.set({ownedTabs: [...owned], tabOwners: Object.fromEntries(owners)});
+}
 
 chrome.alarms.create('bridge-check', {periodInMinutes: 0.5});
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === 'bridge-check') ready.then(connect);
+  if (alarm.name === 'bridge-check') ready.then(() => {
+    retriesLeft = 2;
+    connect();
+  });
 });
 chrome.tabs.onRemoved.addListener(async id => {
   await ready;
   owned.delete(id);
+  owners.delete(id);
   await persistOwned();
 });
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message.action === 'status') {
-    ready.then(() => respond({enabled, connected: enabled && socket?.readyState === WebSocket.OPEN && socket.authenticated === true}));
+    ready.then(() => {
+      connect();
+      respond({enabled, connected: enabled && socket?.readyState === WebSocket.OPEN && socket.authenticated === true});
+    });
     return true;
   }
   if (message.action === 'setEnabled' && typeof message.enabled === 'boolean') {
@@ -50,13 +67,20 @@ function sendStatus() {
 
 function connect() {
   if (socket && socket.readyState < WebSocket.CLOSING) return;
+  if (Date.now() - lastAttempt < 2000) return;
+  lastAttempt = Date.now();
   const ws = new WebSocket('ws://127.0.0.1:17777');
   socket = ws;
   ws.authenticated = false;
   ws.addEventListener('message', async event => {
     if (socket !== ws) return;
     const request = JSON.parse(event.data);
-    if (request.connected) { ws.authenticated = true; sendStatus(); return; }
+    if (request.connected) {
+      ws.authenticated = true;
+      retriesLeft = 2;
+      sendStatus();
+      return;
+    }
     let reply;
     try { await ready; reply = {result: await handle(request)}; }
     catch (error) { reply = {error: String(error)}; }
@@ -65,7 +89,12 @@ function connect() {
   ws.addEventListener('close', () => {
     if (socket !== ws) return;
     socket = undefined;
-    // The alarm retries on a relaxed cadence. A stopped agent is normal, not an error storm.
+    if (retryTimer) clearTimeout(retryTimer);
+    if (retriesLeft > 0) {
+      retriesLeft--;
+      retryTimer = setTimeout(() => { retryTimer = undefined; connect(); }, 2000);
+    }
+    // After the brief burst, the alarm retries on a relaxed cadence.
   });
   ws.addEventListener('error', () => ws.close());
 }
@@ -97,12 +126,23 @@ function safeUrl(url) {
 }
 
 async function handle(request) {
-  if (!enabled) throw Error('Agent Live Tabs is disabled');
   const {action, tab_id: id} = request;
+  if (action === 'close_owner') {
+    const ids = [...owners].filter(([, owner]) => owner === request.owner).map(([tabId]) => tabId);
+    for (const tabId of ids) {
+      owned.delete(tabId);
+      owners.delete(tabId);
+      try { await chrome.tabs.remove(tabId); } catch { /* user closed tab first */ }
+    }
+    await persistOwned();
+    return {closed: ids.length};
+  }
+  if (!enabled) throw Error('Agent Live Tabs is disabled');
   if (action === 'open') {
     const url = safeUrl(request.url);
     const tab = await chrome.tabs.create({url, active: false});
     owned.add(tab.id);
+    if (request.owner) owners.set(tab.id, request.owner);
     await persistOwned();
     await groupAgentTab(tab);
     return {tab_id: tab.id, url};
@@ -111,6 +151,7 @@ async function handle(request) {
   const tab = await chrome.tabs.get(id);
   if (action === 'close') {
     owned.delete(id);
+    owners.delete(id);
     await persistOwned();
     await chrome.tabs.remove(id);
     return {closed: id};

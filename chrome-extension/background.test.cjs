@@ -12,6 +12,7 @@ function harness(savedEnabled = false) {
   const createCalls = [];
   const sockets = [];
   const timers = [];
+  let now = 0;
   const groups = new Map();
   let nextGroupId = 10;
   let nextId = 4;
@@ -57,10 +58,10 @@ function harness(savedEnabled = false) {
     alarms: {create() {}, onAlarm: {addListener(fn) { alarmListener = fn; }}}, 
     runtime: {onMessage: {addListener(fn) { listener = fn; }}},
   };
-  const context = vm.createContext({chrome, WebSocket: Socket, URL, setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, console});
+  const context = vm.createContext({chrome, WebSocket: Socket, URL, Date: {now: () => now}, setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, console});
   vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8') + '\nthis.testHandle = handle; this.testReady = ready;', context);
   const send = message => new Promise(resolve => listener(message, {}, resolve));
-  return {context, send, sockets, local, tabs, createCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'})};
+  return {context, send, sockets, local, tabs, createCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'}), advance: ms => { now += ms; }};
 }
 
 test('disabled by default; enable connects, disable closes and blocks all commands', async () => {
@@ -108,6 +109,20 @@ test('new tabs join a green Agent group without grouping pre-existing tabs', asy
   assert.equal(snapshot.group.id, h.tabs.get(first.tab_id).groupId);
 });
 
+test('closing one agent session closes only its tabs', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  const one = await h.context.testHandle({action: 'open', url: 'https://example.org', owner: 'agent-one'});
+  const two = await h.context.testHandle({action: 'open', url: 'https://example.org', owner: 'agent-two'});
+  await h.send({action: 'setEnabled', enabled: false});
+  await h.context.testHandle({action: 'close_owner', owner: 'agent-one'});
+  assert.equal(h.tabs.has(one.tab_id), false);
+  assert.equal(h.tabs.has(two.tab_id), true);
+  assert.equal(h.tabs.has(3), true);
+  await h.send({action: 'setEnabled', enabled: true});
+  await assert.rejects(h.context.testHandle({action: 'snapshot', tab_id: one.tab_id}), /access denied/);
+});
+
 test('off switch keeps status connection and refuses action frames', async () => {
   const h = harness(false);
   await h.context.testReady;
@@ -121,13 +136,47 @@ test('off switch keeps status connection and refuses action frames', async () =>
   assert.equal(h.sockets[0].readyState, 1);
 });
 
+test('status request reconnects after failed bridge and reports current state', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  await Promise.resolve();
+  h.sockets[0].close();
+  h.advance(2100);
+  const state = await h.send({action: 'status'});
+  assert.equal(state.connected, false);
+  assert.equal(h.sockets.length, 2, 'checking status should retry a missing bridge');
+  h.sockets[1].close();
+  await h.send({action: 'status'});
+  assert.equal(h.sockets.length, 2, 'repeat status checks respect reconnect cooldown');
+});
+
+test('failed connection gets a short bounded retry burst then falls back to alarm', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  await Promise.resolve();
+  h.sockets[0].close();
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].delay, 2000);
+  h.advance(2000);
+  h.timers.shift().fn();
+  assert.equal(h.sockets.length, 2);
+  h.sockets[1].close();
+  assert.equal(h.timers.length, 1);
+  h.advance(2000);
+  h.timers.shift().fn();
+  assert.equal(h.sockets.length, 3);
+  h.sockets[2].close();
+  assert.equal(h.timers.length, 0, 'no unbounded error loop');
+});
+
 test('unavailable bridge uses alarm retry instead of rapid error loop', async () => {
   const h = harness(true);
   await h.context.testReady;
   await Promise.resolve();
   assert.equal(h.sockets.length, 1);
   h.sockets[0].close(); // Simulate Chrome's connection-refused close.
-  assert.equal(h.timers.length, 0, 'no rapid reconnect timer');
+  assert.equal(h.timers.length, 1, 'one bounded retry is allowed');
+  h.advance(30000);
   h.alarm();
   await Promise.resolve();
   assert.equal(h.sockets.length, 2, 'alarm eventually retries');
