@@ -267,6 +267,10 @@ async fn run_with_args_and_prefill(
                         loop_runner = None;
                         continue;
                     }
+                    Err(err) if err.to_string() == "Interrupted!" => {
+                        println!("sessionId: {}", session.session_id);
+                        break;
+                    }
                     Err(err) if err.to_string() == "Goodbye!" => break,
                     Err(err) => return Err(err),
                 }
@@ -429,6 +433,7 @@ async fn run_with_args_and_prefill(
                 cancellation_token.cancel();
                 let _ = esc_abort.stop().await;
                 display.finish_turn();
+                println!("sessionId: {}", session.session_id);
                 return Err("cancelled".into());
             }
         };
@@ -1475,7 +1480,8 @@ async fn prompt_for_input(
         Signal::HostCommand(command) if command == TOGGLE_TALK_HOST_COMMAND => {
             Ok(PromptInput::ToggleTalk)
         }
-        Signal::CtrlD | Signal::CtrlC => Err("Goodbye!".into()),
+        Signal::CtrlC => Err("Interrupted!".into()),
+        Signal::CtrlD => Err("Goodbye!".into()),
         _ => Err("unsupported prompt signal".into()),
     }
 }

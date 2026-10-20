@@ -81,6 +81,110 @@ fn voice_startup_failure_prints_saved_session_id() {
 }
 
 #[test]
+#[cfg(unix)]
+fn ctrl_c_at_prompt_prints_session_id_on_exit() {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = tempfile::tempdir().unwrap();
+    let mut master = 0;
+    let mut slave = 0;
+    // SAFETY: openpty initializes both file descriptors on success.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: master and slave are owned descriptors returned by openpty.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let slave_out = slave.try_clone().unwrap();
+    let slave_err = slave.try_clone().unwrap();
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--no-completion-sound"])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err))
+        .spawn()
+        .unwrap();
+    // Set nonblocking mode so the test can time out rather than hang on a broken exit.
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&master);
+    // SAFETY: fd is a live PTY descriptor.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !output.windows(11).any(|bytes| bytes == b"sessionId: ") {
+        assert!(
+            Instant::now() < deadline,
+            "agent did not start: {}",
+            String::from_utf8_lossy(&output)
+        );
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while !output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+        assert!(
+            Instant::now() < deadline,
+            "no cursor query: {}",
+            String::from_utf8_lossy(&output)
+        );
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    master.write_all(b"\x1b[1;1R").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    master.write_all(b"\x03").unwrap();
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!(
+            "agent did not exit after Ctrl-C: {}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+    let mut buf = [0; 4096];
+    while let Ok(n) = master.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        output.extend_from_slice(&buf[..n]);
+    }
+    let output = String::from_utf8_lossy(&output);
+    let id = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("sessionId: "))
+        .unwrap();
+    assert_eq!(
+        output.matches(&format!("sessionId: {id}")).count(),
+        2,
+        "{output}"
+    );
+}
+
+#[test]
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 

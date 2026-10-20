@@ -343,6 +343,7 @@ async fn talk_loop_tick(context: TalkLoopTick<'_>) -> TalkLoopAction {
         _ = context.cancellation_token.cancelled() => TalkLoopAction::Continue,
         _ = tokio::signal::ctrl_c() => {
             println!("\nending voice session");
+            println!("sessionId: {}", context.session.session_id);
             context.audio.clear_playback();
             TalkLoopAction::Ended
         }
