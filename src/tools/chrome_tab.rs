@@ -94,15 +94,18 @@ fn validate(args: &ChromeTabArgs) -> Result<(), String> {
 }
 
 fn start_bridge() -> std::io::Result<()> {
-    match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, PORT)) {
+    start_bridge_on_port(PORT)
+}
+
+fn start_bridge_on_port(port: u16) -> std::io::Result<()> {
+    match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
         Ok(listener) => {
             listener.set_nonblocking(true)?;
             let listener = TcpListener::from_std(listener)?;
             let connection: Connection = Default::default();
-            let shared = connection.clone();
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    let connection = shared.clone();
+                    let connection = connection.clone();
                     tokio::spawn(async move { serve_peer(stream, connection).await });
                 }
             });
@@ -180,18 +183,43 @@ async fn connect_lease(address: &str) -> Result<Lease, String> {
         .await
         .map_err(|e| e.to_string())?;
     let reply = time::timeout(Duration::from_secs(2), socket.next()).await;
-    if !matches!(reply, Ok(Some(Ok(Message::Text(ref text)))) if serde_json::from_str::<Value>(text).ok().is_some_and(|value| value["protocol"] == 2))
-    {
-        return Err("incompatible Chrome bridge on 127.0.0.1:17777. Exit the older agent process holding port 17777, then restart the agent; reloading the extension alone does not update the bridge.".into());
+    match reply {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            if serde_json::from_str::<Value>(&text)
+                .ok()
+                .is_some_and(|v| v["protocol"] == 2)
+            {
+                Ok(Lease { socket })
+            } else {
+                Err("incompatible Chrome bridge on 127.0.0.1:17777. A running agent owns this port with an older protocol; exit or update that process, then retry.".into())
+            }
+        }
+        _ => Err("Chrome bridge disconnected during handshake; retrying connection.".into()),
     }
-    Ok(Lease { socket })
+}
+
+async fn connect_lease_with_takeover(address: &str, port: u16) -> Result<Lease, String> {
+    let deadline = time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match connect_lease(address).await {
+            Ok(lease) => return Ok(lease),
+            Err(error) if error.contains("incompatible Chrome bridge") => return Err(error),
+            Err(error) => {
+                start_bridge_on_port(port).map_err(|err| err.to_string())?;
+                if time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 async fn request_host(request: Value) -> Result<Value, String> {
     let lease = LEASE.get_or_init(|| Arc::new(Mutex::new(None)));
     let mut lease = lease.lock().await;
     if lease.is_none() {
-        *lease = Some(connect_lease(ADDRESS).await?);
+        *lease = Some(connect_lease_with_takeover(ADDRESS, PORT).await?);
     }
     let current = lease.as_mut().expect("lease initialized");
     let result = async {
@@ -210,6 +238,28 @@ async fn request_host(request: Value) -> Result<Value, String> {
     .await;
     if result.is_err() {
         *lease = None;
+        // Status is read-only; retry it on a fresh lease after host turnover.
+        if request["action"] == "status" {
+            let mut fresh = connect_lease_with_takeover(ADDRESS, PORT).await?;
+            fresh
+                .socket
+                .send(Message::Text(request.to_string().into()))
+                .await
+                .map_err(|e| e.to_string())?;
+            let reply = time::timeout(Duration::from_secs(26), fresh.socket.next())
+                .await
+                .map_err(|_| "Chrome bridge did not respond".to_string())?
+                .ok_or("Chrome bridge disconnected")?
+                .map_err(|e| e.to_string())?;
+            let response = serde_json::from_str(reply.to_text().map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            *lease = Some(fresh);
+            return Ok(response);
+        }
+        return Err(format!(
+            "Chrome bridge connection was lost during {}. The outcome is unknown; check Agent-owned tabs before retrying. The next call will reconnect automatically.",
+            request["action"]
+        ));
     }
     result
 }
@@ -545,6 +595,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_agent_clients_share_bridge_and_cleanup_independently() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let acceptor = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut req = address.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let mut first = connect_lease(&format!("{address}/agent")).await.unwrap();
+        let mut second = connect_lease(&format!("{address}/agent")).await.unwrap();
+        first
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let first_owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first.socket.next().await.unwrap().unwrap();
+        second
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let second_owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(first_owner, second_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":2}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        second.socket.next().await.unwrap().unwrap();
+        first
+            .socket
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = extension.next().await.unwrap().unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first.socket.next().await.unwrap().unwrap();
+        second
+            .socket
+            .send(Message::Text(json!({"action":"status"}).to_string().into()))
+            .await
+            .unwrap();
+        assert!(
+            second
+                .socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("switched on")
+        );
+        second
+            .socket
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = extension.next().await.unwrap().unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["owner"], second_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        second.socket.next().await.unwrap().unwrap();
+        acceptor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_bridge_during_handshake_is_not_called_incompatible() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            ws.close(None).await.unwrap();
+        });
+        let err = connect_lease(&address).await.err().unwrap();
+        assert!(!err.contains("incompatible"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn lease_rejects_older_bridge_protocol_before_sending_action() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -720,6 +910,19 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_takes_over_bridge_after_host_exits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let address = format!("ws://127.0.0.1:{port}/agent");
+        let lease = connect_lease_with_takeover(&address, port).await.unwrap();
+        assert!(matches!(
+            lease.socket.get_ref(),
+            tokio_tungstenite::MaybeTlsStream::Plain(_)
+        ));
     }
 
     #[test]
