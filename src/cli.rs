@@ -1566,6 +1566,7 @@ async fn handle_slash_command(
                 },
                 store,
             )?;
+            crate::tools::chrome_tab::shutdown_chrome_tab_session().await;
             *session = new_session;
             session.model = Some(model_name.to_string());
             store.save(session)?;

@@ -264,10 +264,8 @@ async fn request_host(request: Value) -> Result<Value, String> {
     result
 }
 
-pub async fn shutdown_chrome_tab_session() {
-    if let Some(lease) = LEASE.get()
-        && let Some(mut lease) = lease.lock().await.take()
-    {
+async fn release_lease(lease: &mut Option<Lease>) {
+    if let Some(mut lease) = lease.take() {
         let _ = time::timeout(Duration::from_secs(3), async {
             lease
                 .socket
@@ -278,6 +276,12 @@ pub async fn shutdown_chrome_tab_session() {
             lease.socket.close(None).await
         })
         .await;
+    }
+}
+
+pub async fn shutdown_chrome_tab_session() {
+    if let Some(lease) = LEASE.get() {
+        release_lease(&mut *lease.lock().await).await;
     }
 }
 
@@ -910,6 +914,115 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_reset_releases_lease_and_next_turn_has_new_owner() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let acceptor = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let mut first = Some(connect_lease(&format!("{address}/agent")).await.unwrap());
+        first
+            .as_mut()
+            .unwrap()
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let opened: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        let first_owner = opened["owner"].as_str().unwrap().to_owned();
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first
+            .as_mut()
+            .unwrap()
+            .socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        let release = tokio::spawn(async move { release_lease(&mut first).await });
+        let cleanup: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        release.await.unwrap();
+        let mut next = connect_lease(&format!("{address}/agent")).await.unwrap();
+        next.socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let opened: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_ne!(opened["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":2}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        next.socket.next().await.unwrap().unwrap();
+        drop(next);
+        let cleanup = extension.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(cleanup.to_text().unwrap()).unwrap()["owner"],
+            opened["owner"]
+        );
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        acceptor.await.unwrap();
     }
 
     #[tokio::test]
