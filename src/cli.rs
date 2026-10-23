@@ -1798,7 +1798,7 @@ fn build_loop_runner(
 }
 
 fn system_prompt() -> String {
-    "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented. You may create reusable skills as SKILL.md files under ~/.agent/skills/<name>/ for the user or .agent/skills/<name>/ for the current project. A skill may start with YAML-like frontmatter containing name and description, followed by its instructions; users invoke it as /<name> [arguments].".to_string()
+    "You are a highly autonomous AI command line agent designed to help users with software engineering tasks, system operations, research, and problem-solving. Be concise, direct, and action-oriented. You may create reusable skills as SKILL.md files under ~/.agent/skills/<name>/ for the user or .agent/skills/<name>/ for the current project. A skill may start with YAML-like frontmatter containing name and description, followed by its instructions; users invoke it as /<name> [arguments]. This terminal does not render LaTeX; write equations in readable plain text or Unicode instead, unless the user explicitly requests LaTeX.".to_string()
 }
 
 fn command_mode_system_prompt() -> String {
@@ -2311,6 +2311,14 @@ fn fuzzy_subsequence_score(candidate: &str, query: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_requests_terminal_friendly_math() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("terminal"), "{prompt}");
+        assert!(prompt.contains("LaTeX"), "{prompt}");
+        assert!(prompt.contains("plain text"), "{prompt}");
+    }
 
     #[test]
     fn no_subagent_agents_do_not_receive_the_spawn_tool() {
