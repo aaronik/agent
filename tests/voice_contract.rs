@@ -320,8 +320,17 @@ fn resampler_handles_common_mac_sample_rate_to_realtime_rate() {
 
 #[test]
 fn talk_mode_defaults_text_models_to_realtime_model() {
-    assert_eq!(talk_model_name("gpt-5.5"), "gpt-realtime");
+    assert_eq!(talk_model_name("gpt-5.5"), "gpt-realtime-2.1");
     assert_eq!(talk_model_name("openai:gpt-realtime"), "gpt-realtime");
+    assert_eq!(
+        talk_model_name("openai:gpt-realtime-1.5"),
+        "gpt-realtime-1.5"
+    );
+    assert_eq!(talk_model_name("openai:gpt-realtime-2"), "gpt-realtime-2");
+    assert_eq!(
+        talk_model_name("openai:gpt-realtime-2.1"),
+        "gpt-realtime-2.1"
+    );
 }
 
 #[test]

@@ -20,7 +20,7 @@ use crate::voice::realtime::{
     RealtimeClient, RealtimeConfig, RealtimeError, RealtimeEvent, voice_instructions,
 };
 
-const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime";
+const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2.1";
 const PLAYBACK_ECHO_SUPPRESSION_HANGOVER: Duration = Duration::from_millis(900);
 const DEFAULT_BARGE_IN_RMS_THRESHOLD: f64 = 900.0;
 const DEFAULT_BARGE_IN_VOLUME_SCALE: f64 = 2_400.0;
