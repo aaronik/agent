@@ -199,6 +199,102 @@ fn assistant_tables_align_and_stream_without_raw_markdown() {
 }
 
 #[test]
+fn wide_assistant_table_cells_wrap_without_breaking_columns() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let description = "A long explanation with several words that must wrap within this cell rather than pushing the next column off screen. ".repeat(8);
+    let source = format!(
+        "| Name | Description |\n| --- | --- |\n| 漢字 | {description}|\n| next | short |\n"
+    );
+    let replay = TerminalDisplay::new().format_assistant_content(&source);
+    let plain = strip_ansi(&replay);
+    assert!(plain.contains("off screen."), "{plain}");
+    let rows: Vec<_> = plain.lines().filter(|line| line.contains('│')).collect();
+    assert!(rows.len() > 4, "{plain}");
+    let separators: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.match_indices('│')
+                .map(|(i, _)| row[..i].width())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(separators.iter().all(|s| *s == separators[0]), "{plain}");
+    let width = usize::from(termimad::terminal_size().0);
+    assert!(plain.lines().all(|line| line.width() < width), "{plain}");
+
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for character in source.chars() {
+        rendered.push_str(&stream.push(&character.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+}
+
+#[test]
+fn assistant_table_with_long_links_keeps_each_physical_row_within_width() {
+    let source = "| Item | Long link | Description |\n| --- | --- | --- |\n| Documentation | [A very long documentation link](https://docs.example.com/guides/getting-started/configuration/advanced-options?environment=production&feature=table-rendering&display=wide-cells) | A link with a long path and several query parameters. |\n| Report | [A lengthy report URL](https://reports.example.org/2026/03/analysis-of-very-wide-markdown-tables-and-how-long-hyperlinks-render-in-terminal-output) | Tests a long label and descriptive text that may wrap together. |\n| Download | [Download the example archive](https://downloads.example.net/releases/stable/2026/03/example-archive-with-an-especially-long-filename-and-version-number-1.2.3.tar.gz) | Tests a long filename in a link. |\n";
+    let rendered = TerminalDisplay::new().format_assistant_content(source);
+    let plain = strip_ansi(&rendered);
+    let width = usize::from(termimad::terminal_size().0);
+    assert!(plain.lines().all(|line| line.width() < width), "{plain}");
+    let rows: Vec<_> = plain.lines().filter(|line| line.contains('│')).collect();
+    assert!(rows.len() > 5, "{plain}");
+    let borders: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.match_indices('│')
+                .map(|(i, _)| row[..i].width())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(borders.iter().all(|b| b == &borders[0]), "{plain}");
+    assert!(
+        !rendered.contains("\x1b]8;;"),
+        "table links should not corrupt cell widths"
+    );
+    let mut stream = agent_rs::display::terminal::AssistantMarkdownStream::default();
+    let mut streamed = String::new();
+    for chunk in source.as_bytes().chunks(7) {
+        streamed.push_str(&stream.push(std::str::from_utf8(chunk).unwrap()));
+    }
+    streamed.push_str(&stream.finish());
+    assert_eq!(streamed, rendered);
+    let outside =
+        TerminalDisplay::new().format_assistant_content("[outside](https://example.com)\n\n");
+    assert!(outside.contains("\x1b]8;;https://example.com"));
+}
+
+#[test]
+fn streaming_table_waits_for_final_row_to_choose_consistent_column_widths() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+
+    let source = "| Name | Value |\n| --- | --- |\n| short | 1 |\n| a much longer final name | 200";
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for line in source.split_inclusive('\n') {
+        rendered.push_str(&stream.push(line));
+    }
+    assert!(rendered.is_empty(), "table must be buffered: {rendered:?}");
+    rendered.push_str(&stream.finish());
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    assert_eq!(rendered, replay.trim_end_matches('\n'));
+    let plain = strip_ansi(&rendered);
+    let rows: Vec<_> = plain.lines().filter(|line| line.contains('│')).collect();
+    assert!(rows.len() >= 3, "{plain}");
+    let borders: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.match_indices('│')
+                .map(|(i, _)| row[..i].width())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(borders.iter().all(|b| b == &borders[0]), "{plain}");
+}
+
+#[test]
 fn streamed_tables_without_outer_pipes_and_lone_pipe_prose() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
     let display = TerminalDisplay::new();

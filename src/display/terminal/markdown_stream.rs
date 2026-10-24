@@ -75,7 +75,18 @@ impl AssistantMarkdownStream {
     /// Reset at every message boundary so a fence cannot swallow the next turn.
     pub fn finish(&mut self) -> String {
         let mut state = std::mem::take(self);
+        // The last row may not end with a newline. Fit all rows together so
+        // the earlier columns don't use widths chosen without that last row.
+        let final_row_without_newline =
+            !state.table.is_empty() && is_table_row(&state.pending_line);
+        if final_row_without_newline {
+            state.table.push_str(&state.pending_line);
+            state.pending_line.clear();
+        }
         let mut out = state.flush_table();
+        if final_row_without_newline && out.ends_with('\n') {
+            out.pop();
+        }
         if state.fence.is_some() || opening_fence(&state.pending_line).is_some() {
             state.block.push_str(&state.pending_line);
             out.push_str(&format_markdown(&state.block));

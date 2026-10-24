@@ -690,6 +690,12 @@ fn render_markdown_with_termimad(content: &str) -> String {
     // Private-use sentinels survive termimad's formatting. Never interpret them
     // if they already occur in model text.
     let can_mark_links = !content.contains(['\u{e000}', '\u{e001}', '\u{e002}', '\u{e003}']);
+    // termimad measures sentinel characters as visible cell content. In a
+    // table they cause undersized cells and shifted borders on link rows.
+    let table_ranges: Vec<_> = Parser::new_ext(content, pulldown_cmark::Options::ENABLE_TABLES)
+        .into_offset_iter()
+        .filter_map(|(event, range)| matches!(event, Event::Start(Tag::Table(_))).then_some(range))
+        .collect();
     for (event, range) in Parser::new(content).into_offset_iter() {
         match event {
             Event::Start(Tag::Emphasis)
@@ -712,7 +718,12 @@ fn render_markdown_with_termimad(content: &str) -> String {
                             && url.password().is_none()
                             && !destination.chars().any(char::is_control)
                     });
-                    if can_mark_links && safe_url.is_some() {
+                    if can_mark_links
+                        && safe_url.is_some()
+                        && !table_ranges
+                            .iter()
+                            .any(|table| table.start <= range.start && range.start < table.end)
+                    {
                         let index = clickable.len();
                         clickable.push(destination.to_string());
                         links.push((
@@ -733,9 +744,14 @@ fn render_markdown_with_termimad(content: &str) -> String {
     }
     let normalized =
         String::from_utf8(normalized).expect("ASCII marker replacements preserve UTF-8");
+    // A table ending in the terminal's last column triggers autowrap in many
+    // terminals, putting the next border on a new physical line.
+    let width = usize::from(termimad::terminal_size().0)
+        .saturating_sub(1)
+        .max(5);
     let mut rendered = format!(
         "{}",
-        termimad::MadSkin::default_dark().term_text(&normalized)
+        termimad::MadSkin::default_dark().text(&normalized, Some(width))
     );
     for (index, destination) in clickable.iter().enumerate() {
         rendered = rendered.replace(
