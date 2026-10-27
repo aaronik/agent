@@ -199,6 +199,46 @@ fn assistant_tables_align_and_stream_without_raw_markdown() {
 }
 
 #[test]
+fn assistant_tables_have_horizontal_borders_between_logical_rows() {
+    use agent_rs::display::terminal::AssistantMarkdownStream;
+    let source = "Before\n\n| Name | Detail |\n| :--- | ---: |\n| Alice | A long detail that should wrap onto multiple physical lines without getting a rule through the middle of its cell. |\n| Bob | short |\n\nAfter\n";
+    let replay = TerminalDisplay::new().format_assistant_content(source);
+    let plain = strip_ansi(&replay);
+    let table: Vec<_> = plain
+        .lines()
+        .filter(|line| line.contains(['│', '─', '┌', '└']))
+        .collect();
+    assert!(table.first().unwrap().starts_with('┌'), "{plain}");
+    assert!(table.last().unwrap().starts_with('└'), "{plain}");
+    assert_eq!(
+        table.iter().filter(|line| line.starts_with('├')).count(),
+        2,
+        "{plain}"
+    );
+    let alice = table
+        .iter()
+        .position(|line| line.contains("Alice"))
+        .unwrap();
+    let bob = table.iter().position(|line| line.contains("Bob")).unwrap();
+    assert!(bob > alice + 2, "{plain}");
+    assert_eq!(table[alice + 1].starts_with('│'), true, "{plain}");
+    assert!(table[bob - 1].starts_with('├'), "{plain}");
+    assert!(
+        plain
+            .lines()
+            .all(|line| line.width() < usize::from(termimad::terminal_size().0)),
+        "{plain}"
+    );
+    let mut stream = AssistantMarkdownStream::default();
+    let mut rendered = String::new();
+    for ch in source.chars() {
+        rendered.push_str(&stream.push(&ch.to_string()));
+    }
+    rendered.push_str(&stream.finish());
+    assert_eq!(rendered, replay);
+}
+
+#[test]
 fn wide_assistant_table_cells_wrap_without_breaking_columns() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
 

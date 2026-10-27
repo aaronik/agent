@@ -749,10 +749,12 @@ fn render_markdown_with_termimad(content: &str) -> String {
     let width = usize::from(termimad::terminal_size().0)
         .saturating_sub(1)
         .max(5);
-    let mut rendered = format!(
-        "{}",
-        termimad::MadSkin::default_dark().text(&normalized, Some(width))
-    );
+    let skin = termimad::MadSkin::default_dark();
+    let mut text =
+        termimad::minimad::parse_text(&normalized, termimad::minimad::Options::default());
+    add_table_borders(&mut text);
+    let formatted = termimad::FmtText::from_text(&skin, text, Some(width));
+    let mut rendered = formatted.to_string();
     for (index, destination) in clickable.iter().enumerate() {
         rendered = rendered.replace(
             &format!("\u{e000}{index}\u{e001}"),
@@ -761,6 +763,50 @@ fn render_markdown_with_termimad(content: &str) -> String {
         rendered = rendered.replace(&format!("\u{e002}{index}\u{e003}"), "\x1b]8;;\x1b\\");
     }
     rendered
+}
+
+fn add_table_borders(text: &mut termimad::minimad::Text<'_>) {
+    use termimad::minimad::{Line, TableRule};
+
+    let mut index = 0;
+    while index < text.lines.len() {
+        if !matches!(text.lines[index], Line::TableRow(_) | Line::TableRule(_)) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < text.lines.len()
+            && matches!(text.lines[index], Line::TableRow(_) | Line::TableRule(_))
+        {
+            index += 1;
+        }
+        let end = index;
+        let Some(aligns) = text.lines[start..end].iter().find_map(|line| match line {
+            Line::TableRule(rule) => Some(rule.cells.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let mut additions = vec![start];
+        for row in start + 1..end {
+            if matches!(text.lines[row], Line::TableRow(_))
+                && matches!(text.lines[row - 1], Line::TableRow(_))
+            {
+                additions.push(row);
+            }
+        }
+        additions.push(end);
+        let count = additions.len();
+        for at in additions.into_iter().rev() {
+            text.lines.insert(
+                at,
+                Line::TableRule(TableRule {
+                    cells: aligns.clone(),
+                }),
+            );
+        }
+        index = end + count;
+    }
 }
 
 fn markdown_code_blocks(content: &str) -> Vec<MarkdownCodeBlock> {
