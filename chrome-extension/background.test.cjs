@@ -10,6 +10,7 @@ function harness(savedEnabled = false) {
   const session = {ownedTabs: []};
   const tabs = new Map([[3, {id: 3, url: 'https://private.example', windowId: 1, groupId: -1}]]);
   const createCalls = [];
+  const windowFocusCalls = [];
   const sockets = [];
   const timers = [];
   let now = 0;
@@ -49,6 +50,7 @@ function harness(savedEnabled = false) {
       async remove(id) { tabs.delete(id); },
       async update(id, {url}) { tabs.get(id).url = url; },
     },
+    windows: {async update(id, options) { windowFocusCalls.push({id, ...options}); }},
     tabGroups: {
       TAB_GROUP_ID_NONE: -1,
       async get(id) { if (!groups.has(id)) throw Error('missing group'); return groups.get(id); },
@@ -61,7 +63,7 @@ function harness(savedEnabled = false) {
   const context = vm.createContext({chrome, WebSocket: Socket, URL, Date: {now: () => now}, setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, console});
   vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8') + '\nthis.testHandle = handle; this.testReady = ready;', context);
   const send = message => new Promise(resolve => listener(message, {}, resolve));
-  return {context, send, sockets, local, tabs, createCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'}), advance: ms => { now += ms; }};
+  return {context, send, sockets, local, tabs, createCalls, windowFocusCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'}), advance: ms => { now += ms; }};
 }
 
 test('disabled by default; enable connects, disable closes and blocks all commands', async () => {
@@ -90,6 +92,16 @@ test('open creates a background tab without selecting it', async () => {
   await h.context.testHandle({action: 'open', url: 'https://example.org'});
   assert.equal(h.createCalls.length, 1);
   assert.equal(h.createCalls[0].active, false);
+  assert.equal(h.windowFocusCalls.length, 0);
+});
+
+test('open with focus selects the tab and brings its window forward', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  const opened = await h.context.testHandle({action: 'open', url: 'https://example.org', focus: true});
+  assert.equal(h.createCalls.length, 1);
+  assert.equal(h.createCalls[0].active, true);
+  assert.deepEqual(h.windowFocusCalls, [{id: h.tabs.get(opened.tab_id).windowId, focused: true}]);
 });
 
 test('new tabs join a green Agent group without grouping pre-existing tabs', async () => {

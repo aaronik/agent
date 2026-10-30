@@ -144,6 +144,24 @@ async fn registry_exposes_and_executes_active_tool_surface() {
         live_tab.parameters["properties"]["action"]["type"],
         "string"
     );
+    assert!(
+        live_tab
+            .description
+            .contains("Only use focus=true when the user explicitly asks")
+    );
+    let focus = &live_tab.parameters["properties"]["focus"];
+    assert!(
+        focus["type"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("boolean"))
+    );
+    assert!(
+        focus["description"]
+            .as_str()
+            .unwrap()
+            .contains("Only set true if the user explicitly asks")
+    );
 
     for definition in registry.definitions() {
         let parameters = &definition.parameters;

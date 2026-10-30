@@ -49,6 +49,9 @@ pub struct ChromeTabArgs {
     /// Text for type.
     #[serde(default)]
     pub text: Option<String>,
+    /// For open: select the new tab and focus its Chrome window. Defaults to false; omit or set false normally. Only set true if the user explicitly asks to focus the tab or window. Do not infer this from a site's behavior.
+    #[serde(default)]
+    pub focus: Option<bool>,
     /// Vertical scroll distance in pixels (default 600).
     #[serde(default)]
     pub pixels: Option<i64>,
@@ -1106,6 +1109,23 @@ mod tests {
     }
 
     #[test]
+    fn open_focus_option_is_forwarded_and_optional() {
+        let focused: ChromeTabArgs = serde_json::from_value(json!({
+            "action": "open", "url": "https://example.org", "focus": true
+        }))
+        .unwrap();
+        assert!(validate(&focused).is_ok());
+        assert_eq!(serde_json::to_value(&focused).unwrap()["focus"], true);
+
+        let default: ChromeTabArgs = serde_json::from_value(json!({
+            "action": "open", "url": "https://example.org"
+        }))
+        .unwrap();
+        assert!(validate(&default).is_ok());
+        assert_ne!(serde_json::to_value(&default).unwrap()["focus"], true);
+    }
+
+    #[test]
     fn rejects_invalid_urls_and_missing_tab_ids() {
         let mut args = ChromeTabArgs {
             action: "open".into(),
@@ -1114,6 +1134,7 @@ mod tests {
             selector: None,
             text: None,
             pixels: None,
+            focus: None,
         };
         assert!(validate(&args).is_err());
         args.url = Some("https://example.org".into());

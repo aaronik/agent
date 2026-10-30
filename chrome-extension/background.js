@@ -140,11 +140,13 @@ async function handle(request) {
   if (!enabled) throw Error('Agent Live Tabs is disabled');
   if (action === 'open') {
     const url = safeUrl(request.url);
-    const tab = await chrome.tabs.create({url, active: false});
+    const focus = request.focus === true;
+    const tab = await chrome.tabs.create({url, active: focus});
     owned.add(tab.id);
     if (request.owner) owners.set(tab.id, request.owner);
     await persistOwned();
     await groupAgentTab(tab);
+    if (focus) await chrome.windows.update(tab.windowId, {focused: true});
     return {tab_id: tab.id, url};
   }
   if (!owned.has(id)) throw Error('Tab not opened by Agent; access denied');
