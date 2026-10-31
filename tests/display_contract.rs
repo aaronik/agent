@@ -605,6 +605,53 @@ fn tool_panels_render_without_raw_tool_call_json() {
 }
 
 #[test]
+fn long_tool_output_has_short_preview_and_clickable_complete_file() {
+    let display = TerminalDisplay::new();
+    let content = (1..=25)
+        .map(|number| format!("line {number}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "call_long".into(),
+        name: "run_shell_command".into(),
+        status: ToolStatus::Success,
+        content: content.clone(),
+        elapsed_ms: None,
+        subagent_usages: Vec::new(),
+    });
+    assert!(rendered.contains("line 1"));
+    assert!(rendered.contains("line 2"));
+    assert!(!rendered.contains("line 3\x1b"));
+    assert!(!rendered.contains("line 25"));
+    assert!(rendered.contains("Open full output"));
+    let url = rendered
+        .split("\x1b]8;;")
+        .nth(1)
+        .expect("OSC 8 hyperlink")
+        .split("\x1b\\")
+        .next()
+        .unwrap();
+    let path = url::Url::parse(url).unwrap().to_file_path().unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn short_tool_output_has_no_file_link() {
+    let display = TerminalDisplay::new();
+    let rendered = display.format_tool_result(&ToolResult {
+        tool_call_id: "call_short".into(),
+        name: "fetch".into(),
+        status: ToolStatus::Success,
+        content: "line 1\nline 2".into(),
+        elapsed_ms: None,
+        subagent_usages: Vec::new(),
+    });
+    assert!(!rendered.contains("\x1b]8;;"));
+    assert!(rendered.contains("line 2"));
+}
+
+#[test]
 fn shell_command_panel_shows_full_command_without_truncation() {
     let display = TerminalDisplay::new();
     let long_command = format!("printf '{}'", "0123456789".repeat(30));
@@ -687,8 +734,18 @@ fn diff_panels_render_with_diff_ansi() {
                 subagent_usages: Vec::new(),
     });
 
-    assert!(rendered.contains("\x1b[31m-old\x1b[0m"));
-    assert!(rendered.contains("\x1b[32m+new\x1b[0m"));
+    assert!(rendered.contains("Open full output"));
+    let url = rendered
+        .split("\x1b]8;;")
+        .nth(1)
+        .unwrap()
+        .split("\x1b\\")
+        .next()
+        .unwrap();
+    let path = url::Url::parse(url).unwrap().to_file_path().unwrap();
+    let diff = std::fs::read_to_string(&path).unwrap();
+    assert!(diff.contains("-old\n+new"));
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -707,7 +764,21 @@ fn read_file_content_with_exit_code_text_still_renders_success() {
     assert!(rendered.contains("read_file"));
     assert!(rendered.contains("[OK Done]"));
     assert!(rendered.contains("read_file  [ERR Done (7)]  0ms"));
-    assert!(rendered.contains("(exit code: 7)"));
+    assert!(rendered.contains("Open full output"));
+    let url = rendered
+        .split("\x1b]8;;")
+        .nth(1)
+        .unwrap()
+        .split("\x1b\\")
+        .next()
+        .unwrap();
+    let path = url::Url::parse(url).unwrap().to_file_path().unwrap();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("(exit code: 7)")
+    );
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -850,14 +921,23 @@ fn tool_results_are_append_only_and_do_not_silently_drop_lines() {
         tool_call_id: "large".into(),
         name: "fetch".into(),
         status: ToolStatus::Success,
-        content,
+        content: content.clone(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
     });
     assert!(!rendered.contains("\x1b[1A"));
-    for i in 0..100 {
-        assert!(rendered.contains(&format!("line-{i:03}")));
-    }
+    assert!(rendered.contains("line-000"));
+    assert!(!rendered.contains("line-099"));
+    let url = rendered
+        .split("\x1b]8;;")
+        .nth(1)
+        .unwrap()
+        .split("\x1b\\")
+        .next()
+        .unwrap();
+    let path = url::Url::parse(url).unwrap().to_file_path().unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

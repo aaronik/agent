@@ -23,6 +23,8 @@ const RED: &str = "\x1b[31m";
 const PANEL_MIN_WIDTH: usize = 42;
 const PANEL_MAX_WIDTH: usize = 120;
 const PANEL_PADDING: usize = 2;
+const TOOL_PREVIEW_LINES: usize = 2;
+const TOOL_PREVIEW_MAX_CHARS: usize = 240;
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Debug)]
@@ -296,13 +298,33 @@ impl TerminalDisplay {
         let mut body = call
             .map(|active| tool_call_body(&active.call))
             .unwrap_or_default();
-        let mut result_content = sanitize_terminal_text(&remove_shell_exit_code_marker(
+        let result_content = sanitize_terminal_text(&remove_shell_exit_code_marker(
             &result.name,
             &result.content,
         ));
-        result_content = format_tool_content(&result.name, &result_content);
         if !result_content.trim().is_empty() {
-            body.extend(result_content.lines().map(str::to_string));
+            let preview = preview_tool_output(&result_content);
+            if let Some(preview) = preview {
+                if let Ok(link) = full_output_link(&result.content) {
+                    let preview = format_tool_content(&result.name, &preview);
+                    body.extend(preview.lines().map(str::to_string));
+                    body.push(styled(DIM, "…"));
+                    body.push(link);
+                } else {
+                    // Never hide output if the complete file cannot be created.
+                    body.extend(
+                        format_tool_content(&result.name, &result_content)
+                            .lines()
+                            .map(str::to_string),
+                    );
+                }
+            } else {
+                body.extend(
+                    format_tool_content(&result.name, &result_content)
+                        .lines()
+                        .map(str::to_string),
+                );
+            }
         }
         if body.is_empty() {
             body.push(styled(DIM, ""));
@@ -395,6 +417,32 @@ fn format_args_lines(call: &ToolCall) -> Vec<String> {
         }
     }
     lines
+}
+
+fn preview_tool_output(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().take(TOOL_PREVIEW_LINES + 1).collect();
+    let long = lines.len() > TOOL_PREVIEW_LINES || content.chars().count() > TOOL_PREVIEW_MAX_CHARS;
+    if !long {
+        return None;
+    }
+    let preview: String = lines
+        .into_iter()
+        .take(TOOL_PREVIEW_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(preview.chars().take(TOOL_PREVIEW_MAX_CHARS).collect())
+}
+
+fn full_output_link(content: &str) -> io::Result<String> {
+    let mut file = tempfile::Builder::new()
+        .prefix("agent-tool-output-")
+        .suffix(".txt")
+        .tempfile()?;
+    file.write_all(content.as_bytes())?;
+    let (_, path) = file.keep()?;
+    let url = url::Url::from_file_path(&path)
+        .map_err(|_| io::Error::other("cannot create file URL for tool output"))?;
+    Ok(format!("\x1b]8;;{url}\x1b\\Open full output\x1b]8;;\x1b\\"))
 }
 
 fn format_tool_content(name: &str, content: &str) -> String {
@@ -537,6 +585,13 @@ fn wrap_visible(text: &str, max_width: usize) -> Vec<String> {
     let mut visible = 0;
     let mut remaining = text;
     while !remaining.is_empty() {
+        if remaining.starts_with("\x1b]8;;")
+            && let Some(end) = remaining.find("\x1b\\")
+        {
+            line.push_str(&remaining[..end + 2]);
+            remaining = &remaining[end + 2..];
+            continue;
+        }
         if remaining.starts_with("\x1b[")
             && let Some(end) = remaining.find('m')
         {
@@ -565,9 +620,19 @@ fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
+            if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
                 }
             }
         } else {
