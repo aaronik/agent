@@ -93,7 +93,6 @@ pub async fn playwright_browser_session(
         session.port,
         args.url.as_deref(),
         &args.javascript,
-        args.close,
     );
     fs::write(&script_path, script)
         .map_err(|err| format!("failed to write Playwright control script: {err}"))?;
@@ -338,13 +337,7 @@ async fn wait_for_cdp(port: u16, child: &mut Child) -> Result<(), String> {
     Err("Chrome DevTools endpoint did not become available within 15s".to_string())
 }
 
-fn playwright_script(
-    playwright: &Path,
-    port: u16,
-    url: Option<&str>,
-    javascript: &str,
-    close: bool,
-) -> String {
+fn playwright_script(playwright: &Path, port: u16, url: Option<&str>, javascript: &str) -> String {
     let package_dir = playwright_package_dir(playwright);
     let package_dir_json =
         serde_json::to_string(&package_dir.map(|path| path.display().to_string()))
@@ -352,13 +345,10 @@ fn playwright_script(
     let endpoint_json = serde_json::to_string(&format!("http://127.0.0.1:{port}"))
         .unwrap_or_else(|_| "null".to_string());
     let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "null".to_string());
-    let close_json = serde_json::to_string(&close).unwrap_or_else(|_| "false".to_string());
-
     format!(
         r#"const packageDir = {package_dir_json};
 const endpoint = {endpoint_json};
 const initialUrl = {url_json};
-const closeBrowser = {close_json};
 function loadPlaywright() {{
   try {{ return require('playwright'); }} catch (firstError) {{
     if (packageDir) {{ return require(packageDir); }}
@@ -368,21 +358,24 @@ function loadPlaywright() {{
 (async () => {{
   const playwright = loadPlaywright();
   const browser = await playwright.chromium.connectOverCDP(endpoint);
-  const context = browser.contexts()[0] || await browser.newContext();
-  const pages = context.pages();
-  const page = pages[0] || await context.newPage();
-  if (initialUrl && page.url() === 'about:blank') {{
-    await page.goto(initialUrl, {{ waitUntil: 'domcontentloaded' }});
-  }}
-  const result = await (async ({{ browser, context, page, playwright }}) => {{
+  try {{
+    const context = browser.contexts()[0] || await browser.newContext();
+    const pages = context.pages();
+    const page = pages[0] || await context.newPage();
+    if (initialUrl && page.url() === 'about:blank') {{
+      await page.goto(initialUrl, {{ waitUntil: 'domcontentloaded' }});
+    }}
+    const result = await (async ({{ browser, context, page, playwright }}) => {{
 {javascript}
-  }})({{ browser, context, page, playwright }});
-  if (result !== undefined) {{
-    if (typeof result === 'string') console.log(result);
-    else console.log(JSON.stringify(result, null, 2));
-  }}
-  if (closeBrowser) {{
-    await browser.close();
+    }})({{ browser, context, page, playwright }});
+    if (result !== undefined) {{
+      if (typeof result === 'string') console.log(result);
+      else console.log(JSON.stringify(result, null, 2));
+    }}
+  }} finally {{
+    // A CDP-connected browser.close() disconnects this client, not the Chrome process.
+    // Without it the Node websocket keeps the script alive until the tool times out.
+    if (browser.isConnected()) await browser.close();
   }}
 }})().catch(error => {{
   console.error(error && error.stack ? error.stack : String(error));
@@ -572,18 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn generated_playwright_script_keeps_browser_open_by_default() {
+    fn generated_playwright_script_disconnects_even_on_error() {
         let script = playwright_script(
             Path::new("/usr/local/bin/playwright"),
             9222,
             Some("https://example.com"),
             "return await page.title();",
-            false,
         );
 
-        assert!(script.contains("const closeBrowser = false;"));
-        assert!(script.contains("if (closeBrowser)"));
-        assert!(!script.contains("await browser.close();\n}})().catch"));
+        assert!(script.contains("finally {"));
+        assert!(script.contains("if (browser.isConnected()) await browser.close();"));
     }
 
     #[test]
@@ -593,7 +584,6 @@ mod tests {
             9222,
             Some("https://app.slack.com"),
             "return page.url();",
-            false,
         );
 
         assert!(script.contains("await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });"));
@@ -601,17 +591,57 @@ mod tests {
         assert!(!script.contains("waitUntil: 'load'"));
     }
 
+    #[tokio::test]
+    async fn persistent_playwright_script_disconnects_and_exits_without_closing_chrome() {
+        let Some(node) = find_executable("node") else {
+            return; // Node is optional for users who do not browse.
+        };
+        let temp = TempDirGuard::new().unwrap();
+        let package = temp.path.join("playwright");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"playwright"}"#).unwrap();
+        fs::write(
+            package.join("index.js"),
+            r#"module.exports = {chromium: {connectOverCDP: async () => ({
+  contexts: () => [{pages: () => [{url: () => 'about:blank'}]}],
+  isConnected: () => true,
+  close: () => { console.log('disconnected'); },
+})}};"#,
+        )
+        .unwrap();
+        let executable = package.join("cli.js");
+        fs::write(&executable, "// stand-in for playwright CLI").unwrap();
+        let script = temp.path.join("control.js");
+        fs::write(
+            &script,
+            playwright_script(&executable, 9222, None, "return 42;"),
+        )
+        .unwrap();
+        let mut command = Command::new(node);
+        command.arg(script).kill_on_drop(true);
+        let result = time::timeout(Duration::from_secs(2), command.output())
+            .await
+            .expect("persistent script must exit without waiting for Chrome")
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = String::from_utf8_lossy(&result.stdout);
+        assert!(output.contains("42"), "{output}");
+        assert!(output.contains("disconnected"), "{output}");
+    }
+
     #[test]
-    fn generated_playwright_script_can_close_browser_explicitly() {
+    fn generated_playwright_script_connects_over_cdp() {
         let script = playwright_script(
             Path::new("/usr/local/bin/playwright"),
             9222,
             None,
             "return 'done';",
-            true,
         );
-
-        assert!(script.contains("const closeBrowser = true;"));
+        assert!(script.contains("chromium.connectOverCDP(endpoint)"));
         assert!(script.contains("await browser.close();"));
     }
 }
