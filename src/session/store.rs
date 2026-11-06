@@ -152,13 +152,20 @@ impl SessionStore {
         for id in self.list_session_ids()? {
             let label = match self.load(Some(&id)) {
                 Ok(session) => {
-                    let preview = session.messages.iter().find_map(|message| match message {
-                        crate::agent::AgentMessage::User { content }
-                        | crate::agent::AgentMessage::UserWithImages { content, .. } => {
-                            Some(collapse_preview(content, max_preview_len))
-                        }
-                        _ => None,
-                    });
+                    let preview = session
+                        .title
+                        .as_deref()
+                        .filter(|title| !title.is_empty())
+                        .map(|title| collapse_preview(title, max_preview_len))
+                        .or_else(|| {
+                            session.messages.iter().find_map(|message| match message {
+                                crate::agent::AgentMessage::User { content }
+                                | crate::agent::AgentMessage::UserWithImages { content, .. } => {
+                                    Some(collapse_preview(content, max_preview_len))
+                                }
+                                _ => None,
+                            })
+                        });
                     match preview {
                         Some(preview) if !preview.is_empty() => format!("{id}\t{preview}"),
                         _ => id,

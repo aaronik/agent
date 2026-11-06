@@ -13,6 +13,8 @@ pub struct Session {
     pub updated_at: DateTime<Local>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub messages: Vec<AgentMessage>,
 }
 
@@ -25,6 +27,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             model: None,
+            title: None,
             messages,
         }
     }

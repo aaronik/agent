@@ -8,7 +8,7 @@ use serde_json::json;
 fn session_schema_v1_round_trip() {
     let temp = tempfile::tempdir().expect("temp dir");
     let store = SessionStore::with_root(temp.path().join(".agent"));
-    let session = Session::new(
+    let mut session = Session::new(
         "s1".to_string(),
         vec![
             AgentMessage::System {
@@ -43,8 +43,10 @@ fn session_schema_v1_round_trip() {
         ],
     );
 
+    session.title = Some("Session Summary".into());
     store.save(&session).expect("save");
     let loaded = store.load(Some("s1")).expect("load");
+    assert_eq!(loaded.title.as_deref(), Some("Session Summary"));
     assert_eq!(loaded.schema_version, 1);
     assert_eq!(loaded.session_id, "s1");
     assert_eq!(loaded.messages, session.messages);
@@ -109,6 +111,24 @@ fn session_labels_are_ordered_by_recently_saved_first() {
 
     assert_eq!(labels[0], "aa-new\tnew conversation");
     assert_eq!(labels[1], "zz-old\told conversation");
+}
+
+#[test]
+fn resume_labels_use_saved_two_word_title_and_keep_id_for_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    let mut session = Session::new(
+        "specific-id".into(),
+        vec![AgentMessage::User {
+            content: "Can you change the terminal title for this conversation?".into(),
+        }],
+    );
+    session.title = Some("Terminal Titles".into());
+    store.save(&session).unwrap();
+    assert_eq!(
+        store.list_session_labels(80).unwrap(),
+        vec!["specific-id\tTerminal Titles"]
+    );
 }
 
 #[test]

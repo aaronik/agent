@@ -33,6 +33,24 @@ impl Provider for MockProvider {
         messages: &[AgentMessage],
         tools: &[ToolDefinition],
     ) -> Result<AssistantMessage, ProviderError> {
+        if tools.is_empty()
+            && messages.first().is_some_and(|message| {
+                matches!(message, AgentMessage::System { content } if content.starts_with("[TERMINAL TITLE]"))
+            })
+        {
+            if let Ok(delay) = std::env::var("AGENT_MOCK_TITLE_DELAY_MS")
+                && let Ok(delay) = delay.parse::<u64>()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            return Ok(AssistantMessage {
+                content: "Mock Conversation".to_string(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            });
+        }
         if tools.is_empty() {
             let content = messages
                 .iter()

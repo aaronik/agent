@@ -185,6 +185,74 @@ fn ctrl_c_at_prompt_prints_session_id_on_exit() {
 }
 
 #[test]
+#[cfg(unix)]
+fn tty_turn_sets_two_word_conversation_title() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let home = tempfile::tempdir().unwrap();
+    let mut master = 0;
+    let mut slave = 0;
+    // SAFETY: openpty initializes both descriptors on success.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: both descriptors are owned by this test.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .env("AGENT_NO_LIVE", "1")
+        .env("AGENT_MOCK_TITLE_DELAY_MS", "350")
+        .args([
+            "--model",
+            "mock",
+            "--single",
+            "--no-completion-sound",
+            "Can you change the terminal title for this conversation?",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        master.read_to_string(&mut output).unwrap();
+        output
+    });
+    assert!(child.wait().unwrap().success());
+    let output = reader.join().unwrap();
+    let response_at = output.find("Tool completed: hi").expect("main response");
+    let title_at = output
+        .find("\x1b]0;Mock Conversation\x07")
+        .expect("generated title");
+    assert!(
+        response_at < title_at,
+        "title blocked the main response: {output}"
+    );
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let saved = store.load(None).unwrap();
+    assert_eq!(saved.title.as_deref(), Some("Mock Conversation"));
+    assert!(
+        saved
+            .messages
+            .iter()
+            .any(|message| message.content().contains("Tool completed: hi"))
+    );
+}
+
+#[test]
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
@@ -1190,6 +1258,23 @@ fn slash_resume_completions_show_most_recent_sessions_first() {
 
     assert_eq!(values[0], "/resume aa-new\tnew conversation");
     assert_eq!(values[1], "/resume zz-old\told conversation");
+}
+
+#[test]
+fn slash_resume_completion_uses_ai_title_instead_of_first_message() {
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new(
+        "title-id".into(),
+        vec![agent_rs::agent::AgentMessage::User {
+            content: "A lengthy first request that is not the title".into(),
+        }],
+    );
+    session.title = Some("Conversation Titles".into());
+    store.save(&session).unwrap();
+    let values = completion_values_for_line(&store, "/resume ", 8);
+    assert!(values.contains(&"/resume title-id\tConversation Titles".to_string()));
+    assert!(!values.iter().any(|value| value.contains("A lengthy first")));
 }
 
 #[test]
