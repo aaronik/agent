@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentMessage;
+use crate::agent::{AgentMessage, SubagentUsage};
 
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 
@@ -15,6 +15,8 @@ pub struct Session {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_usages: Vec<SubagentUsage>,
     pub messages: Vec<AgentMessage>,
 }
 
@@ -28,6 +30,7 @@ impl Session {
             updated_at: now,
             model: None,
             title: None,
+            name_usages: Vec::new(),
             messages,
         }
     }

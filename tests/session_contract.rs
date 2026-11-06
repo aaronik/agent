@@ -5,6 +5,41 @@ use agent_rs::session::{Session, SessionStore};
 use serde_json::json;
 
 #[test]
+fn naming_usage_is_saved_and_included_in_cost_but_not_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(temp.path().join(".agent"));
+    let mut session = Session::new(
+        "name-cost".into(),
+        vec![AgentMessage::User {
+            content: "topic".into(),
+        }],
+    );
+    let before =
+        agent_rs::providers::format_cost_and_context_line(&session.messages, "mock", false);
+    session.name_usages.push(agent_rs::agent::SubagentUsage {
+        model: "mock".into(),
+        usage: Usage {
+            input_tokens: 42,
+            output_tokens: 2,
+            raw: Some(json!({"total_cost": 0.0123})),
+        },
+    });
+    store.save(&session).unwrap();
+    let loaded = store.load(Some("name-cost")).unwrap();
+    let after = agent_rs::providers::format_cost_and_context_line_with_usages(
+        &loaded.messages,
+        "mock",
+        false,
+        &loaded.name_usages,
+    );
+    assert!(after.contains("Cost: $0.0123"), "{after}");
+    assert_eq!(
+        before.split("Context ").nth(1),
+        after.split("Context ").nth(1)
+    );
+}
+
+#[test]
 fn session_schema_v1_round_trip() {
     let temp = tempfile::tempdir().expect("temp dir");
     let store = SessionStore::with_root(temp.path().join(".agent"));

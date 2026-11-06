@@ -1360,10 +1360,76 @@ fn slash_name_recomputes_title_from_saved_conversation() {
         .unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Recent Topic"));
-    assert_eq!(
-        store.load(Some("old-session")).unwrap().title.as_deref(),
-        Some("Recent Topic")
+    let saved = store.load(Some("old-session")).unwrap();
+    assert_eq!(saved.title.as_deref(), Some("Recent Topic"));
+    assert_eq!(saved.name_usages.len(), 1);
+    assert_eq!(saved.name_usages[0].usage.input_tokens, 42);
+    assert!(
+        saved
+            .messages
+            .iter()
+            .all(|message| message.content() != "Recent Topic")
     );
+}
+
+#[test]
+fn slash_name_accepts_exact_two_word_override_and_rejects_invalid_names() {
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new(
+        "named-session".into(),
+        vec![agent_rs::agent::AgentMessage::User {
+            content: "new topic".into(),
+        }],
+    );
+    session.model = Some("mock".into());
+    session.title = Some("Old Title".into());
+    store.save(&session).unwrap();
+    let output = agent_command()
+        .env("HOME", home.path())
+        .args([
+            "--model",
+            "mock",
+            "--resume",
+            "named-session",
+            "--single",
+            "/name New Name",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Name: New Name"));
+    let saved = store.load(Some("named-session")).unwrap();
+    assert_eq!(saved.title.as_deref(), Some("New Name"));
+    assert!(saved.name_usages.is_empty());
+    assert_eq!(
+        store.list_session_labels(80).unwrap(),
+        vec!["named-session\tNew Name"]
+    );
+    for invalid in [
+        "/name One",
+        "/name One Two Three",
+        "/name New \u{1b}]0;Hacked",
+    ] {
+        let output = agent_command()
+            .env("HOME", home.path())
+            .args([
+                "--model",
+                "mock",
+                "--resume",
+                "named-session",
+                "--single",
+                invalid,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: /name <two words>"));
+        assert_eq!(
+            store.load(Some("named-session")).unwrap().title.as_deref(),
+            Some("New Name")
+        );
+    }
 }
 
 #[test]

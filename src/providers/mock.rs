@@ -53,7 +53,11 @@ impl Provider for MockProvider {
             return Ok(AssistantMessage {
                 content: title.to_string(),
                 tool_calls: Vec::new(),
-                usage: None,
+                usage: Some(crate::agent::Usage {
+                    input_tokens: 42,
+                    output_tokens: 2,
+                    raw: Some(json!({"total_cost": 0.0123})),
+                }),
                 model: None,
                 metadata: Default::default(),
             });
