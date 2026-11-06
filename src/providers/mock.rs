@@ -43,8 +43,15 @@ impl Provider for MockProvider {
             {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
+            let title = if messages.iter().any(|message| {
+                matches!(message, AgentMessage::User { content } if content.contains("new topic"))
+            }) {
+                "Recent Topic"
+            } else {
+                "Mock Conversation"
+            };
             return Ok(AssistantMessage {
-                content: "Mock Conversation".to_string(),
+                content: title.to_string(),
                 tool_calls: Vec::new(),
                 usage: None,
                 model: None,

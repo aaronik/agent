@@ -1261,6 +1261,112 @@ fn slash_resume_completions_show_most_recent_sessions_first() {
 }
 
 #[test]
+#[cfg(unix)]
+fn old_titleless_session_is_named_when_resumed() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::{Command as StdCommand, Stdio};
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new(
+        "legacy".into(),
+        vec![
+            agent_rs::agent::AgentMessage::User {
+                content: "old topic".into(),
+            },
+            agent_rs::agent::AgentMessage::User {
+                content: "new topic".into(),
+            },
+        ],
+    );
+    session.model = Some("mock".into());
+    store.save(&session).unwrap();
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty initializes both descriptors on success.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: the descriptors returned by openpty are owned by this test.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .env("AGENT_NO_LIVE", "1")
+        .args([
+            "--model",
+            "mock",
+            "--single",
+            "--no-completion-sound",
+            "--resume",
+            "legacy",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        master.read_to_string(&mut output).unwrap();
+        output
+    });
+    assert!(child.wait().unwrap().success());
+    let output = reader.join().unwrap();
+    assert!(output.contains("\x1b]0;Recent Topic\x07"), "{output}");
+    assert_eq!(
+        store.load(Some("legacy")).unwrap().title.as_deref(),
+        Some("Recent Topic")
+    );
+}
+
+#[test]
+fn slash_name_recomputes_title_from_saved_conversation() {
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new(
+        "old-session".into(),
+        vec![
+            agent_rs::agent::AgentMessage::User {
+                content: "first request".into(),
+            },
+            agent_rs::agent::AgentMessage::User {
+                content: "new topic".into(),
+            },
+        ],
+    );
+    session.model = Some("mock".into());
+    session.title = Some("Old Title".into());
+    store.save(&session).unwrap();
+    let output = agent_command()
+        .env("HOME", home.path())
+        .args([
+            "--model",
+            "mock",
+            "--resume",
+            "old-session",
+            "--single",
+            "/name",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Recent Topic"));
+    assert_eq!(
+        store.load(Some("old-session")).unwrap().title.as_deref(),
+        Some("Recent Topic")
+    );
+}
+
+#[test]
 fn slash_resume_completion_uses_ai_title_instead_of_first_message() {
     let home = tempfile::tempdir().unwrap();
     let store = SessionStore::with_root(home.path().join(".agent"));
