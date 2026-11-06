@@ -62,6 +62,15 @@ impl TerminalDisplay {
         self.live_enabled
     }
 
+    /// Set the terminal title without interleaving an active render transaction.
+    pub fn set_terminal_title(&self, title: &str) {
+        if io::stdout().is_terminal()
+            && let Ok(_renderer) = self.renderer.lock()
+        {
+            write_render_transaction(&format!("\x1b]0;{title}\x07"), false);
+        }
+    }
+
     pub fn assistant_stream_remainder(streamed: &str, final_content: &str) -> String {
         if final_content.is_empty() || streamed.ends_with(final_content) {
             return String::new();

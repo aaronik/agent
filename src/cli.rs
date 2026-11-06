@@ -187,7 +187,7 @@ async fn run_with_args_and_prefill(
         print_agents_files(&loaded_agents_files);
     }
     replay_session(&session, &display);
-    show_conversation_title(&session);
+    show_conversation_title(&session, &display);
 
     if args.talk && (!args.images.is_empty() || !args.query.is_empty()) {
         let parsed_input = parse_user_input(&args.query.join(" "), &args.images)?;
@@ -219,18 +219,17 @@ async fn run_with_args_and_prefill(
     };
     let mut pending_images = Some(args.images.as_slice());
     let mut title_task: Option<tokio::task::JoinHandle<Option<NameResult>>> = None;
+    let mut pending_name_result: Option<NameResult> = None;
     if first_input.is_none()
         && session.title.is_none()
         && std::io::stdout().is_terminal()
         && title_request(&session.messages).is_some()
     {
-        title_task = Some(tokio::spawn(generate_conversation_title(
+        title_task = Some(spawn_conversation_title(
             session.messages.clone(),
             model_name.clone(),
-        )));
-        if !args.single {
-            finish_conversation_title(&mut title_task, &mut session, &store).await?;
-        }
+            Arc::clone(&display),
+        ));
     }
 
     loop {
@@ -315,7 +314,7 @@ async fn run_with_args_and_prefill(
                     if let Some(task) = title_task.take() {
                         task.abort();
                     }
-                    show_conversation_title(&session);
+                    show_conversation_title(&session, &display);
                     loop_runner = None;
                     if args.single {
                         break;
@@ -327,21 +326,19 @@ async fn run_with_args_and_prefill(
                     if let Some(task) = title_task.take() {
                         task.abort();
                     }
-                    show_conversation_title(&session);
+                    show_conversation_title(&session, &display);
                     if session.title.is_none()
                         && std::io::stdout().is_terminal()
                         && title_request(&session.messages).is_some()
                     {
-                        title_task = Some(tokio::spawn(generate_conversation_title(
+                        title_task = Some(spawn_conversation_title(
                             session.messages.clone(),
                             model_name.clone(),
-                        )));
+                            Arc::clone(&display),
+                        ));
                     }
                     session.model = Some(model_name.clone());
                     store.save(&session)?;
-                    if !args.single {
-                        finish_conversation_title(&mut title_task, &mut session, &store).await?;
-                    }
                     loop_runner = None;
                     print_agent_header(&model_name);
                     if args.single {
@@ -368,10 +365,11 @@ async fn run_with_args_and_prefill(
         session.messages.push(user_message);
         store.save(&session)?;
         if session.title.is_none() && title_task.is_none() && std::io::stdout().is_terminal() {
-            title_task = Some(tokio::spawn(generate_conversation_title(
+            title_task = Some(spawn_conversation_title(
                 session.messages.clone(),
                 model_name.clone(),
-            )));
+                Arc::clone(&display),
+            ));
         }
 
         if loop_runner.is_none() {
@@ -404,8 +402,8 @@ async fn run_with_args_and_prefill(
         let streamed_assistant = Arc::new(std::sync::Mutex::new(AssistantStreamBuffer::default()));
         let persistence_error = RefCell::new(None);
         let streamed_assistant_for_events = Arc::clone(&streamed_assistant);
-        let result = tokio::select! {
-            result = loop_runner
+        let result = {
+            let turn = loop_runner
                 .as_ref()
                 .expect("loop runner initialized")
                 .run_turn_cancellable_with_steering(
@@ -466,7 +464,9 @@ async fn run_with_args_and_prefill(
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
                             let mut checkpoint = session.clone();
-                            checkpoint.messages.extend(observed_messages.borrow().iter().cloned());
+                            checkpoint
+                                .messages
+                                .extend(observed_messages.borrow().iter().cloned());
                             checkpoint.replace_messages(checkpoint.messages.clone());
                             if let Err(error) = store.save(&checkpoint) {
                                 *persistence_error.borrow_mut() = Some(error);
@@ -474,14 +474,29 @@ async fn run_with_args_and_prefill(
                         }
                     },
                     |call| display.render_tool_start(call),
-                ) => result,
-            _ = cancellation_token.cancelled() => Err(crate::providers::ProviderError::Cancelled),
-            _ = tokio::signal::ctrl_c() => {
-                cancellation_token.cancel();
-                let _ = esc_abort.stop().await;
-                display.finish_turn();
-                println!("sessionId: {}", session.session_id);
-                return Err("cancelled".into());
+                );
+            tokio::pin!(turn);
+            loop {
+                tokio::select! {
+                result = &mut turn => break result,
+                title = async { title_task.as_mut().expect("title task").await }, if title_task.is_some() => {
+                    title_task = None;
+                    if let Ok(Some(name)) = title {
+                        if let Some(title) = name.title.as_deref() {
+                            display.set_terminal_title(title);
+                        }
+                        pending_name_result = Some(name);
+                    }
+                }
+                _ = cancellation_token.cancelled() => break Err(crate::providers::ProviderError::Cancelled),
+                _ = tokio::signal::ctrl_c() => {
+                    cancellation_token.cancel();
+                    let _ = esc_abort.stop().await;
+                    display.finish_turn();
+                    println!("sessionId: {}", session.session_id);
+                    return Err("cancelled".into());
+                }
+                }
             }
         };
         let typed_ahead = esc_abort.stop().await;
@@ -500,7 +515,10 @@ async fn run_with_args_and_prefill(
             store.save(&session)?;
         }
 
-        finish_conversation_title(&mut title_task, &mut session, &store).await?;
+        if let Some(name) = pending_name_result.take() {
+            record_name_result(&mut session, &store, name, &display)?;
+        }
+        finish_conversation_title(&mut title_task, &mut session, &store, &display).await?;
 
         match result {
             Ok(result) => {
@@ -528,7 +546,7 @@ async fn run_with_args_and_prefill(
         }
     }
 
-    finish_conversation_title(&mut title_task, &mut session, &store).await?;
+    finish_conversation_title(&mut title_task, &mut session, &store, &display).await?;
     Ok(())
 }
 
@@ -1508,15 +1526,30 @@ async fn generate_conversation_title(
     })
 }
 
+fn spawn_conversation_title(
+    messages: Vec<AgentMessage>,
+    model: String,
+    display: Arc<TerminalDisplay>,
+) -> tokio::task::JoinHandle<Option<NameResult>> {
+    tokio::spawn(async move {
+        let result = generate_conversation_title(messages, model).await;
+        if let Some(title) = result.as_ref().and_then(|result| result.title.as_deref()) {
+            display.set_terminal_title(title);
+        }
+        result
+    })
+}
+
 async fn finish_conversation_title(
     task: &mut Option<tokio::task::JoinHandle<Option<NameResult>>>,
     session: &mut Session,
     store: &SessionStore,
+    display: &TerminalDisplay,
 ) -> Result<(), Box<dyn Error>> {
     if let Some(task) = task.take()
         && let Ok(Some(result)) = task.await
     {
-        record_name_result(session, store, result)?;
+        record_name_result(session, store, result, display)?;
     }
     Ok(())
 }
@@ -1525,25 +1558,21 @@ fn record_name_result(
     session: &mut Session,
     store: &SessionStore,
     result: NameResult,
+    display: &TerminalDisplay,
 ) -> Result<(), Box<dyn Error>> {
     if let Some(usage) = result.usage {
         session.name_usages.push(usage);
     }
     if let Some(title) = result.title {
         session.title = Some(title);
-        show_conversation_title(session);
+        show_conversation_title(session, display);
     }
     store.save(session)?;
     Ok(())
 }
 
-fn show_conversation_title(session: &Session) {
-    use std::io::Write;
-    if std::io::stdout().is_terminal() {
-        let title = session.title.as_deref().unwrap_or("New Conversation");
-        let _ = write!(std::io::stdout(), "\x1b]0;{title}\x07");
-        let _ = std::io::stdout().flush();
-    }
+fn show_conversation_title(session: &Session, display: &TerminalDisplay) {
+    display.set_terminal_title(session.title.as_deref().unwrap_or("New Conversation"));
 }
 
 fn print_agent_header(model_name: &str) {
@@ -1701,7 +1730,7 @@ async fn handle_slash_command(
                         .await
                 {
                     let title = result.title.clone();
-                    record_name_result(session, store, result)?;
+                    record_name_result(session, store, result, display)?;
                     if let Some(title) = title {
                         println!("Name: {title}");
                     } else {

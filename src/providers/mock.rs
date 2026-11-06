@@ -81,6 +81,12 @@ impl Provider for MockProvider {
             });
         }
 
+        if let Ok(delay) = std::env::var("AGENT_MOCK_TURN_DELAY_MS")
+            && let Ok(delay) = delay.parse::<u64>()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+
         if messages
             .iter()
             .any(|message| matches!(message, AgentMessage::Tool(_)))

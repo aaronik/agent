@@ -253,6 +253,69 @@ fn tty_turn_sets_two_word_conversation_title() {
 }
 
 #[test]
+#[cfg(unix)]
+fn fast_title_appears_before_slow_first_response_and_persists() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::{Command as StdCommand, Stdio};
+    let home = tempfile::tempdir().unwrap();
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty initializes both descriptors on success.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: the descriptors returned by openpty are owned by this test.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .env("AGENT_NO_LIVE", "1")
+        .env("AGENT_MOCK_TURN_DELAY_MS", "300")
+        .args([
+            "--model",
+            "mock",
+            "--single",
+            "--no-completion-sound",
+            "run echo hi",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        master.read_to_string(&mut output).unwrap();
+        output
+    });
+    assert!(child.wait().unwrap().success());
+    let output = reader.join().unwrap();
+    let title = output.find("\x1b]0;Mock Conversation\x07").expect("title");
+    let response = output.find("Tool completed: hi").expect("response");
+    assert!(title < response, "title waited for main response: {output}");
+    let saved = SessionStore::with_root(home.path().join(".agent"))
+        .load(None)
+        .unwrap();
+    assert_eq!(saved.title.as_deref(), Some("Mock Conversation"));
+    assert_eq!(saved.name_usages.len(), 1);
+    assert!(
+        saved
+            .messages
+            .iter()
+            .any(|message| message.content().contains("Tool completed: hi"))
+    );
+}
+
+#[test]
 fn mock_single_turn_executes_tool_and_saves_session() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
@@ -1299,6 +1362,105 @@ fn slash_resume_completions_show_most_recent_sessions_first() {
 
     assert_eq!(values[0], "/resume aa-new\tnew conversation");
     assert_eq!(values[1], "/resume zz-old\told conversation");
+}
+
+#[test]
+#[cfg(unix)]
+fn legacy_session_shows_input_prompt_before_delayed_title() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new(
+        "legacy-prompt".into(),
+        vec![agent_rs::agent::AgentMessage::User {
+            content: "old topic".into(),
+        }],
+    );
+    session.model = Some("mock".into());
+    store.save(&session).unwrap();
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty initializes both descriptors on success.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: the descriptors returned by openpty are owned by this test.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .env("AGENT_NO_LIVE", "1")
+        .env("AGENT_MOCK_TITLE_DELAY_MS", "600")
+        .args([
+            "--model",
+            "mock",
+            "--no-completion-sound",
+            "--resume",
+            "legacy-prompt",
+        ])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    // SAFETY: master is a live PTY descriptor; nonblocking reads allow a deadline.
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && !output
+            .windows(b"\x1b[?2004h\x1b[6n".len())
+            .any(|window| window == b"\x1b[?2004h\x1b[6n")
+    {
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        output
+            .windows(b"\x1b[?2004h\x1b[6n".len())
+            .any(|window| window == b"\x1b[?2004h\x1b[6n"),
+        "prompt was not ready: {}",
+        String::from_utf8_lossy(&output)
+    );
+    master.write_all(b"\x1b[1;1R").unwrap();
+    while Instant::now() < deadline
+        && !output
+            .windows(b"\x1b]0;Mock Conversation\x07".len())
+            .any(|window| window == b"\x1b]0;Mock Conversation\x07")
+    {
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let output = String::from_utf8_lossy(&output);
+    let prompt_at = output.find("\x1b[?2004h\x1b[6n").unwrap();
+    let title_at = output
+        .find("\x1b]0;Mock Conversation\x07")
+        .expect("title should arrive while prompt open");
+    assert!(prompt_at < title_at, "{output}");
+    master.write_all(b"\x03").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        store.load(Some("legacy-prompt")).unwrap().title.as_deref(),
+        Some("Mock Conversation")
+    );
 }
 
 #[test]
