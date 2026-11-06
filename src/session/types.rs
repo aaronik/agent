@@ -13,6 +13,8 @@ pub struct Session {
     pub updated_at: DateTime<Local>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_git_writes: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -29,6 +31,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             model: None,
+            allow_git_writes: false,
             title: None,
             name_usages: Vec::new(),
             messages,

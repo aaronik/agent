@@ -79,8 +79,10 @@ fn session_schema_v1_round_trip() {
     );
 
     session.title = Some("Session Summary".into());
+    session.allow_git_writes = true;
     store.save(&session).expect("save");
     let loaded = store.load(Some("s1")).expect("load");
+    assert!(loaded.allow_git_writes);
     assert_eq!(loaded.title.as_deref(), Some("Session Summary"));
     assert_eq!(loaded.schema_version, 1);
     assert_eq!(loaded.session_id, "s1");

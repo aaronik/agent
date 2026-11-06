@@ -420,6 +420,46 @@ fn resume_restores_saved_model_unless_explicitly_overridden() {
 }
 
 #[test]
+fn allow_git_is_saved_and_restored_on_cli_resume() {
+    let home = tempfile::tempdir().expect("home");
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "/allow-git"])
+        .assert()
+        .success();
+    let session = store.load(None).expect("saved session");
+    assert!(session.allow_git_writes);
+
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--single", "--resume", &session.session_id, "/session"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git:allowed"));
+
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--single", "--resume", &session.session_id, "/allow-git"])
+        .assert()
+        .success();
+    assert!(!store.load(None).expect("disabled session").allow_git_writes);
+}
+
+#[test]
+fn allow_git_flag_is_saved_before_first_turn() {
+    let home = tempfile::tempdir().unwrap();
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "--allow-git", "/session"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git:allowed"));
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    assert!(store.load(None).unwrap().allow_git_writes);
+}
+
+#[test]
 fn resume_legacy_session_uses_last_assistant_model_or_default() {
     let home = tempfile::tempdir().expect("home");
     let store = SessionStore::with_root(home.path().join(".agent"));
@@ -450,6 +490,7 @@ fn resume_legacy_session_uses_last_assistant_model_or_default() {
             payload.to_string(),
         )
         .expect("legacy session");
+        assert!(!store.load(Some("legacy")).unwrap().allow_git_writes);
         agent_command()
             .env("HOME", home.path())
             .env("AGENT_MODEL", "mock:default")

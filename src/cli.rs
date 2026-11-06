@@ -168,9 +168,9 @@ async fn run_with_args_and_prefill(
     let store = SessionStore::new()?;
     let display = Arc::new(TerminalDisplay::new());
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
-    let mut allow_git_writes = args.allow_git;
-
     let (mut session, loaded_agents_files) = load_or_create_session_with_files(&args, &store)?;
+    let mut allow_git_writes = session.allow_git_writes || args.allow_git;
+    session.allow_git_writes = allow_git_writes;
     let mut model_name = effective_model_name(
         args.model
             .as_deref()
@@ -178,7 +178,7 @@ async fn run_with_args_and_prefill(
             .or_else(|| session.saved_model()),
     );
     session.model = Some(model_name.clone());
-    if args.resume.is_some() {
+    if args.resume.is_some() || args.allow_git {
         store.save(&session)?;
     }
     print_agent_header(&model_name);
@@ -1720,6 +1720,8 @@ async fn handle_slash_command(
         }
         "/allow-git" => {
             *allow_git_writes = !*allow_git_writes;
+            session.allow_git_writes = *allow_git_writes;
+            store.save(session)?;
             println!(
                 "git write commands {} for this session",
                 if *allow_git_writes {
@@ -1751,6 +1753,7 @@ async fn handle_slash_command(
             )?;
             crate::tools::chrome_tab::shutdown_chrome_tab_session().await;
             *session = new_session;
+            session.allow_git_writes = *allow_git_writes;
             session.model = Some(model_name.to_string());
             store.save(session)?;
             println!("cleared");
@@ -1790,6 +1793,7 @@ async fn handle_slash_command(
                 other => Some(other.split('\t').next().unwrap_or(other)),
             };
             *session = store.load(resume_id)?;
+            *allow_git_writes = session.allow_git_writes;
             let resumed_model = session.saved_model().unwrap_or(model_name).to_string();
             replay_session(session, display);
             println!("sessionId: {}", session.session_id);
@@ -2615,6 +2619,7 @@ mod tests {
             SlashCommandResult::Handled
         );
         assert!(allow_git_writes);
+        assert!(store.load(Some("test-session")).unwrap().allow_git_writes);
 
         handle_slash_command(
             "/allow-git",
@@ -2627,6 +2632,47 @@ mod tests {
         )
         .await
         .expect("disable command");
+        assert!(!allow_git_writes);
+    }
+
+    #[tokio::test]
+    async fn slash_resume_restores_saved_git_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::with_root(temp.path().join(".agent"));
+        let mut allowed = Session::new("allowed".into(), Vec::new());
+        allowed.allow_git_writes = true;
+        store.save(&allowed).unwrap();
+        store
+            .save(&Session::new("blocked".into(), Vec::new()))
+            .unwrap();
+        let mut current = Session::new("current".into(), Vec::new());
+        let mut allow_git_writes = false;
+        let args = Args::parse_from(["agent"]);
+        let display = TerminalDisplay::new();
+
+        handle_slash_command(
+            "/resume allowed",
+            &args,
+            &store,
+            &mut current,
+            &display,
+            "mock",
+            &mut allow_git_writes,
+        )
+        .await
+        .unwrap();
+        assert!(allow_git_writes);
+        handle_slash_command(
+            "/resume blocked",
+            &args,
+            &store,
+            &mut current,
+            &display,
+            "mock",
+            &mut allow_git_writes,
+        )
+        .await
+        .unwrap();
         assert!(!allow_git_writes);
     }
 
