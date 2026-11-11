@@ -318,13 +318,15 @@ fn interrupted_tool_output(call: &ToolCall) -> AgentMessage {
         content: "[HARNESS] Tool execution was interrupted or its result was not saved. The outcome is unknown; it may have had side effects. Verify the current state before retrying.".to_string(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     })
 }
 
 fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
     messages_with_tool_outputs(messages)
         .iter()
-        .map(|message| match message.as_ref() {
+        .flat_map(|message| {
+            let value = match message.as_ref() {
             AgentMessage::System { content } => json!({"role": "system", "content": content}),
             AgentMessage::Monitor { content } => json!({"role": "user", "content": format!("[AUTOMATED MONITOR EVENT — not a user message]\n{content}")}),
             AgentMessage::User { content } => json!({"role": "user", "content": content}),
@@ -364,8 +366,20 @@ fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
                 "tool_call_id": result.tool_call_id,
                 "content": result.content
             }),
+            };
+            let mut entries = vec![value];
+            if let AgentMessage::Tool(result) = message.as_ref()
+                && !result.images.is_empty() {
+                    entries.push(json!({
+                        "role": "user",
+                        "content": std::iter::once(json!({"type":"text", "text":format!("Visual result of browser tool call {}: {}", result.tool_call_id, result.content)}))
+                            .chain(result.images.iter().map(|image| json!({"type":"image_url", "image_url":{"url":image_data_url(image)}})))
+                            .collect::<Vec<_>>()
+                    }));
+                }
+            entries
         })
-        .collect()
+        .collect::<Vec<_>>()
 }
 
 fn image_data_url(image: &crate::agent::ImageAttachment) -> String {
@@ -431,6 +445,14 @@ fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
                     "call_id": result.tool_call_id,
                     "output": result.content
                 }));
+                if !result.images.is_empty() {
+                    input.push(json!({
+                        "role": "user",
+                        "content": std::iter::once(json!({"type":"input_text", "text":format!("Visual result of browser tool call {}: {}", result.tool_call_id, result.content)}))
+                            .chain(result.images.iter().map(|image| json!({"type":"input_image", "image_url":image_data_url(image)})))
+                            .collect::<Vec<_>>()
+                    }));
+                }
             }
         }
     }

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Controls only tabs opened by Agent in your existing Chrome window.",
   "permissions": ["tabs", "tabGroups", "scripting", "alarms", "storage"],
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup.html" }
 }

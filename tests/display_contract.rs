@@ -201,8 +201,11 @@ fn assistant_tables_align_and_stream_without_raw_markdown() {
 #[test]
 fn assistant_tables_have_horizontal_borders_between_logical_rows() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
-    let source = "Before\n\n| Name | Detail |\n| :--- | ---: |\n| Alice | A long detail that should wrap onto multiple physical lines without getting a rule through the middle of its cell. |\n| Bob | short |\n\nAfter\n";
-    let replay = TerminalDisplay::new().format_assistant_content(source);
+    let detail = "A long detail that should wrap onto multiple physical lines without getting a rule through the middle of its cell. ".repeat(4);
+    let source = format!(
+        "Before\n\n| Name | Detail |\n| :--- | ---: |\n| Alice | {detail}|\n| Bob | short |\n\nAfter\n"
+    );
+    let replay = TerminalDisplay::new().format_assistant_content(&source);
     let plain = strip_ansi(&replay);
     let table: Vec<_> = plain
         .lines()
@@ -592,6 +595,7 @@ fn tool_panels_render_without_raw_tool_call_json() {
         content: "hi\n".to_string(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
 
     assert!(rendered.contains("╭─"));
@@ -618,6 +622,7 @@ fn long_tool_output_has_short_preview_and_clickable_complete_file() {
         content: content.clone(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
     assert!(rendered.contains("line 1"));
     assert!(rendered.contains("line 2"));
@@ -646,6 +651,7 @@ fn short_tool_output_has_no_file_link() {
         content: "line 1\nline 2".into(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
     assert!(!rendered.contains("\x1b]8;;"));
     assert!(rendered.contains("line 2"));
@@ -677,6 +683,7 @@ fn communicate_renders_as_progress_text() {
         content: "working".to_string(),
         elapsed_ms: Some(12),
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
 
     assert!(rendered.contains("working"));
@@ -709,6 +716,7 @@ fn tool_result_panel_shows_elapsed_time() {
         content: "ok".to_string(),
         elapsed_ms: Some(1_234),
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
 
     assert!(rendered.contains("[OK Done]"));
@@ -732,6 +740,7 @@ fn diff_panels_render_with_diff_ansi() {
         content: "Successfully replaced 1 occurrence(s)\n\nDiff:\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
         elapsed_ms: None,
                 subagent_usages: Vec::new(),
+                images: Vec::new(),
     });
 
     assert!(rendered.contains("Open full output"));
@@ -759,6 +768,7 @@ fn read_file_content_with_exit_code_text_still_renders_success() {
             .to_string(),
         elapsed_ms: Some(0),
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
 
     assert!(rendered.contains("read_file"));
@@ -791,6 +801,7 @@ fn shell_command_exit_code_marker_still_renders_error() {
         content: "boom\n(exit code: 7)".to_string(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
 
     assert!(rendered.contains("[ERR Done (7)]"));
@@ -924,6 +935,7 @@ fn tool_results_are_append_only_and_do_not_silently_drop_lines() {
         content: content.clone(),
         elapsed_ms: None,
         subagent_usages: Vec::new(),
+        images: Vec::new(),
     });
     assert!(!rendered.contains("\x1b[1A"));
     assert!(rendered.contains("line-000"));
@@ -1092,6 +1104,7 @@ fn running_tools_are_transient_even_across_output_and_footer_growth() {
             content: "RESULT-MARKER".into(),
             elapsed_ms: Some(123),
             subagent_usages: vec![],
+            images: Vec::new(),
         },
         Some(&call),
     );

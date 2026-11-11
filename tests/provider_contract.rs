@@ -916,6 +916,7 @@ async fn provider_repairs_interrupted_tool_history_without_reexecuting_calls() {
                         content: "real output".into(),
                         elapsed_ms: None,
                         subagent_usages: Vec::new(),
+                        images: Vec::new(),
                     }));
                 }
                 messages.push(AgentMessage::System {
@@ -1283,6 +1284,64 @@ async fn chat_provider_sends_images_as_openai_compatible_content_parts() {
 }
 
 #[tokio::test]
+async fn chat_provider_sends_screenshot_tool_image_to_vision_model() {
+    use agent_rs::agent::{ImageAttachment, ToolResult, ToolStatus};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        })))
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "openai".into(),
+        model: "gpt-test".into(),
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        flavor: ProviderFlavor::OpenAiChat,
+    });
+    provider
+        .complete(
+            &[
+                AgentMessage::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "browser".into(),
+                        arguments: json!({"action":"screenshot"}),
+                    }],
+                    usage: None,
+                    model: None,
+                    metadata: Default::default(),
+                }),
+                AgentMessage::Tool(ToolResult {
+                    tool_call_id: "call_1".into(),
+                    name: "browser".into(),
+                    status: ToolStatus::Success,
+                    content: "Screenshot of https://example.org/".into(),
+                    elapsed_ms: None,
+                    subagent_usages: Vec::new(),
+                    images: vec![ImageAttachment {
+                        media_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    }],
+                }),
+            ],
+            &[],
+        )
+        .await
+        .expect("response");
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["messages"][1]["role"], "tool");
+    assert_eq!(
+        body["messages"][2]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,aGVsbG8="
+    );
+}
+
+#[tokio::test]
 async fn responses_provider_sends_images_as_input_image_parts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1325,6 +1384,62 @@ async fn responses_provider_sends_images_as_input_image_parts() {
         json!({
             "type": "input_image", "image_url": "data:image/jpeg;base64,/9j/"
         })
+    );
+}
+
+#[tokio::test]
+async fn responses_provider_sends_screenshot_tool_image_to_vision_model() {
+    use agent_rs::agent::{ImageAttachment, ToolResult, ToolStatus};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output_text":"ok"})))
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "openai".into(),
+        model: "gpt-test".into(),
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        flavor: ProviderFlavor::OpenAiResponses,
+    });
+    provider
+        .complete(
+            &[
+                AgentMessage::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "browser".into(),
+                        arguments: json!({"action":"screenshot"}),
+                    }],
+                    usage: None,
+                    model: None,
+                    metadata: Default::default(),
+                }),
+                AgentMessage::Tool(ToolResult {
+                    tool_call_id: "call_1".into(),
+                    name: "browser".into(),
+                    status: ToolStatus::Success,
+                    content: "Screenshot".into(),
+                    elapsed_ms: None,
+                    subagent_usages: Vec::new(),
+                    images: vec![ImageAttachment {
+                        media_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    }],
+                }),
+            ],
+            &[],
+        )
+        .await
+        .expect("response");
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["input"][1]["type"], "function_call_output");
+    assert_eq!(
+        body["input"][2]["content"][1]["image_url"],
+        "data:image/png;base64,aGVsbG8="
     );
 }
 

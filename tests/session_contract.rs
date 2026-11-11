@@ -74,6 +74,7 @@ fn session_schema_v1_round_trip() {
                 content: "hi\n".to_string(),
                 elapsed_ms: Some(7),
                 subagent_usages: Vec::new(),
+                images: Vec::new(),
             }),
         ],
     );
@@ -252,6 +253,7 @@ fn session_search_ignores_tool_output_and_weak_generic_matches() {
                 content: "source mentions shasta_private_land.py".to_string(),
                 elapsed_ms: None,
                 subagent_usages: Vec::new(),
+                images: Vec::new(),
             })],
         ))
         .expect("save tool noise");
@@ -483,6 +485,7 @@ fn prompt_metadata_includes_subagent_response_costs() {
             },
             model: "openai:gpt-5.2".to_string(),
         }],
+        images: Vec::new(),
     })];
 
     let line = format_cost_and_context_line(&messages, "mock", false);

@@ -164,6 +164,16 @@ async function handle(request) {
     return {tab_id: id, url};
   }
   if (!/^https?:\/\//.test(tab.url || '')) throw Error('Only HTTP(S) pages can be accessed');
+  if (action === 'screenshot') {
+    // Chrome captures the active tab in a window, not an arbitrary background tab.
+    // Never activate or focus a tab just to take a screenshot.
+    const [active] = await chrome.tabs.query({active: true, windowId: tab.windowId});
+    if (active?.id !== id) throw Error('Screenshot requires the Agent tab to be the active tab in its window; open with focus:true only when the user explicitly requests focus.');
+    const image = await chrome.tabs.captureVisibleTab(tab.windowId, {format: 'png'});
+    const [stillActive] = await chrome.tabs.query({active: true, windowId: tab.windowId});
+    if (stillActive?.id !== id) throw Error('Active tab changed during screenshot; image discarded');
+    return {tab_id: id, url: tab.url, image};
+  }
   if (!['snapshot', 'click', 'type', 'scroll'].includes(action)) throw Error('Unknown action');
   const [{result}] = await chrome.scripting.executeScript({
     target: {tabId: id},
@@ -183,7 +193,7 @@ async function handle(request) {
 // Runs in the page's isolated world; never accepts arbitrary JavaScript from the agent.
 function pageAction(action, selector, text, pixels) {
   try {
-    if (action === 'snapshot') return {title: document.title, text: document.body?.innerText.slice(0, 20000) || '', links: [...document.querySelectorAll('a[href]')].slice(0, 100).map(a => ({text: a.innerText.slice(0, 120), href: a.href}))};
+    if (action === 'snapshot') return {title: document.title, text: document.body?.innerText || '', links: [...document.querySelectorAll('a[href]')].map(a => ({text: a.innerText, href: a.href}))};
     if (action === 'scroll') { window.scrollBy(0, pixels ?? 600); return {scrolled: true}; }
     const el = document.querySelector(selector);
     if (!el) throw Error(`No element matching ${selector}`);

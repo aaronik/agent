@@ -228,6 +228,29 @@ fn realtime_response_done_usage_contributes_to_cost_line() {
 }
 
 #[test]
+fn realtime_screenshot_tool_output_includes_image_item() {
+    use agent_rs::agent::ImageAttachment;
+    let items = conversation_item_create_events(&[AgentMessage::Tool(ToolResult {
+        tool_call_id: "screenshot_1".into(),
+        name: "browser".into(),
+        status: ToolStatus::Success,
+        content: "Screenshot".into(),
+        elapsed_ms: None,
+        subagent_usages: Vec::new(),
+        images: vec![ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }],
+    })]);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["item"]["type"], "function_call_output");
+    assert_eq!(
+        items[1]["item"]["content"][1]["image_url"],
+        "data:image/png;base64,aGVsbG8="
+    );
+}
+
+#[test]
 fn realtime_tool_output_events_match_ga_shape() {
     assert_eq!(
         function_call_output_event("call_1", "ok"),
@@ -381,6 +404,7 @@ fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
             content: "blue\n".to_string(),
             elapsed_ms: None,
             subagent_usages: Vec::new(),
+            images: Vec::new(),
         }),
     ]);
 

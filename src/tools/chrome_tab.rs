@@ -35,7 +35,7 @@ struct Lease {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct ChromeTabArgs {
-    /// One of: status, open, navigate, snapshot, click, type, scroll, close.
+    /// One of: status, open, navigate, snapshot, screenshot, click, type, scroll, close.
     pub action: String,
     /// Tab ID returned by open. Required for all tab actions except status and open.
     #[serde(default)]
@@ -74,7 +74,8 @@ pub async fn chrome_tab(args: ChromeTabArgs) -> Result<String, String> {
 
 fn validate(args: &ChromeTabArgs) -> Result<(), String> {
     match args.action.as_str() {
-        "status" | "open" | "navigate" | "snapshot" | "click" | "type" | "scroll" | "close" => {}
+        "status" | "open" | "navigate" | "snapshot" | "screenshot" | "click" | "type"
+        | "scroll" | "close" => {}
         _ => return Err("unknown browser action".into()),
     }
     if !matches!(args.action.as_str(), "status" | "open") && args.tab_id.is_none() {

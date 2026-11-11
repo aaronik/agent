@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::time::Instant;
 
-use crate::agent::{CancellationToken, ToolResult, ToolStatus};
+use crate::agent::{CancellationToken, ImageAttachment, ToolResult, ToolStatus};
 use crate::tools::browser::{PlaywrightBrowserSessionArgs, playwright_browser_session};
 use crate::tools::chrome_tab::{ChromeTabArgs, chrome_tab};
 use crate::tools::communicate::{CommunicateArgs, communicate};
@@ -80,7 +80,7 @@ impl ToolRegistry {
             ),
             definition::<ChromeTabArgs>(
                 "browser",
-                "Default tool for all browser activity. Use this first for browsing, including signed-in sites; use anonymous_browser_session only when live Chrome is unavailable or Playwright JavaScript is required. Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url, optional focus=true to select tab and focus Chrome window; defaults to background), navigate (tab_id,url), snapshot (tab_id), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). For open, omit focus or set focus=false by default. Only use focus=true when the user explicitly asks to focus the tab or window; do not infer permission from a site's behavior. Never inspect pre-existing tabs. This is distinct from anonymous_browser_session, which launches a separate browser.",
+                "Default tool for all browser activity. Use this first for browsing, including signed-in sites; use anonymous_browser_session only when live Chrome is unavailable or Playwright JavaScript is required. Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url, optional focus=true to select tab and focus Chrome window; defaults to background), navigate (tab_id,url), snapshot (tab_id, rendered text and links), screenshot (tab_id, visible viewport image sent to the model; only works when that Agent tab is already active in its window; never activates or focuses automatically), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). For open, omit focus or set focus=false by default. Only use focus=true when the user explicitly asks to focus the tab or window; do not infer permission from a site's behavior. Never inspect pre-existing tabs. This is distinct from anonymous_browser_session, which launches a separate browser.",
             ),
         ];
         // Monitors are enabled only for interactive sessions with a wake-up receiver.
@@ -136,6 +136,7 @@ impl ToolRegistry {
                 format!("unknown tool: {name}"),
                 Vec::new(),
                 started,
+                false,
             );
         }
 
@@ -149,10 +150,13 @@ impl ToolRegistry {
                     content,
                     Vec::new(),
                     started,
+                    false,
                 );
             }
         };
 
+        let preserve_browser_snapshot = name == "browser" && arguments["action"] == "snapshot";
+        let browser_screenshot = name == "browser" && arguments["action"] == "screenshot";
         let mut subagent_usages = Vec::new();
         let content = match name {
             "run_shell_command" => match serde_json::from_value::<RunShellCommandArgs>(arguments) {
@@ -222,19 +226,51 @@ impl ToolRegistry {
             _ => Err(format!("unknown tool: {name}")),
         };
 
-        let (status, content) = match content {
-            Ok(content) => (ToolStatus::Success, content),
-            Err(content) => (ToolStatus::Error, content),
+        let (status, content, images) = match content {
+            Ok(content) if browser_screenshot => match parse_browser_screenshot(&content) {
+                Ok((description, image)) => (ToolStatus::Success, description, vec![image]),
+                Err(error) => (ToolStatus::Error, error, Vec::new()),
+            },
+            Ok(content) => (ToolStatus::Success, content, Vec::new()),
+            Err(content) => (ToolStatus::Error, content, Vec::new()),
         };
-        tool_result(
+        let mut result = tool_result(
             tool_call_id,
             name,
             status,
             content,
             subagent_usages,
             started,
-        )
+            preserve_browser_snapshot,
+        );
+        result.images = images;
+        result
     }
+}
+
+fn parse_browser_screenshot(content: &str) -> Result<(String, ImageAttachment), String> {
+    let response: Value =
+        serde_json::from_str(content).map_err(|e| format!("Invalid screenshot response: {e}"))?;
+    let data_url = response["image"]
+        .as_str()
+        .ok_or("Screenshot has no image")?;
+    let data = data_url
+        .strip_prefix("data:image/png;base64,")
+        .ok_or("Screenshot is not a PNG data URL")?;
+    if data.is_empty() {
+        return Err("Screenshot is empty".into());
+    }
+    Ok((
+        format!(
+            "Screenshot of {} (tab {})",
+            response["url"].as_str().unwrap_or("page"),
+            response["tab_id"]
+        ),
+        ImageAttachment {
+            media_type: "image/png".into(),
+            data: data.into(),
+        },
+    ))
 }
 
 fn tool_result(
@@ -244,8 +280,13 @@ fn tool_result(
     content: String,
     subagent_usages: Vec<crate::agent::SubagentUsage>,
     started: Instant,
+    preserve_browser_snapshot: bool,
 ) -> ToolResult {
-    let content = truncate_tool_output(content, &status);
+    let content = if preserve_browser_snapshot && status == ToolStatus::Success {
+        content
+    } else {
+        truncate_tool_output(content, &status)
+    };
     ToolResult {
         tool_call_id,
         name: name.to_string(),
@@ -253,6 +294,56 @@ fn tool_result(
         content,
         elapsed_ms: Some(duration_ms(started)),
         subagent_usages,
+        images: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod browser_output_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_response_becomes_image_attachment_not_base64_text() {
+        let (description, image) = parse_browser_screenshot(
+            r#"{"url":"https://example.org","tab_id":42,"image":"data:image/png;base64,aGVsbG8="}"#,
+        )
+        .unwrap();
+        assert!(description.contains("https://example.org"));
+        assert!(!description.contains("aGVsbG8="));
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.data, "aGVsbG8=");
+        assert!(parse_browser_screenshot(r#"{"image":"data:text/html;base64,abc"}"#).is_err());
+    }
+
+    #[test]
+    fn browser_result_preserves_full_snapshot_but_other_tools_still_trim() {
+        let snapshot = format!("{{\"text\":\"{}END\"}}", "a".repeat(40_000));
+        let browser = tool_result(
+            "browser-call".into(),
+            "browser",
+            ToolStatus::Success,
+            snapshot.clone(),
+            Vec::new(),
+            Instant::now(),
+            true,
+        );
+        assert_eq!(browser.content, snapshot);
+        for (name, status, preserve) in [
+            ("fetch", ToolStatus::Success, false),
+            ("browser", ToolStatus::Success, false),
+            ("browser", ToolStatus::Error, true),
+        ] {
+            let other = tool_result(
+                "other-call".into(),
+                name,
+                status,
+                snapshot.clone(),
+                Vec::new(),
+                Instant::now(),
+                preserve,
+            );
+            assert!(other.content.contains("[Output trimmed by the harness"));
+        }
     }
 }
 

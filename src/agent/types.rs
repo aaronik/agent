@@ -34,6 +34,8 @@ pub struct ToolResult {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagent_usages: Vec<SubagentUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -11,6 +11,8 @@ function harness(savedEnabled = false) {
   const tabs = new Map([[3, {id: 3, url: 'https://private.example', windowId: 1, groupId: -1}]]);
   const createCalls = [];
   const windowFocusCalls = [];
+  const captureCalls = [];
+  let onCapture;
   const sockets = [];
   const timers = [];
   let now = 0;
@@ -34,9 +36,11 @@ function harness(savedEnabled = false) {
     tabs: {
       onRemoved: {addListener() {}},
       async get(id) { if (!tabs.has(id)) throw Error('missing tab'); return tabs.get(id); },
+      async query({active, windowId}) { return [...tabs.values()].filter(tab => tab.active === active && tab.windowId === windowId); },
       async create(options) {
         createCalls.push(options);
-        const tab = {id: nextId++, url: options.url, windowId: 1, groupId: -1};
+        if (options.active) for (const other of tabs.values()) other.active = false;
+        const tab = {id: nextId++, url: options.url, windowId: 1, groupId: -1, active: options.active};
         tabs.set(tab.id, tab);
         return tab;
       },
@@ -49,6 +53,7 @@ function harness(savedEnabled = false) {
       },
       async remove(id) { tabs.delete(id); },
       async update(id, {url}) { tabs.get(id).url = url; },
+      async captureVisibleTab(windowId, options) { captureCalls.push({windowId, options}); onCapture?.(); return 'data:image/png;base64,aGVsbG8='; },
     },
     windows: {async update(id, options) { windowFocusCalls.push({id, ...options}); }},
     tabGroups: {
@@ -61,10 +66,15 @@ function harness(savedEnabled = false) {
     runtime: {onMessage: {addListener(fn) { listener = fn; }}},
   };
   const context = vm.createContext({chrome, WebSocket: Socket, URL, Date: {now: () => now}, setTimeout: (fn, delay) => { timers.push({fn, delay}); return timers.length; }, clearTimeout() {}, console});
-  vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8') + '\nthis.testHandle = handle; this.testReady = ready;', context);
+  vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8') + '\nthis.testHandle = handle; this.testReady = ready; this.testPageAction = pageAction;', context);
   const send = message => new Promise(resolve => listener(message, {}, resolve));
-  return {context, send, sockets, local, tabs, createCalls, windowFocusCalls, groups, timers, alarm: () => alarmListener({name: 'bridge-check'}), advance: ms => { now += ms; }};
+  return {context, send, sockets, local, tabs, createCalls, windowFocusCalls, captureCalls, setOnCapture: fn => { onCapture = fn; }, groups, timers, alarm: () => alarmListener({name: 'bridge-check'}), advance: ms => { now += ms; }};
 }
+
+test('manifest grants Chrome screenshot capture permission', () => {
+  const manifest = JSON.parse(fs.readFileSync(__dirname + '/manifest.json', 'utf8'));
+  assert(manifest.host_permissions.includes('<all_urls>'));
+});
 
 test('disabled by default; enable connects, disable closes and blocks all commands', async () => {
   const h = harness();
@@ -119,6 +129,48 @@ test('new tabs join a green Agent group without grouping pre-existing tabs', asy
   assert.equal(snapshot.group.title, 'Agent');
   assert.equal(snapshot.group.color, 'green');
   assert.equal(snapshot.group.id, h.tabs.get(first.tab_id).groupId);
+});
+
+test('screenshot captures only an active owned tab without switching focus', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  const background = await h.context.testHandle({action: 'open', url: 'https://example.org'});
+  await assert.rejects(h.context.testHandle({action: 'screenshot', tab_id: 3}), /access denied/i);
+  await assert.rejects(h.context.testHandle({action: 'screenshot', tab_id: background.tab_id}), /active tab/i);
+  assert.equal(h.captureCalls.length, 0);
+  const active = await h.context.testHandle({action: 'open', url: 'https://example.org', focus: true});
+  const image = await h.context.testHandle({action: 'screenshot', tab_id: active.tab_id});
+  assert.equal(image.tab_id, active.tab_id);
+  assert.equal(image.url, 'https://example.org/');
+  assert.equal(image.image, 'data:image/png;base64,aGVsbG8=');
+  assert.equal(h.captureCalls.length, 1);
+  assert.equal(h.captureCalls[0].windowId, 1);
+  assert.equal(h.captureCalls[0].options.format, 'png');
+  assert.equal(h.windowFocusCalls.length, 1, 'screenshot must not focus the window');
+  await h.send({action: 'setEnabled', enabled: false});
+  await assert.rejects(h.context.testHandle({action: 'screenshot', tab_id: active.tab_id}), /disabled/i);
+  assert.equal(h.captureCalls.length, 1);
+});
+
+test('screenshot discards image if active tab changes during capture', async () => {
+  const h = harness(true);
+  await h.context.testReady;
+  const tab = await h.context.testHandle({action: 'open', url: 'https://example.org', focus: true});
+  h.setOnCapture(() => { h.tabs.get(tab.tab_id).active = false; h.tabs.get(3).active = true; });
+  await assert.rejects(h.context.testHandle({action: 'screenshot', tab_id: tab.tab_id}), /changed during screenshot/i);
+});
+
+test('snapshot includes all rendered text and links, without returning HTML', () => {
+  const h = harness(true);
+  const text = 'a'.repeat(25000) + 'END';
+  const anchors = Array.from({length: 130}, (_, i) => ({innerText: `link ${i}`, href: `https://example.org/${i}`}));
+  h.context.document = {title: 'Long page', body: {innerText: text}, querySelectorAll: () => anchors};
+  const result = h.context.testPageAction('snapshot');
+  assert.equal(result.title, 'Long page');
+  assert.equal(result.text, text);
+  assert.equal(result.links.length, 130);
+  assert.equal(result.links[129].href, 'https://example.org/129');
+  assert.equal('html' in result, false);
 });
 
 test('closing one agent session closes only its tabs', async () => {

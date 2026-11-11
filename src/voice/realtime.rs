@@ -347,11 +347,22 @@ fn conversation_items_for_message(message: &AgentMessage) -> Vec<Value> {
             }));
             items
         }
-        AgentMessage::Tool(result) => vec![json!({
-            "type": "function_call_output",
-            "call_id": result.tool_call_id,
-            "output": result.content
-        })],
+        AgentMessage::Tool(result) => {
+            let mut items = vec![json!({
+                "type": "function_call_output",
+                "call_id": result.tool_call_id,
+                "output": result.content
+            })];
+            if !result.images.is_empty() {
+                items.push(json!({
+                    "type": "message", "role": "user",
+                    "content": std::iter::once(json!({"type": "input_text", "text": format!("Visual result of browser tool call {}: {}", result.tool_call_id, result.content)}))
+                        .chain(result.images.iter().map(|image| json!({"type":"input_image", "image_url":format!("data:{};base64,{}", image.media_type, image.data)})))
+                        .collect::<Vec<_>>()
+                }));
+            }
+            items
+        }
         _ => Vec::new(),
     }
 }
