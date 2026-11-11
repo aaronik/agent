@@ -1327,3 +1327,35 @@ async fn responses_provider_sends_images_as_input_image_parts() {
         })
     );
 }
+
+#[tokio::test]
+async fn monitor_event_is_sent_to_chat_provider_as_labeled_non_user_input() {
+    use wiremock::matchers::body_partial_json;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({"messages": [
+            {"role":"user", "content":"[AUTOMATED MONITOR EVENT — not a user message]\n[Monitor triggered] ready"}
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "acknowledged"}}]
+        })))
+        .mount(&server).await;
+    let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+        provider: "ollama".into(),
+        model: "test".into(),
+        base_url: server.uri(),
+        api_key: "test".into(),
+        flavor: ProviderFlavor::OpenAiChat,
+    });
+    let response = provider
+        .complete(
+            &[AgentMessage::Monitor {
+                content: "[Monitor triggered] ready".into(),
+            }],
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.content, "acknowledged");
+}

@@ -211,7 +211,8 @@ impl SessionStore {
             for message in &session.messages {
                 let content = match message {
                     crate::agent::AgentMessage::User { content }
-                    | crate::agent::AgentMessage::UserWithImages { content, .. } => content,
+                    | crate::agent::AgentMessage::UserWithImages { content, .. }
+                    | crate::agent::AgentMessage::Monitor { content } => content,
                     crate::agent::AgentMessage::Assistant(message) => &message.content,
                     crate::agent::AgentMessage::System { .. }
                     | crate::agent::AgentMessage::Tool(_) => continue,

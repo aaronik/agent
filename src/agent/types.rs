@@ -71,6 +71,9 @@ pub enum AgentMessage {
     User {
         content: String,
     },
+    Monitor {
+        content: String,
+    },
     UserWithImages {
         content: String,
         images: Vec<ImageAttachment>,
@@ -83,6 +86,7 @@ impl AgentMessage {
     pub fn content(&self) -> &str {
         match self {
             Self::System { content }
+            | Self::Monitor { content }
             | Self::User { content }
             | Self::UserWithImages { content, .. } => content,
             Self::Assistant(message) => &message.content,

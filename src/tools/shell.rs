@@ -94,6 +94,23 @@ async fn run_command_output(
     }))
 }
 
+/// Return Some(output) only when the check exits successfully.
+pub(crate) async fn check_shell_command(
+    command: &str,
+    timeout: Duration,
+    allow_git_writes: bool,
+) -> Result<Option<String>, String> {
+    if !allow_git_writes && let Some(blocked) = blocked_git_write_operation(command) {
+        return Err(format!("blocked git write operation: `{blocked}`"));
+    }
+    match run_command_output(command, timeout, &CancellationToken::new()).await? {
+        CommandOutput::Completed(output) if output.status.success() => {
+            Ok(Some(format_completed_output(output)))
+        }
+        _ => Ok(None),
+    }
+}
+
 enum CommandOutput {
     Completed(CapturedOutput),
     TimedOut,

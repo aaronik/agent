@@ -202,6 +202,12 @@ impl TerminalDisplay {
     pub fn render_new_message(&self, message: &AgentMessage) {
         match message {
             AgentMessage::System { .. } | AgentMessage::Tool(_) => {}
+            AgentMessage::Monitor { content } => {
+                self.output(&format!(
+                    "\n[Monitor] {}\n\n",
+                    sanitize_terminal_text(content)
+                ));
+            }
             AgentMessage::User { content } => {
                 self.output(&format!("\n{}\n\n", sanitize_terminal_text(content)));
             }
@@ -573,7 +579,7 @@ fn remove_exit_code_marker(content: &str) -> String {
 
 /// Makes externally supplied text inert before it reaches a terminal. Renderer
 /// generated SGR sequences are added only after this boundary.
-fn sanitize_terminal_text(text: &str) -> String {
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
     text.chars()
         .map(|character| match character {
             '\x1b' => '␛',

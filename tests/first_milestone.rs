@@ -1946,3 +1946,143 @@ fn image_flag_accepts_an_image_in_single_text_mode() {
     assert_eq!(user["content"], "describe this");
     assert_eq!(user["images"][0]["media_type"], "image/png");
 }
+
+#[tokio::test]
+async fn monitor_wakes_once_and_can_be_stopped() {
+    use agent_rs::agent::{AgentMessage, ToolStatus};
+    use agent_rs::tools::ToolRegistry;
+    use agent_rs::tools::monitor::MonitorManager;
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (manager, mut events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+    let registry = ToolRegistry::new().with_monitor(manager);
+    let start = registry.execute("start".into(), "monitor", json!({
+        "intent": "wait for success", "action": "start", "cmd": "echo ready", "interval_seconds": 1, "message": "check done"
+    })).await;
+    assert_eq!(start.status, ToolStatus::Success);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(event.content.contains("check done"));
+    assert!(event.content.contains("ready"));
+    let serialized = serde_json::to_value(AgentMessage::Monitor {
+        content: event.content,
+    })
+    .unwrap();
+    assert_eq!(serialized["role"], "monitor");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+            .await
+            .is_err()
+    );
+    let stop = registry
+        .execute(
+            "stop".into(),
+            "monitor",
+            json!({
+                "intent": "stop polling", "action": "stop", "id": "missing"
+            }),
+        )
+        .await;
+    assert_eq!(stop.status, ToolStatus::Error);
+}
+
+#[tokio::test]
+async fn monitor_retries_failed_checks_and_stops_without_waking() {
+    use agent_rs::agent::ToolStatus;
+    use agent_rs::tools::ToolRegistry;
+    use agent_rs::tools::monitor::MonitorManager;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let flag = Arc::new(AtomicBool::new(false));
+    let (manager, mut events) = MonitorManager::new(Arc::clone(&flag));
+    let registry = ToolRegistry::new().with_monitor(manager);
+    let start = registry.execute("start".into(), "monitor", json!({
+        "intent": "wait for a condition", "action": "start", "cmd": "exit 1", "interval_seconds": 1
+    })).await;
+    let id = start.content.split_whitespace().last().unwrap();
+    assert_eq!(start.status, ToolStatus::Success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), events.recv())
+            .await
+            .is_err()
+    );
+    assert!(!flag.load(Ordering::SeqCst));
+    let stop = registry
+        .execute(
+            "stop".into(),
+            "monitor",
+            json!({
+                "intent": "stop polling", "action": "stop", "id": id
+            }),
+        )
+        .await;
+    assert_eq!(stop.status, ToolStatus::Success);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn monitor_rejects_bad_intervals_and_unknown_actions() {
+    use agent_rs::agent::ToolStatus;
+    use agent_rs::tools::{ToolRegistry, monitor::MonitorManager};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (manager, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+    let registry = ToolRegistry::new().with_monitor(manager);
+    for arguments in [
+        json!({"action": "start", "cmd": "true", "interval_seconds": 0}),
+        json!({"action": "start", "cmd": "  "}),
+        json!({"action": "wrong"}),
+    ] {
+        assert_eq!(
+            registry
+                .execute("bad".into(), "monitor", arguments)
+                .await
+                .status,
+            ToolStatus::Error
+        );
+    }
+}
+
+#[test]
+fn slash_monitors_shows_empty_state_without_provider() {
+    let home = tempfile::tempdir().unwrap();
+    agent_command()
+        .env("HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["--single", "/monitors"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active monitors"))
+        .stdout(predicates::str::contains("Unknown command").not());
+}
+
+#[tokio::test]
+async fn monitor_listing_shows_active_check_and_removes_stopped_check() {
+    use agent_rs::tools::{ToolRegistry, monitor::MonitorManager};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (manager, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+    let registry = ToolRegistry::new().with_monitor(manager.clone());
+    let started = registry.execute("start".into(), "monitor", json!({
+        "intent": "wait for build", "action": "start", "cmd": "exit 1", "interval_seconds": 7, "message": "build finished"
+    })).await;
+    let id = started.content.split_whitespace().last().unwrap();
+    let listing = manager.list();
+    assert!(listing.contains(id), "{listing}");
+    assert!(listing.contains("exit 1"), "{listing}");
+    assert!(listing.contains("7s"), "{listing}");
+    assert!(listing.contains("build finished"), "{listing}");
+    registry
+        .execute(
+            "stop".into(),
+            "monitor",
+            json!({"intent":"stop monitor", "action":"stop", "id":id}),
+        )
+        .await;
+    assert_eq!(manager.list(), "No active monitors.");
+}

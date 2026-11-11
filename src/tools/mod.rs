@@ -4,6 +4,7 @@ pub mod communicate;
 pub mod fetch;
 pub mod files;
 pub mod image;
+pub mod monitor;
 pub mod output;
 pub mod registry;
 pub mod shell;

@@ -64,6 +64,12 @@ Agent state is stored under `$HOME/.agent`.
 Pricing data is cached under `$HOME/.agent/pricing`.
 User-level instructions are read from `$HOME/.agent/AGENTS.md`.
 
+## Background monitors
+
+In an interactive text chat, ask the agent to monitor a condition (for example, “Let me know when the build finishes”). The `monitor` tool starts a background shell check and returns control to the prompt. It polls until the command exits successfully (status 0), then wakes the agent once with a message labeled as a monitor event, not a user message. Failed checks retry at the configured interval.
+
+Use `/monitors` to see active monitor IDs, commands, intervals, and wake-up messages. Ask the agent to stop a monitor by ID when you no longer need it. Monitors are scoped to the running process: they stop when it exits and are not restored when a session is resumed. Use checks that are safe to run repeatedly; the tool runs them on your machine with your normal shell permissions. Background monitoring is unavailable in `--single` mode.
+
 ## Finding saved conversations
 
 Use `/find browser playwright timeout` to search saved user and assistant messages.

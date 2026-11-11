@@ -309,6 +309,10 @@ pub fn conversation_item_create_events(messages: &[AgentMessage]) -> Vec<Value> 
 
 fn conversation_items_for_message(message: &AgentMessage) -> Vec<Value> {
     match message {
+        AgentMessage::Monitor { content } if !content.trim().is_empty() => vec![json!({
+            "type": "message", "role": "user",
+            "content": [{ "type": "input_text", "text": format!("[AUTOMATED MONITOR EVENT — not a user message]\n{content}") }]
+        })],
         AgentMessage::User { content } if !content.trim().is_empty() => vec![json!({
             "type": "message",
             "role": "user",

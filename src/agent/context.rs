@@ -15,6 +15,7 @@ pub fn count_tokens(messages: &[AgentMessage], model: &str) -> usize {
 fn message_to_text(message: &AgentMessage) -> String {
     match message {
         AgentMessage::System { content } => format!("system: {content}"),
+        AgentMessage::Monitor { content } => format!("monitor: {content}"),
         AgentMessage::User { content } => format!("user: {content}"),
         AgentMessage::UserWithImages { content, images } => {
             format!("user: {content} [attachments: {} image(s)]", images.len())

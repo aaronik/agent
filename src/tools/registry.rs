@@ -12,6 +12,7 @@ use crate::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
 };
 use crate::tools::image::{GenImageArgs, gen_image};
+use crate::tools::monitor::{MonitorArgs, MonitorManager};
 use crate::tools::output::truncate_tool_output;
 use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
 use crate::tools::spawn::{SpawnArgs, spawn_cancellable_with_usage};
@@ -27,6 +28,7 @@ pub struct ToolDefinition {
 pub struct ToolRegistry {
     definitions: Vec<ToolDefinition>,
     allow_git_writes: bool,
+    monitor: Option<MonitorManager>,
 }
 
 impl Default for ToolRegistry {
@@ -81,6 +83,7 @@ impl ToolRegistry {
                 "Default tool for all browser activity. Use this first for browsing, including signed-in sites; use anonymous_browser_session only when live Chrome is unavailable or Playwright JavaScript is required. Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url, optional focus=true to select tab and focus Chrome window; defaults to background), navigate (tab_id,url), snapshot (tab_id), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). For open, omit focus or set focus=false by default. Only use focus=true when the user explicitly asks to focus the tab or window; do not infer permission from a site's behavior. Never inspect pre-existing tabs. This is distinct from anonymous_browser_session, which launches a separate browser.",
             ),
         ];
+        // Monitors are enabled only for interactive sessions with a wake-up receiver.
         if include_spawn {
             definitions.push(definition::<SpawnArgs>(
                 "spawn",
@@ -91,7 +94,17 @@ impl ToolRegistry {
         Self {
             definitions,
             allow_git_writes,
+            monitor: None,
         }
+    }
+
+    pub fn with_monitor(mut self, monitor: MonitorManager) -> Self {
+        self.definitions.push(definition::<MonitorArgs>(
+            "monitor",
+            "Start a session-scoped background check and return control to the user. The shell command is polled until it exits 0, then the agent wakes once with a distinct monitor message. Failed checks retry; use stop with the returned ID to cancel, or list to see active IDs. Monitors end when the process exits. Do not use for untrusted commands.",
+        ));
+        self.monitor = Some(monitor);
+        self
     }
 
     pub fn definitions(&self) -> &[ToolDefinition] {
@@ -185,6 +198,13 @@ impl ToolRegistry {
             }
             "browser" => match serde_json::from_value::<ChromeTabArgs>(arguments) {
                 Ok(args) => chrome_tab(args).await,
+                Err(err) => Err(format!("invalid tool arguments: {err}")),
+            },
+            "monitor" => match serde_json::from_value::<MonitorArgs>(arguments) {
+                Ok(args) => self.monitor.as_ref().map_or_else(
+                    || Err("monitor unavailable".to_string()),
+                    |manager| manager.execute(args, self.allow_git_writes),
+                ),
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {

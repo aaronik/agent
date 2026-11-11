@@ -326,6 +326,7 @@ fn chat_messages(messages: &[AgentMessage]) -> Vec<Value> {
         .iter()
         .map(|message| match message.as_ref() {
             AgentMessage::System { content } => json!({"role": "system", "content": content}),
+            AgentMessage::Monitor { content } => json!({"role": "user", "content": format!("[AUTOMATED MONITOR EVENT — not a user message]\n{content}")}),
             AgentMessage::User { content } => json!({"role": "user", "content": content}),
             AgentMessage::UserWithImages { content, images } => json!({
                 "role": "user",
@@ -393,6 +394,9 @@ fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
         match message.as_ref() {
             AgentMessage::System { content } => {
                 input.push(json!({"role": "system", "content": content}));
+            }
+            AgentMessage::Monitor { content } => {
+                input.push(json!({"role": "user", "content": format!("[AUTOMATED MONITOR EVENT — not a user message]\n{content}")}));
             }
             AgentMessage::User { content } => {
                 input.push(json!({"role": "user", "content": content}));

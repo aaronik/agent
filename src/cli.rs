@@ -31,6 +31,7 @@ use crate::providers::{
 };
 use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
+use crate::tools::monitor::{MonitorManager, stop_all};
 
 const COMPLETION_MENU_NAME: &str = "completion_menu";
 const TOGGLE_TALK_HOST_COMMAND: &str = "agent:toggle-talk";
@@ -40,6 +41,8 @@ const SPINNER_UPDATE_INTERVAL: Duration = Duration::from_millis(128);
 enum PromptInput {
     Text(String),
     ToggleTalk,
+    Monitor(String),
+    MonitorBreak(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +170,10 @@ async fn run_with_args_and_prefill(
 
     let store = SessionStore::new()?;
     let display = Arc::new(TerminalDisplay::new());
+    let wake_signal = Arc::new(AtomicBool::new(false));
+    let (monitor_manager, mut monitor_events) = MonitorManager::new(Arc::clone(&wake_signal));
+    let monitor_enabled =
+        !args.single && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
     let (mut session, loaded_agents_files) = load_or_create_session_with_files(&args, &store)?;
     let mut allow_git_writes = session.allow_git_writes || args.allow_git;
@@ -261,22 +268,40 @@ async fn run_with_args_and_prefill(
             }
         }
 
-        let (user_input, rendered_by_reedline) = match first_input.take() {
-            Some(input) => (input, false),
+        let (user_input, rendered_by_reedline, monitor_event) = match first_input.take() {
+            Some(input) => (input, false, false),
             None => {
                 if args.single && !session.messages.is_empty() {
                     break;
                 }
-                match prompt_for_input(
-                    &store,
-                    &session,
-                    &model_name,
-                    allow_git_writes,
-                    prompt_prefill.take().as_deref(),
-                )
-                .await
-                {
-                    Ok(PromptInput::Text(input)) => (input, true),
+                let pending_event = monitor_events.try_recv().ok();
+                let prompt_result = if let Some(event) = pending_event {
+                    wake_signal.store(false, Ordering::SeqCst);
+                    Ok(PromptInput::Monitor(event.content))
+                } else {
+                    prompt_for_input(
+                        &store,
+                        &session,
+                        &model_name,
+                        allow_git_writes,
+                        prompt_prefill.take().as_deref(),
+                        Arc::clone(&wake_signal),
+                    )
+                    .await
+                };
+                match prompt_result {
+                    Ok(PromptInput::Text(input)) => (input, true, false),
+                    Ok(PromptInput::Monitor(content)) => (content, false, true),
+                    Ok(PromptInput::MonitorBreak(draft)) => {
+                        if !draft.is_empty() {
+                            prompt_prefill = Some(draft);
+                        }
+                        if let Ok(event) = monitor_events.try_recv() {
+                            (event.content, false, true)
+                        } else {
+                            continue;
+                        }
+                    }
                     Ok(PromptInput::ToggleTalk) => {
                         interaction_mode = InteractionMode::Talk;
                         loop_runner = None;
@@ -292,15 +317,19 @@ async fn run_with_args_and_prefill(
             }
         };
 
-        let image_paths = pending_images.take().unwrap_or_default();
-        let mut parsed_input = parse_user_input(&user_input, image_paths)?;
-        if parsed_input.images.is_empty() {
+        let image_paths = if monitor_event {
+            Vec::new()
+        } else {
+            pending_images.take().unwrap_or_default().to_vec()
+        };
+        let mut parsed_input = parse_user_input(&user_input, &image_paths)?;
+        if !monitor_event && parsed_input.images.is_empty() {
             match handle_slash_command(
                 &user_input,
                 &args,
                 &store,
                 &mut session,
-                &display,
+                (&display, &monitor_manager),
                 &model_name,
                 &mut allow_git_writes,
             )
@@ -313,6 +342,12 @@ async fn run_with_args_and_prefill(
                 SlashCommandResult::Handled => {
                     if let Some(task) = title_task.take() {
                         task.abort();
+                    }
+                    if user_input.trim() == "/clear"
+                        || user_input.trim() == "/new"
+                        || user_input.starts_with("/resume")
+                    {
+                        stop_all(&monitor_manager);
                     }
                     show_conversation_title(&session, &display);
                     loop_runner = None;
@@ -349,7 +384,11 @@ async fn run_with_args_and_prefill(
             }
         }
 
-        let user_message = if parsed_input.images.is_empty() {
+        let user_message = if monitor_event {
+            AgentMessage::Monitor {
+                content: parsed_input.content,
+            }
+        } else if parsed_input.images.is_empty() {
             AgentMessage::User {
                 content: parsed_input.content,
             }
@@ -377,6 +416,7 @@ async fn run_with_args_and_prefill(
                 &model_name,
                 allow_git_writes,
                 args.no_subagent,
+                monitor_enabled.then_some(monitor_manager.clone()),
             )?);
         }
         let status_line = format_cost_and_context_line_with_usages(
@@ -501,7 +541,9 @@ async fn run_with_args_and_prefill(
         };
         let typed_ahead = esc_abort.stop().await;
         if !typed_ahead.is_empty() {
-            prompt_prefill = Some(typed_ahead);
+            prompt_prefill
+                .get_or_insert_with(String::new)
+                .push_str(&typed_ahead);
         }
         display.finish_turn();
 
@@ -546,6 +588,7 @@ async fn run_with_args_and_prefill(
         }
     }
 
+    stop_all(&monitor_manager);
     finish_conversation_title(&mut title_task, &mut session, &store, &display).await?;
     Ok(())
 }
@@ -1480,6 +1523,7 @@ fn title_request(messages: &[AgentMessage]) -> Option<[AgentMessage; 2]> {
     for message in messages {
         let label = match message {
             AgentMessage::User { .. } | AgentMessage::UserWithImages { .. } => "USER",
+            AgentMessage::Monitor { .. } => "MONITOR",
             AgentMessage::Assistant(_) => "ASSISTANT",
             AgentMessage::Tool(_) => "TOOL",
             AgentMessage::System { content } if content.starts_with("[COMPACTED CONTEXT]") => {
@@ -1616,6 +1660,7 @@ async fn prompt_for_input(
     model_name: &str,
     allow_git_writes: bool,
     prefill: Option<&str>,
+    wake_signal: Arc<AtomicBool>,
 ) -> Result<PromptInput, Box<dyn Error>> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(
@@ -1637,6 +1682,7 @@ async fn prompt_for_input(
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     ));
     let mut line_editor = Reedline::create()
+        .with_break_signal(wake_signal)
         .use_bracketed_paste(true)
         .with_history(history)
         .with_completer(completer)
@@ -1665,6 +1711,11 @@ async fn prompt_for_input(
 
     match line_editor.read_line(&prompt)? {
         Signal::Success(input) => Ok(PromptInput::Text(input)),
+        Signal::ExternalBreak(draft) => {
+            // The editor keeps its draft in memory, but is rebuilt for the next prompt.
+            // Preserve the draft explicitly so a monitor does not destroy type-ahead.
+            Ok(PromptInput::MonitorBreak(draft))
+        }
         Signal::HostCommand(command) if command == TOGGLE_TALK_HOST_COMMAND => {
             Ok(PromptInput::ToggleTalk)
         }
@@ -1696,7 +1747,7 @@ async fn handle_slash_command(
     args: &Args,
     store: &SessionStore,
     session: &mut Session,
-    display: &TerminalDisplay,
+    (display, monitors): (&TerminalDisplay, &MonitorManager),
     model_name: &str,
     allow_git_writes: &mut bool,
 ) -> Result<SlashCommandResult, Box<dyn Error>> {
@@ -1713,6 +1764,12 @@ async fn handle_slash_command(
     match command {
         "/help" => {
             println!("{}", slash_help(store)?);
+        }
+        "/monitors" => {
+            println!(
+                "{}",
+                crate::display::terminal::sanitize_terminal_text(&monitors.list())
+            );
         }
         "/session" => {
             println!(
@@ -1944,6 +2001,7 @@ async fn compact_session(
 fn compaction_message_text(message: &AgentMessage) -> String {
     match message {
         AgentMessage::System { content } => format!("SYSTEM MEMORY:\n{content}"),
+        AgentMessage::Monitor { content } => format!("MONITOR:\n{content}"),
         AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
             format!("USER:\n{content}")
         }
@@ -1982,7 +2040,7 @@ fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bo
 }
 
 fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
-    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /monitors\n      Show active background monitors.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
         .to_string();
     let project_dir = std::env::current_dir()?;
     for skill in crate::skills::discover(store.root(), &project_dir)? {
@@ -2006,8 +2064,12 @@ fn build_loop_runner(
     model_name: &str,
     allow_git_writes: bool,
     no_subagent: bool,
+    monitor: Option<MonitorManager>,
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
-    let tools = build_tool_registry(allow_git_writes, !no_subagent);
+    let mut tools = build_tool_registry(allow_git_writes, !no_subagent);
+    if let Some(monitor) = monitor {
+        tools = tools.with_monitor(monitor);
+    }
     Ok(AgentLoop::new(
         build_provider(model_name)?,
         tools,
@@ -2068,6 +2130,7 @@ fn prompt_completion_candidates(store: &SessionStore) -> Vec<String> {
         "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),
+        "/monitors".to_string(),
         "/name".to_string(),
         "/new".to_string(),
         "/pricing refresh".to_string(),
@@ -2102,6 +2165,7 @@ fn completion_candidates_in_dir(
         "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),
+        "/monitors".to_string(),
         "/name".to_string(),
         "/new".to_string(),
         "/pricing refresh".to_string(),
@@ -2630,6 +2694,7 @@ mod tests {
         let store = SessionStore::with_root(temp.path().join(".agent"));
         let args = Args::parse_from(["agent"]);
         let display = TerminalDisplay::new();
+        let (monitors, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
         let mut session = Session::new("test-session".to_string(), Vec::new());
         let mut allow_git_writes = false;
 
@@ -2639,7 +2704,7 @@ mod tests {
                 &args,
                 &store,
                 &mut session,
-                &display,
+                (&display, &monitors),
                 "mock",
                 &mut allow_git_writes,
             )
@@ -2655,7 +2720,7 @@ mod tests {
             &args,
             &store,
             &mut session,
-            &display,
+            (&display, &monitors),
             "mock",
             &mut allow_git_writes,
         )
@@ -2678,13 +2743,14 @@ mod tests {
         let mut allow_git_writes = false;
         let args = Args::parse_from(["agent"]);
         let display = TerminalDisplay::new();
+        let (monitors, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
 
         handle_slash_command(
             "/resume allowed",
             &args,
             &store,
             &mut current,
-            &display,
+            (&display, &monitors),
             "mock",
             &mut allow_git_writes,
         )
@@ -2696,7 +2762,7 @@ mod tests {
             &args,
             &store,
             &mut current,
-            &display,
+            (&display, &monitors),
             "mock",
             &mut allow_git_writes,
         )
