@@ -969,7 +969,7 @@ fn single_without_query_does_not_require_provider_configuration() {
 }
 
 #[test]
-fn single_without_model_uses_gpt_6_sol_default() {
+fn single_without_model_uses_gpt_6_1_sol_default() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
     let mut cmd = agent_command();
@@ -981,7 +981,7 @@ fn single_without_model_uses_gpt_6_sol_default() {
         .arg("--single")
         .assert()
         .success()
-        .stdout(predicates::str::contains("model: gpt-6-sol"));
+        .stdout(predicates::str::contains("model: gpt-6.1-sol"));
 }
 
 #[test]
@@ -1325,13 +1325,13 @@ fn slash_completion_includes_models_command_and_model_ids() {
 
     let model_values = completion_values_for_line(&store, "/models ", 8);
     assert!(!model_values.contains(&"/models mock".to_string()));
-    assert!(model_values.contains(&"/models gpt-6-sol".to_string()));
-    assert!(model_values.contains(&"/models openai:gpt-6-sol".to_string()));
+    assert!(model_values.contains(&"/models gpt-6.1-sol".to_string()));
+    assert!(model_values.contains(&"/models openai:gpt-6.1-sol".to_string()));
 
     let fuzzy_values = completion_values_for_line(&store, "/models op", 10);
     assert_eq!(
         fuzzy_values.first(),
-        Some(&"/models openai:gpt-6-sol".to_string())
+        Some(&"/models openai:gpt-6.1-sol".to_string())
     );
 }
 
