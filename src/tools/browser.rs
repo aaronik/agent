@@ -1,511 +1,483 @@
-use std::fs;
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use serde_json::{Value, json};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time;
+use tokio_tungstenite::tungstenite::{
+    Message,
+    handshake::server::{Request, Response},
+};
 use uuid::Uuid;
 
-static BROWSER_SESSION: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
+const PORT: u16 = 17777;
+const ADDRESS: &str = "ws://127.0.0.1:17777/agent";
+// Chrome retries on a 30s alarm after its initial bounded reconnect burst.
+const FIRST_CONNECTION_WAIT: Duration = Duration::from_secs(35);
+static BRIDGE: OnceLock<Result<(), String>> = OnceLock::new();
+static LEASE: OnceLock<Arc<Mutex<Option<Lease>>>> = OnceLock::new();
+type PendingRequest = (Value, oneshot::Sender<Value>);
+type Connection = Arc<Mutex<ConnectionState>>;
+
+#[derive(Default)]
+struct ConnectionState {
+    sender: Option<mpsc::Sender<PendingRequest>>,
+    enabled: bool,
+}
+
+struct Lease {
+    socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlaywrightBrowserSessionArgs {
-    /// JavaScript to run inside an async function with `browser`, `context`, and `page` available.
-    /// Use normal Playwright APIs, e.g. `await page.goto("https://example.com"); return await page.title();`.
+pub struct BrowserArgs {
+    /// One of: status, open, navigate, snapshot, screenshot, click, type, scroll, close.
+    pub action: String,
+    /// Tab ID returned by open. Required for all tab actions except status and open.
     #[serde(default)]
-    pub javascript: String,
-    /// Optional URL to open before running JavaScript. Initial navigation waits only for
-    /// DOMContentLoaded so complex SPAs with long-lived requests do not time out. Omit it
-    /// on follow-up calls to keep the browser exactly where the previous call left it.
+    pub tab_id: Option<i64>,
+    /// HTTPS or HTTP URL for open or navigate.
     #[serde(default)]
     pub url: Option<String>,
-    /// Maximum time in seconds for the Playwright script.
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
-    /// Close the persistent browser session after this script runs. Set this to true once the task is complete.
+    /// CSS selector for click or type.
     #[serde(default)]
-    pub close: bool,
-    /// Discard any existing persistent browser session and start a fresh session.
+    pub selector: Option<String>,
+    /// Text for type.
     #[serde(default)]
-    pub reset: bool,
-    /// Show the browser window to the human user. This does not improve model vision,
-    /// image loading, rendering, or screenshots. Never set this merely to inspect images;
-    /// leave it false unless the user directly asks to see the browser window.
+    pub text: Option<String>,
+    /// For open: select the new tab and focus its Chrome window. Defaults to false; omit or set false normally. Only set true if the user explicitly asks to focus the tab or window. Do not infer this from a site's behavior.
     #[serde(default)]
-    pub visible: bool,
+    pub focus: Option<bool>,
+    /// Vertical scroll distance in pixels (default 600).
+    #[serde(default)]
+    pub pixels: Option<i64>,
 }
 
-pub async fn playwright_browser_session(
-    args: PlaywrightBrowserSessionArgs,
-) -> Result<String, String> {
-    let playwright = find_playwright().ok_or_else(|| {
-        "playwright is not installed or not found in PATH; anonymous_browser_session cannot work. Install Playwright globally (for example: npm install -g playwright) and retry.".to_string()
-    })?;
-    let node = find_executable("node").ok_or_else(|| {
-        "node is not installed or not found in PATH; anonymous_browser_session requires Node.js to run Playwright.".to_string()
-    })?;
-
-    let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
-    let mut session_guard = session_mutex.lock().await;
-
-    if args.reset
-        && let Some(session) = session_guard.take()
-    {
-        close_session(session).await;
+pub async fn browser(args: BrowserArgs) -> Result<String, String> {
+    validate(&args)?;
+    if let Err(err) = BRIDGE.get_or_init(|| start_bridge().map_err(|e| e.to_string())) {
+        return Err(err.clone());
     }
-
-    let needs_start = match session_guard.as_mut() {
-        Some(session) => {
-            session.visible != args.visible
-                || session
-                    .child
-                    .try_wait()
-                    .map_err(|err| format!("failed to inspect Chrome process: {err}"))?
-                    .is_some()
-        }
-        None => true,
-    };
-
-    if needs_start {
-        if let Some(session) = session_guard.take() {
-            close_session(session).await;
-        }
-        *session_guard = Some(start_session(args.url.as_deref(), args.visible).await?);
+    let reply = request_host(serde_json::to_value(args).map_err(|e| e.to_string())?).await?;
+    if let Some(error) = reply.get("error").and_then(Value::as_str) {
+        Err(error.to_string())
+    } else {
+        Ok(reply
+            .get("result")
+            .map_or_else(|| reply.to_string(), Value::to_string))
     }
+}
 
-    let Some(session) = session_guard.as_ref() else {
-        return Err("failed to create browser session".to_string());
-    };
-
-    let script_path = session
-        .temp
-        .path
-        .join(format!("browser-control-{}.js", Uuid::new_v4()));
-    let script = playwright_script(
-        &playwright,
-        session.port,
-        args.url.as_deref(),
-        &args.javascript,
-    );
-    fs::write(&script_path, script)
-        .map_err(|err| format!("failed to write Playwright control script: {err}"))?;
-
-    // `kill_on_drop` makes the timeout path actively terminate the script
-    // process rather than merely abandoning Command::output's future.
-    let mut script_command = Command::new(node);
-    script_command
-        .arg(&script_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    script_command.process_group(0);
-    let script_child = script_command
-        .spawn()
-        .map_err(|err| format!("failed to start Playwright script: {err}"))?;
-    let output = match time::timeout(
-        Duration::from_secs(args.timeout),
-        script_child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(result) => result.map_err(|err| format!("failed to run Playwright script: {err}"))?,
-        Err(_) => {
-            // Dropping the child returned by wait_with_output honors kill_on_drop.
-            // Also remove the generated script on this formerly leaky path.
-            let _ = fs::remove_file(&script_path);
-            if args.close
-                && let Some(session) = session_guard.take()
-            {
-                close_session(session).await;
-            }
-            return Err(format!(
-                "Playwright anonymous_browser_session timed out after {}s",
-                args.timeout
-            ));
-        }
-    };
-
-    let _ = fs::remove_file(&script_path);
-
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-
-    if args.close
-        && let Some(session) = session_guard.take()
-    {
-        close_session(session).await;
+fn validate(args: &BrowserArgs) -> Result<(), String> {
+    match args.action.as_str() {
+        "status" | "open" | "navigate" | "snapshot" | "screenshot" | "click" | "type"
+        | "scroll" | "close" => {}
+        _ => return Err("unknown browser action".into()),
     }
+    if !matches!(args.action.as_str(), "status" | "open") && args.tab_id.is_none() {
+        return Err("tab_id is required for this action".into());
+    }
+    if matches!(args.action.as_str(), "open" | "navigate") {
+        let url = args.url.as_deref().ok_or("url is required")?;
+        let parsed = url::Url::parse(url).map_err(|_| "invalid URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("only HTTP(S) URLs are allowed".into());
+        }
+    }
+    if matches!(args.action.as_str(), "click" | "type") && args.selector.is_none() {
+        return Err("selector is required".into());
+    }
+    if args.action == "type" && args.text.is_none() {
+        return Err("text is required".into());
+    }
+    Ok(())
+}
 
-    if output.status.success() {
-        Ok(if combined.trim().is_empty() {
-            if args.close {
-                "Playwright script completed successfully with no output. Browser session closed."
-                    .to_string()
-            } else {
-                "Playwright script completed successfully with no output. Browser session remains open; call anonymous_browser_session with close=true when done.".to_string()
-            }
+fn start_bridge() -> std::io::Result<()> {
+    start_bridge_on_port(PORT)
+}
+
+fn start_bridge_on_port(port: u16) -> std::io::Result<()> {
+    match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+        Ok(listener) => {
+            listener.set_nonblocking(true)?;
+            let listener = TcpListener::from_std(listener)?;
+            let connection: Connection = Default::default();
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let connection = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, connection).await });
+                }
+            });
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn status(connected: bool, enabled: bool) -> Value {
+    json!({"result": if !connected {
+        "Chrome bridge is waiting for the extension. Load or reload chrome-extension in chrome://extensions."
+    } else if !enabled {
+        "Chrome extension is installed and connected, but its access switch is switched off. Turn it on in the extension popup to allow browser actions."
+    } else {
+        "Chrome extension connected and switched on. Opened tabs are controlled in your normal Chrome profile."
+    }})
+}
+
+async fn dispatch(connection: &Connection, request: Value) -> Result<Value, String> {
+    // The first call may start the bridge before the extension reconnects.
+    // Wait through the extension's 30-second alarm retry on first use.
+    let is_status = request["action"] == "status";
+    let is_cleanup = request["action"] == "close_owner";
+    let deadline = time::Instant::now()
+        + if is_cleanup {
+            Duration::from_secs(2)
         } else {
-            append_session_status(combined, args.close)
-        })
-    } else {
-        let code = output.status.code().unwrap_or(1);
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
+            FIRST_CONNECTION_WAIT
+        };
+    let sender = loop {
+        let state = connection.lock().await;
+        if is_status && state.sender.is_some() {
+            return Ok(status(true, state.enabled));
         }
-        combined.push_str(&format!("(exit code: {code})"));
-        Err(combined)
-    }
-}
-
-pub async fn shutdown_browser_session() {
-    let Some(session_mutex) = BROWSER_SESSION.get() else {
-        return;
+        if let Some(sender) = state.sender.clone() {
+            if !state.enabled && !is_cleanup {
+                return Err("Chrome extension access switch is switched off. Turn it on in the popup to allow browser actions.".into());
+            }
+            break sender;
+        }
+        drop(state);
+        if time::Instant::now() >= deadline {
+            if is_status {
+                return Ok(status(false, false));
+            }
+            return Err("Chrome extension not connected. Check the extension popup and retry; the bridge may have just started.".into());
+        }
+        time::sleep(Duration::from_millis(100)).await;
     };
-    let session = session_mutex.lock().await.take();
-    if let Some(session) = session {
-        close_session(session).await;
-    }
+    let (tx, rx) = oneshot::channel();
+    sender
+        .send((request, tx))
+        .await
+        .map_err(|_| "Chrome extension disconnected".to_string())?;
+    time::timeout(Duration::from_secs(25), rx)
+        .await
+        .map_err(|_| "Chrome extension did not respond within 25 seconds".to_string())?
+        .map_err(|_| "Chrome extension disconnected".to_string())
 }
 
-async fn start_session(url: Option<&str>, visible: bool) -> Result<BrowserSession, String> {
-    let chrome = chrome_path()?;
-    let temp = TempDirGuard::new()?;
-    let user_data_dir = temp.path.join("chrome-user-data");
-    fs::create_dir_all(&user_data_dir)
-        .map_err(|err| format!("failed to create temporary Chrome profile: {err}"))?;
-
-    let port = available_port()?;
-    let mut child = launch_chrome(&chrome, &user_data_dir, port, url, visible)?;
-
-    if let Err(err) = wait_for_cdp(port, &mut child).await {
-        let _ = child.kill().await;
-        return Err(err);
-    }
-
-    Ok(BrowserSession {
-        port,
-        child,
-        temp,
-        visible,
-    })
-}
-
-async fn close_session(mut session: BrowserSession) {
-    // Chrome has a multi-process architecture. Killing only its root process can leave
-    // helpers alive, which in turn prevents TempDirGuard from reclaiming the profile.
-    if let Some(pid) = session.child.id() {
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGTERM);
+async fn connect_lease(address: &str) -> Result<Lease, String> {
+    let (mut socket, _) = tokio_tungstenite::connect_async(address)
+        .await
+        .map_err(|_| {
+            "Cannot reach Chrome bridge on 127.0.0.1:17777; retry after the other agent exits."
+                .to_string()
+        })?;
+    let owner = Uuid::new_v4().to_string();
+    socket
+        .send(Message::Text(
+            json!({"owner":owner,"protocol":2}).to_string().into(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply = time::timeout(Duration::from_secs(2), socket.next()).await;
+    match reply {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            if serde_json::from_str::<Value>(&text)
+                .ok()
+                .is_some_and(|v| v["protocol"] == 2)
+            {
+                Ok(Lease { socket })
+            } else {
+                Err("incompatible Chrome bridge on 127.0.0.1:17777. A running agent owns this port with an older protocol; exit or update that process, then retry.".into())
+            }
         }
-        time::sleep(Duration::from_millis(500)).await;
-        if session.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+        _ => Err("Chrome bridge disconnected during handshake; retrying connection.".into()),
+    }
+}
+
+async fn connect_lease_with_takeover(address: &str, port: u16) -> Result<Lease, String> {
+    let deadline = time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match connect_lease(address).await {
+            Ok(lease) => return Ok(lease),
+            Err(error) if error.contains("incompatible Chrome bridge") => return Err(error),
+            Err(error) => {
+                start_bridge_on_port(port).map_err(|err| err.to_string())?;
+                if time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
-    let _ = session.child.kill().await;
-    let _ = session.child.wait().await;
-    cleanup_stale_chrome_code_sign_clones();
 }
 
-/// Removes only inactive macOS Chrome code-sign clone workspaces.
-///
-/// Chrome/Playwright can leak these under the per-user temporary directory on macOS.
-/// An entry is never removed if `lsof` reports an open file below it, so a normal Chrome
-/// instance that is presently executing from a clone is left alone.
-fn cleanup_stale_chrome_code_sign_clones() {
-    if !cfg!(target_os = "macos") {
-        return;
+async fn request_host(request: Value) -> Result<Value, String> {
+    let lease = LEASE.get_or_init(|| Arc::new(Mutex::new(None)));
+    let mut lease = lease.lock().await;
+    if lease.is_none() {
+        *lease = Some(connect_lease_with_takeover(ADDRESS, PORT).await?);
     }
-
-    let Some(temp_parent) = std::env::temp_dir().parent().map(Path::to_path_buf) else {
-        return;
-    };
-    let clone_root = temp_parent.join("X/com.google.Chrome.code_sign_clone");
-    let Ok(entries) = fs::read_dir(&clone_root) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let in_use = std::process::Command::new("lsof")
-            .arg("+D")
-            .arg(&path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|output| !output.stdout.is_empty())
-            // Do not delete when we cannot positively establish that it is unused.
-            .unwrap_or(true);
-        if !in_use {
-            let _ = fs::remove_dir_all(path);
-        }
+    let current = lease.as_mut().expect("lease initialized");
+    let result = async {
+        current
+            .socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let reply = time::timeout(Duration::from_secs(26), current.socket.next())
+            .await
+            .map_err(|_| "Chrome bridge did not respond".to_string())?
+            .ok_or("Chrome bridge disconnected")?
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str(reply.to_text().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
-}
-
-fn append_session_status(mut output: String, closed: bool) -> String {
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-    if closed {
-        output.push_str("[browser session closed]");
-    } else {
-        output.push_str(
-            "[browser session remains open; call anonymous_browser_session with close=true when done]",
-        );
-    }
-    output
-}
-
-fn launch_chrome(
-    chrome: &Path,
-    user_data_dir: &Path,
-    port: u16,
-    url: Option<&str>,
-    visible: bool,
-) -> Result<Child, String> {
-    let mut command = Command::new(chrome);
-    command
-        .args(chrome_launch_args(user_data_dir, port, url, visible))
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // Put Chrome and its helpers in their own process group so shutdown cannot
-        // affect the agent process and can reap the full browser tree.
-        .process_group(0)
-        .kill_on_drop(true);
-    command
-        .spawn()
-        .map_err(|err| format!("failed to launch Chrome: {err}"))
-}
-
-fn chrome_launch_args(
-    user_data_dir: &Path,
-    port: u16,
-    url: Option<&str>,
-    visible: bool,
-) -> Vec<String> {
-    let mut args = vec![
-        format!("--user-data-dir={}", user_data_dir.display()),
-        "--profile-directory=Default".to_string(),
-        format!("--remote-debugging-port={port}"),
-        "--remote-debugging-address=127.0.0.1".to_string(),
-        "--no-first-run".to_string(),
-        "--no-default-browser-check".to_string(),
-    ];
-    if !visible {
-        args.push("--headless=new".to_string());
-        args.push("--disable-gpu".to_string());
-    }
-    if let Some(url) = url {
-        args.push(url.to_string());
-    }
-    args
-}
-
-async fn wait_for_cdp(port: u16, child: &mut Child) -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{port}/json/version");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|err| format!("failed to inspect Chrome process: {err}"))?
-        {
-            return Err(format!(
-                "Chrome exited before DevTools became available (status: {status})"
-            ));
-        }
-        if let Ok(response) = reqwest::get(&url).await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        time::sleep(Duration::from_millis(200)).await;
-    }
-    Err("Chrome DevTools endpoint did not become available within 15s".to_string())
-}
-
-fn playwright_script(playwright: &Path, port: u16, url: Option<&str>, javascript: &str) -> String {
-    let package_dir = playwright_package_dir(playwright);
-    let package_dir_json =
-        serde_json::to_string(&package_dir.map(|path| path.display().to_string()))
-            .unwrap_or_else(|_| "null".to_string());
-    let endpoint_json = serde_json::to_string(&format!("http://127.0.0.1:{port}"))
-        .unwrap_or_else(|_| "null".to_string());
-    let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "null".to_string());
-    format!(
-        r#"const packageDir = {package_dir_json};
-const endpoint = {endpoint_json};
-const initialUrl = {url_json};
-function loadPlaywright() {{
-  try {{ return require('playwright'); }} catch (firstError) {{
-    if (packageDir) {{ return require(packageDir); }}
-    throw firstError;
-  }}
-}}
-(async () => {{
-  const playwright = loadPlaywright();
-  const browser = await playwright.chromium.connectOverCDP(endpoint);
-  try {{
-    const context = browser.contexts()[0] || await browser.newContext();
-    const pages = context.pages();
-    const page = pages[0] || await context.newPage();
-    if (initialUrl && page.url() === 'about:blank') {{
-      await page.goto(initialUrl, {{ waitUntil: 'domcontentloaded' }});
-    }}
-    const result = await (async ({{ browser, context, page, playwright }}) => {{
-{javascript}
-    }})({{ browser, context, page, playwright }});
-    if (result !== undefined) {{
-      if (typeof result === 'string') console.log(result);
-      else console.log(JSON.stringify(result, null, 2));
-    }}
-  }} finally {{
-    // A CDP-connected browser.close() disconnects this client, not the Chrome process.
-    // Without it the Node websocket keeps the script alive until the tool times out.
-    if (browser.isConnected()) await browser.close();
-  }}
-}})().catch(error => {{
-  console.error(error && error.stack ? error.stack : String(error));
-  process.exit(1);
-}});
-"#
-    )
-}
-
-fn playwright_package_dir(playwright: &Path) -> Option<PathBuf> {
-    let mut current = fs::canonicalize(playwright).ok()?;
-    if current.is_file() {
-        current.pop();
-    }
-    loop {
-        if current.file_name().is_some_and(|name| name == "playwright")
-            && current.join("package.json").is_file()
-        {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
-}
-
-fn chrome_path() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("AGENT_BROWSER_CHROME_PATH") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
+    .await;
+    if result.is_err() {
+        *lease = None;
+        // Status is read-only; retry it on a fresh lease after host turnover.
+        if request["action"] == "status" {
+            let mut fresh = connect_lease_with_takeover(ADDRESS, PORT).await?;
+            fresh
+                .socket
+                .send(Message::Text(request.to_string().into()))
+                .await
+                .map_err(|e| e.to_string())?;
+            let reply = time::timeout(Duration::from_secs(26), fresh.socket.next())
+                .await
+                .map_err(|_| "Chrome bridge did not respond".to_string())?
+                .ok_or("Chrome bridge disconnected")?
+                .map_err(|e| e.to_string())?;
+            let response = serde_json::from_str(reply.to_text().map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            *lease = Some(fresh);
+            return Ok(response);
         }
         return Err(format!(
-            "AGENT_BROWSER_CHROME_PATH does not point to a file: {}",
-            path.display()
+            "Chrome bridge connection was lost during {}. The outcome is unknown; check Agent-owned tabs before retrying. The next call will reconnect automatically.",
+            request["action"]
         ));
     }
-
-    chrome_candidates()
-        .into_iter()
-        .find(|path| path.is_file())
-        .or_else(|| find_executable("google-chrome"))
-        .or_else(|| find_executable("chrome"))
-        .or_else(|| find_executable("chromium"))
-        .or_else(|| find_executable("chromium-browser"))
-        .ok_or_else(|| "could not find Google Chrome; set AGENT_BROWSER_CHROME_PATH".to_string())
+    result
 }
 
-fn chrome_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    #[cfg(target_os = "macos")]
+async fn release_lease(lease: &mut Option<Lease>) {
+    if let Some(mut lease) = lease.take() {
+        let _ = time::timeout(Duration::from_secs(3), async {
+            lease
+                .socket
+                .send(Message::Text(json!({"release":true}).to_string().into()))
+                .await?;
+            // The bridge acknowledges only after the extension removes this owner's tabs.
+            let _ = lease.socket.next().await;
+            lease.socket.close(None).await
+        })
+        .await;
+    }
+}
+
+pub async fn shutdown_browser_tabs() {
+    if let Some(lease) = LEASE.get() {
+        release_lease(&mut *lease.lock().await).await;
+    }
+}
+
+#[allow(clippy::result_large_err)] // tungstenite requires a large ErrorResponse from this callback.
+async fn serve_peer(stream: TcpStream, connection: Connection) {
+    let (role_tx, role_rx) = oneshot::channel();
+    let mut role_tx = Some(role_tx);
+    let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request, response: Response| {
+        let role = match req.uri().path() {
+            "/agent" => "agent",
+            _ => "extension",
+        };
+        if let Some(tx) = role_tx.take() {
+            let _ = tx.send(role);
+        }
+        check_origin(req, response)
+    })
+    .await;
+    let Ok(ws) = ws else { return };
+    let Ok(role) = role_rx.await else { return };
+    if role == "extension" {
+        serve_extension(ws, connection).await;
+    } else {
+        serve_agent(ws, connection).await;
+    }
+}
+
+async fn serve_agent(
+    mut ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+    connection: Connection,
+) {
+    let Ok(Some(Ok(Message::Text(first)))) = time::timeout(Duration::from_secs(5), ws.next()).await
+    else {
+        return;
+    };
+    let Ok(hello) = serde_json::from_str::<Value>(&first) else {
+        return;
+    };
+    let Some(owner) = hello
+        .get("owner")
+        .and_then(Value::as_str)
+        .filter(|id| Uuid::parse_str(id).is_ok())
+    else {
+        return;
+    };
+    let owner = owner.to_string();
+    if hello["protocol"] != 2 {
+        return;
+    }
+    if ws
+        .send(Message::Text(json!({"protocol":2}).to_string().into()))
+        .await
+        .is_err()
     {
-        candidates.push(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ));
-        if let Some(home) = dirs::home_dir() {
-            candidates
-                .push(home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+        return;
+    }
+    while let Some(Ok(Message::Text(text))) = ws.next().await {
+        let Ok(mut request) = serde_json::from_str::<Value>(&text) else {
+            break;
+        };
+        if request["release"] == true {
+            break;
+        }
+        if request["action"] == "close_owner" {
+            let _ = ws
+                .send(Message::Text(
+                    json!({"error":"internal-only action"}).to_string().into(),
+                ))
+                .await;
+            continue;
+        }
+        if request["action"] == "open" {
+            request["owner"] = Value::String(owner.clone());
+        }
+        let reply = match dispatch(&connection, request).await {
+            Ok(reply) => reply,
+            Err(error) => json!({"error":error}),
+        };
+        if ws
+            .send(Message::Text(reply.to_string().into()))
+            .await
+            .is_err()
+        {
+            break;
         }
     }
-    #[cfg(target_os = "windows")]
+    let _ = time::timeout(
+        Duration::from_secs(2),
+        dispatch(&connection, json!({"action":"close_owner", "owner":owner})),
+    )
+    .await;
+    let _ = ws
+        .send(Message::Text(
+            json!({"cleanup_done":true}).to_string().into(),
+        ))
+        .await;
+}
+
+async fn serve_extension(
+    mut ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+    connection: Connection,
+) {
+    let (tx, mut rx) = mpsc::channel::<PendingRequest>(8);
+    if ws
+        .send(Message::Text(json!({"connected":true}).to_string().into()))
+        .await
+        .is_err()
     {
-        if let Ok(program_files) = std::env::var("ProgramFiles") {
-            candidates
-                .push(PathBuf::from(program_files).join("Google/Chrome/Application/chrome.exe"));
+        return;
+    }
+    {
+        let mut state = connection.lock().await;
+        state.sender = Some(tx.clone());
+        state.enabled = false;
+    }
+    loop {
+        tokio::select! {
+            item = rx.recv() => {
+                let Some((request, reply)) = item else { break };
+                if ws.send(Message::Text(request.to_string().into())).await.is_err() { break; }
+                let received = time::timeout(Duration::from_secs(24), async {
+                    loop {
+                        match ws.next().await {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                                    if value["event"] == "status" {
+                                        connection.lock().await.enabled = value["enabled"] == true;
+                                        continue;
+                                    }
+                                    break Some(value);
+                                }
+                                break None;
+                            },
+                            Some(Ok(Message::Ping(payload))) => { let _ = ws.send(Message::Pong(payload)).await; }
+                            Some(Ok(_)) => {},
+                            _ => break None,
+                        }
+                    }
+                }).await;
+                let Some(value) = received.ok().flatten() else { break };
+                let _ = reply.send(value);
+            }
+            event = ws.next() => {
+                match event {
+                    Some(Ok(Message::Ping(payload))) => { if ws.send(Message::Pong(payload)).await.is_err() { break; } }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(value) = serde_json::from_str::<Value>(&text)
+                            && value["event"] == "status" {
+                                connection.lock().await.enabled = value["enabled"] == true;
+                        }
+                    },
+                    Some(Ok(_)) => {},
+                    _ => break,
+                }
+            }
         }
-        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
-            candidates.push(
-                PathBuf::from(program_files_x86).join("Google/Chrome/Application/chrome.exe"),
-            );
-        }
     }
-    candidates
-}
-
-fn available_port() -> Result<u16, String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|err| format!("failed to allocate local debugging port: {err}"))?;
-    listener
-        .local_addr()
-        .map(|addr| addr.port())
-        .map_err(|err| format!("failed to inspect local debugging port: {err}"))
-}
-
-fn find_playwright() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("playwright"))
-        .find(|candidate| candidate.is_file())
-}
-
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(name);
-    if candidate.components().count() > 1 && candidate.is_file() {
-        return Some(candidate);
-    }
-
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
-fn default_timeout() -> u64 {
-    60
-}
-
-struct BrowserSession {
-    port: u16,
-    child: Child,
-    temp: TempDirGuard,
-    visible: bool,
-}
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("agent-browser-{}", Uuid::new_v4()));
-        fs::create_dir_all(&path)
-            .map_err(|err| format!("failed to create temporary browser directory: {err}"))?;
-        Ok(Self { path })
+    let mut guard = connection.lock().await;
+    if guard
+        .sender
+        .as_ref()
+        .is_some_and(|current| current.same_channel(&tx))
+    {
+        guard.sender = None;
+        guard.enabled = false;
     }
 }
 
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+#[allow(clippy::result_large_err)] // Signature required by tungstenite's Callback trait.
+fn check_origin(
+    req: &Request,
+    response: Response,
+) -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let extension_origin = origin.starts_with("chrome-extension://")
+        && origin["chrome-extension://".len()..]
+            .chars()
+            .all(|c| ('a'..='p').contains(&c))
+        && origin.len() == "chrome-extension://".len() + 32;
+    if (req.uri().path() == "/" && extension_origin)
+        || (req.uri().path() == "/agent" && origin.is_empty())
+    {
+        Ok(response)
+    } else {
+        Err(tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(403)
+            .body(Some("invalid bridge origin".to_string()))
+            .unwrap())
     }
 }
 
@@ -514,134 +486,661 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn shutdown_browser_session_stops_chrome_and_removes_its_profile() {
-        let temp = TempDirGuard::new().expect("temporary browser directory");
-        let profile_path = temp.path.clone();
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", "sleep 30"])
-            .process_group(0)
-            .kill_on_drop(true);
-        let child = command.spawn().expect("sleeping browser stand-in");
-
-        let session_mutex = BROWSER_SESSION.get_or_init(|| Mutex::new(None));
-        let mut session_guard = session_mutex.lock().await;
-        assert!(
-            session_guard.is_none(),
-            "test requires no active browser session"
-        );
-        *session_guard = Some(BrowserSession {
-            port: 0,
-            child,
-            temp,
-            visible: false,
+    async fn bridge_accepts_extension_without_pairing_and_forwards_agent_request() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let host = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let connection = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, connection).await });
+                }
+            }
         });
-        drop(session_guard);
-
-        shutdown_browser_session().await;
-
-        assert!(!profile_path.exists());
-    }
-
-    #[test]
-    fn chrome_launch_args_default_to_headless() {
-        let args = chrome_launch_args(Path::new("/tmp/profile"), 9222, None, false);
-
-        assert!(args.contains(&"--headless=new".to_string()));
-        assert!(args.contains(&"--disable-gpu".to_string()));
-    }
-
-    #[test]
-    fn chrome_launch_args_can_show_browser_explicitly() {
-        let args = chrome_launch_args(
-            Path::new("/tmp/profile"),
-            9222,
-            Some("https://example.com"),
-            true,
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
         );
-
-        assert!(!args.contains(&"--headless=new".to_string()));
-        assert!(args.contains(&"https://example.com".to_string()));
-    }
-
-    #[test]
-    fn generated_playwright_script_disconnects_even_on_error() {
-        let script = playwright_script(
-            Path::new("/usr/local/bin/playwright"),
-            9222,
-            Some("https://example.com"),
-            "return await page.title();",
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert!(
+            extension
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("connected")
         );
-
-        assert!(script.contains("finally {"));
-        assert!(script.contains("if (browser.isConnected()) await browser.close();"));
-    }
-
-    #[test]
-    fn generated_playwright_script_uses_domcontentloaded_for_initial_navigation() {
-        let script = playwright_script(
-            Path::new("/usr/local/bin/playwright"),
-            9222,
-            Some("https://app.slack.com"),
-            "return page.url();",
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":false}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            dispatch(&connection, json!({"action":"status"}))
+                .await
+                .unwrap()["result"]
+                .as_str()
+                .unwrap()
+                .contains("switched off")
         );
-
-        assert!(script.contains("await page.goto(initialUrl, { waitUntil: 'domcontentloaded' });"));
-        assert!(!script.contains("waitUntil: 'networkidle'"));
-        assert!(!script.contains("waitUntil: 'load'"));
+        assert!(
+            dispatch(&connection, json!({"action":"open"}))
+                .await
+                .unwrap_err()
+                .contains("switched off")
+        );
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(10)).await;
+        let responder = tokio::spawn(async move {
+            let request = extension.next().await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(request.to_text().unwrap()).unwrap()["action"],
+                "open"
+            );
+            extension
+                .send(Message::Text(
+                    json!({"result":{"tab_id":42}}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("{address}/agent"))
+            .await
+            .unwrap();
+        client
+            .send(Message::Text(
+                json!({"owner":Uuid::new_v4().to_string(),"protocol":2})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let hello = time::timeout(Duration::from_secs(2), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(hello.to_text().unwrap()).unwrap()["protocol"],
+            2
+        );
+        client
+            .send(Message::Text(
+                json!({"action":"open", "url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            client
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("42")
+        );
+        responder.await.unwrap();
+        host.await.unwrap();
     }
 
     #[tokio::test]
-    async fn persistent_playwright_script_disconnects_and_exits_without_closing_chrome() {
-        let Some(node) = find_executable("node") else {
-            return; // Node is optional for users who do not browse.
-        };
-        let temp = TempDirGuard::new().unwrap();
-        let package = temp.path.join("playwright");
-        fs::create_dir_all(&package).unwrap();
-        fs::write(package.join("package.json"), r#"{"name":"playwright"}"#).unwrap();
-        fs::write(
-            package.join("index.js"),
-            r#"module.exports = {chromium: {connectOverCDP: async () => ({
-  contexts: () => [{pages: () => [{url: () => 'about:blank'}]}],
-  isConnected: () => true,
-  close: () => { console.log('disconnected'); },
-})}};"#,
-        )
-        .unwrap();
-        let executable = package.join("cli.js");
-        fs::write(&executable, "// stand-in for playwright CLI").unwrap();
-        let script = temp.path.join("control.js");
-        fs::write(
-            &script,
-            playwright_script(&executable, 9222, None, "return 42;"),
-        )
-        .unwrap();
-        let mut command = Command::new(node);
-        command.arg(script).kill_on_drop(true);
-        let result = time::timeout(Duration::from_secs(2), command.output())
+    async fn two_agent_clients_share_bridge_and_cleanup_independently() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let acceptor = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut req = address.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
             .await
-            .expect("persistent script must exit without waiting for Chrome")
+            .unwrap();
+        let mut first = connect_lease(&format!("{address}/agent")).await.unwrap();
+        let mut second = connect_lease(&format!("{address}/agent")).await.unwrap();
+        first
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let first_owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first.socket.next().await.unwrap().unwrap();
+        second
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let second_owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(first_owner, second_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":2}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        second.socket.next().await.unwrap().unwrap();
+        first
+            .socket
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = extension.next().await.unwrap().unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first.socket.next().await.unwrap().unwrap();
+        second
+            .socket
+            .send(Message::Text(json!({"action":"status"}).to_string().into()))
+            .await
             .unwrap();
         assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
+            second
+                .socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("switched on")
         );
-        let output = String::from_utf8_lossy(&result.stdout);
-        assert!(output.contains("42"), "{output}");
-        assert!(output.contains("disconnected"), "{output}");
+        second
+            .socket
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = extension.next().await.unwrap().unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["owner"], second_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        second.socket.next().await.unwrap().unwrap();
+        acceptor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_bridge_during_handshake_is_not_called_incompatible() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.next().await;
+            ws.close(None).await.unwrap();
+        });
+        let err = connect_lease(&address).await.err().unwrap();
+        assert!(!err.contains("incompatible"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lease_rejects_older_bridge_protocol_before_sending_action() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let hello = ws.next().await.unwrap().unwrap();
+            assert!(hello.to_text().unwrap().contains("owner"));
+            // An old bridge treats the owner frame as a command and returns an error.
+            ws.send(Message::Text(
+                json!({"error":"Tab not opened by Agent; access denied"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            if let Ok(Some(Ok(Message::Text(text)))) =
+                time::timeout(Duration::from_millis(100), ws.next()).await
+            {
+                panic!("sent action to incompatible bridge: {text}");
+            }
+        });
+        let err = connect_lease(&address)
+            .await
+            .err()
+            .expect("old bridge must be refused");
+        assert!(err.contains("incompatible Chrome bridge"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_disconnect_notifies_extension_to_close_only_its_tabs() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let server = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let (mut agent, _) = tokio_tungstenite::connect_async(format!("{address}/agent"))
+            .await
+            .unwrap();
+        agent
+            .send(Message::Text(
+                json!({"owner":Uuid::new_v4().to_string(),"protocol":2})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let hello = agent.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(hello.to_text().unwrap()).unwrap()["protocol"],
+            2
+        );
+        agent
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let open = extension.next().await.unwrap().unwrap();
+        let owner = serde_json::from_str::<Value>(open.to_text().unwrap()).unwrap()["owner"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!owner.is_empty());
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":42}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        agent.next().await.unwrap().unwrap();
+        agent
+            .send(Message::Text(json!({"release":true}).to_string().into()))
+            .await
+            .unwrap();
+        let cleanup = time::timeout(Duration::from_secs(2), extension.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let ack = agent.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap()["cleanup_done"],
+            true
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abrupt_agent_disconnect_still_requests_owner_cleanup() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let server = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        let (mut agent, _) = tokio_tungstenite::connect_async(format!("{address}/agent"))
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        agent
+            .send(Message::Text(
+                json!({"owner":owner,"protocol":2}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        drop(agent);
+        let cleanup = time::timeout(Duration::from_secs(2), extension.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let cleanup: Value = serde_json::from_str(cleanup.to_text().unwrap()).unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":0}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_reset_releases_lease_and_next_turn_has_new_owner() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let connection: Connection = Default::default();
+        let acceptor = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                for _ in 0..3 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let state = connection.clone();
+                    tokio::spawn(async move { serve_peer(stream, state).await });
+                }
+            }
+        });
+        let mut request = address.as_str().into_client_request().unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("chrome-extension://{}", "a".repeat(32))
+                .parse()
+                .unwrap(),
+        );
+        let (mut extension, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        extension.next().await.unwrap().unwrap();
+        extension
+            .send(Message::Text(
+                json!({"event":"status","enabled":true}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let mut first = Some(connect_lease(&format!("{address}/agent")).await.unwrap());
+        first
+            .as_mut()
+            .unwrap()
+            .socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let opened: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        let first_owner = opened["owner"].as_str().unwrap().to_owned();
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        first
+            .as_mut()
+            .unwrap()
+            .socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        let release = tokio::spawn(async move { release_lease(&mut first).await });
+        let cleanup: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_eq!(cleanup["action"], "close_owner");
+        assert_eq!(cleanup["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        release.await.unwrap();
+        let mut next = connect_lease(&format!("{address}/agent")).await.unwrap();
+        next.socket
+            .send(Message::Text(
+                json!({"action":"open","url":"https://example.org"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let opened: Value =
+            serde_json::from_str(extension.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_ne!(opened["owner"], first_owner);
+        extension
+            .send(Message::Text(
+                json!({"result":{"tab_id":2}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        next.socket.next().await.unwrap().unwrap();
+        drop(next);
+        let cleanup = extension.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(cleanup.to_text().unwrap()).unwrap()["owner"],
+            opened["owner"]
+        );
+        extension
+            .send(Message::Text(
+                json!({"result":{"closed":1}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        acceptor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_takes_over_bridge_after_host_exits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let address = format!("ws://127.0.0.1:{port}/agent");
+        let lease = connect_lease_with_takeover(&address, port).await.unwrap();
+        assert!(matches!(
+            lease.socket.get_ref(),
+            tokio_tungstenite::MaybeTlsStream::Plain(_)
+        ));
     }
 
     #[test]
-    fn generated_playwright_script_connects_over_cdp() {
-        let script = playwright_script(
-            Path::new("/usr/local/bin/playwright"),
-            9222,
-            None,
-            "return 'done';",
-        );
-        assert!(script.contains("chromium.connectOverCDP(endpoint)"));
-        assert!(script.contains("await browser.close();"));
+    fn first_call_wait_covers_extension_alarm_retry() {
+        assert!(FIRST_CONNECTION_WAIT > Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn first_status_waits_briefly_for_extension_to_reconnect() {
+        let connection: Connection = Default::default();
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { dispatch(&connection, json!({"action":"status"})).await }
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        {
+            let mut state = connection.lock().await;
+            state.sender = Some(mpsc::channel::<PendingRequest>(1).0);
+            state.enabled = true;
+        }
+        let response = pending.await.unwrap().unwrap();
+        assert!(response["result"].as_str().unwrap().contains("switched on"));
+    }
+
+    #[tokio::test]
+    async fn first_browser_action_waits_for_extension_to_reconnect() {
+        let connection: Connection = Default::default();
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                dispatch(
+                    &connection,
+                    json!({"action":"open", "url":"https://example.org"}),
+                )
+                .await
+            }
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        let (tx, mut rx) = mpsc::channel::<PendingRequest>(8);
+        {
+            let mut state = connection.lock().await;
+            state.sender = Some(tx);
+            state.enabled = true;
+        }
+        let responder = tokio::spawn(async move {
+            let (_, reply) = rx.recv().await.unwrap();
+            reply.send(json!({"result":{"tab_id":42}})).unwrap();
+        });
+        assert_eq!(pending.await.unwrap().unwrap()["result"]["tab_id"], 42);
+        responder.await.unwrap();
+    }
+
+    #[test]
+    fn handshake_rejects_non_extension_origins() {
+        let request = Request::builder()
+            .header("origin", "https://attacker.test")
+            .body(())
+            .unwrap();
+        assert!(check_origin(&request, Response::new(())).is_err());
+        let request = Request::builder()
+            .uri("/")
+            .header("origin", format!("chrome-extension://{}", "a".repeat(32)))
+            .body(())
+            .unwrap();
+        assert!(check_origin(&request, Response::new(())).is_ok());
+        let request = Request::builder().uri("/agent").body(()).unwrap();
+        assert!(check_origin(&request, Response::new(())).is_ok());
+    }
+
+    #[test]
+    fn open_focus_option_is_forwarded_and_optional() {
+        let focused: BrowserArgs = serde_json::from_value(json!({
+            "action": "open", "url": "https://example.org", "focus": true
+        }))
+        .unwrap();
+        assert!(validate(&focused).is_ok());
+        assert_eq!(serde_json::to_value(&focused).unwrap()["focus"], true);
+
+        let default: BrowserArgs = serde_json::from_value(json!({
+            "action": "open", "url": "https://example.org"
+        }))
+        .unwrap();
+        assert!(validate(&default).is_ok());
+        assert_ne!(serde_json::to_value(&default).unwrap()["focus"], true);
+    }
+
+    #[test]
+    fn rejects_invalid_urls_and_missing_tab_ids() {
+        let mut args = BrowserArgs {
+            action: "open".into(),
+            tab_id: None,
+            url: Some("file:///etc/passwd".into()),
+            selector: None,
+            text: None,
+            pixels: None,
+            focus: None,
+        };
+        assert!(validate(&args).is_err());
+        args.url = Some("https://example.org".into());
+        assert!(validate(&args).is_ok());
+        args.action = "snapshot".into();
+        assert!(validate(&args).is_err());
     }
 }

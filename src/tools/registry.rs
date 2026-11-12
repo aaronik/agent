@@ -4,8 +4,10 @@ use serde_json::{Map, Value, json};
 use std::time::Instant;
 
 use crate::agent::{CancellationToken, ImageAttachment, ToolResult, ToolStatus};
-use crate::tools::browser::{PlaywrightBrowserSessionArgs, playwright_browser_session};
-use crate::tools::chrome_tab::{ChromeTabArgs, chrome_tab};
+use crate::tools::anonymous_browser_session::{
+    PlaywrightBrowserSessionArgs, playwright_browser_session,
+};
+use crate::tools::browser::{BrowserArgs, browser};
 use crate::tools::communicate::{CommunicateArgs, communicate};
 use crate::tools::fetch::{FetchArgs, fetch};
 use crate::tools::files::{
@@ -78,7 +80,7 @@ impl ToolRegistry {
                 "anonymous_browser_session",
                 "Fallback for anonymous, isolated Playwright browsing when live Chrome is unavailable or the task requires Playwright JavaScript. Prefer browser for normal browsing, especially signed-in sites, because it uses the user's existing Chrome profile without copying it. This tool always launches a fresh empty profile with no user cookies, accounts, extensions, or browsing data. Never use it for signed-in browsing. For complex SPAs, do not wait for full page load or networkidle; use waitUntil: 'domcontentloaded' (or 'commit' when only the navigation response is needed), then wait for specific locators or readiness signals. The browser session persists across calls by default; set close=true when done, or reset=true to start fresh. Visibility is only for showing a window to the human user: it does not improve model vision, image loading, or rendering, and screenshots work headlessly. Never set visible=true merely to inspect images or screenshots; set it only if the user directly asks to see the browser window. Requires global playwright in PATH.",
             ),
-            definition::<ChromeTabArgs>(
+            definition::<BrowserArgs>(
                 "browser",
                 "Default tool for all browser activity. Use this first for browsing, including signed-in sites; use anonymous_browser_session only when live Chrome is unavailable or Playwright JavaScript is required. Control only tabs opened by this tool in the user's existing Chrome profile via the locally loaded extension. Call action=status to distinguish connected/on, installed but switched off, and absent; the extension connects for status while off. Actions: open (url, optional focus=true to select tab and focus Chrome window; defaults to background), navigate (tab_id,url), snapshot (tab_id, rendered text and links), screenshot (tab_id, visible viewport image sent to the model; only works when that Agent tab is already active in its window; never activates or focuses automatically), click (tab_id,selector), type (tab_id,selector,text), scroll (tab_id,pixels), close (tab_id). For open, omit focus or set focus=false by default. Only use focus=true when the user explicitly asks to focus the tab or window; do not infer permission from a site's behavior. Never inspect pre-existing tabs. This is distinct from anonymous_browser_session, which launches a separate browser.",
             ),
@@ -200,8 +202,8 @@ impl ToolRegistry {
                     }
                 }
             }
-            "browser" => match serde_json::from_value::<ChromeTabArgs>(arguments) {
-                Ok(args) => chrome_tab(args).await,
+            "browser" => match serde_json::from_value::<BrowserArgs>(arguments) {
+                Ok(args) => browser(args).await,
                 Err(err) => Err(format!("invalid tool arguments: {err}")),
             },
             "monitor" => match serde_json::from_value::<MonitorArgs>(arguments) {

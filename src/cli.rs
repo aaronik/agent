@@ -1837,7 +1837,7 @@ async fn handle_slash_command(
                 },
                 store,
             )?;
-            crate::tools::chrome_tab::shutdown_chrome_tab_session().await;
+            crate::tools::browser::shutdown_browser_tabs().await;
             *session = new_session;
             session.allow_git_writes = *allow_git_writes;
             session.model = Some(model_name.to_string());

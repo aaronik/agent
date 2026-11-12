@@ -1,4 +1,6 @@
-use agent_rs::tools::browser::{PlaywrightBrowserSessionArgs, playwright_browser_session};
+use agent_rs::tools::anonymous_browser_session::{
+    PlaywrightBrowserSessionArgs, playwright_browser_session,
+};
 
 #[tokio::test]
 #[ignore = "manual live browser smoke; requires Chrome, node, and playwright"]

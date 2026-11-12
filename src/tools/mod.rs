@@ -1,5 +1,5 @@
+pub mod anonymous_browser_session;
 pub mod browser;
-pub mod chrome_tab;
 pub mod communicate;
 pub mod fetch;
 pub mod files;

@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use agent_rs::tools::browser::{PlaywrightBrowserSessionArgs, playwright_browser_session};
+use agent_rs::tools::anonymous_browser_session::{
+    PlaywrightBrowserSessionArgs, playwright_browser_session,
+};
+use agent_rs::tools::browser::BrowserArgs;
 use agent_rs::tools::fetch::{FetchArgs, fetch};
 use agent_rs::tools::files::{
     ReadFileArgs, SearchReplaceArgs, WriteFileArgs, read_file, search_replace, write_file,
@@ -689,7 +692,11 @@ async fn playwright_browser_session_rejects_retired_signed_in_argument_before_la
 }
 
 #[tokio::test]
-async fn chrome_tab_rejects_unowned_tab_requests_before_connecting() {
+async fn browser_rejects_missing_tab_ids_before_connecting() {
+    let args: BrowserArgs =
+        serde_json::from_value(json!({"action":"screenshot", "tab_id":42})).unwrap();
+    assert_eq!(args.action, "screenshot");
+    assert_eq!(args.tab_id, Some(42));
     let registry = ToolRegistry::new();
     let result = registry
         .execute(

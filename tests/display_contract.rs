@@ -203,7 +203,7 @@ fn assistant_tables_have_horizontal_borders_between_logical_rows() {
     use agent_rs::display::terminal::AssistantMarkdownStream;
     let detail = "A long detail that should wrap onto multiple physical lines without getting a rule through the middle of its cell. ".repeat(4);
     let source = format!(
-        "Before\n\n| Name | Detail |\n| :--- | ---: |\n| Alice | {detail}|\n| Bob | short |\n\nAfter\n"
+        "Before\n\n| Person | Detail |\n| :--- | ---: |\n| Alice | {detail}|\n| Bob | short |\n\nAfter\n"
     );
     let replay = TerminalDisplay::new().format_assistant_content(&source);
     let plain = strip_ansi(&replay);
