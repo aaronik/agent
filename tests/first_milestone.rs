@@ -1018,6 +1018,22 @@ fn slash_compact_summarizes_old_turns_and_archives_full_session() {
             metadata: Default::default(),
         }));
     }
+    // Spent usage on removed messages must remain in the session total.
+    if let AgentMessage::Assistant(assistant) = &mut messages[2] {
+        assistant.usage = Some(agent_rs::agent::Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            raw: Some(json!({"total_cost": 1.25})),
+        });
+        assistant.model = Some("openai:gpt-5.2".into());
+    }
+    if let AgentMessage::Assistant(assistant) = &mut messages[12] {
+        assistant.usage = Some(agent_rs::agent::Usage {
+            input_tokens: 50,
+            output_tokens: 5,
+            raw: Some(json!({"total_cost": 0.40})),
+        });
+    }
     let original = agent_rs::session::Session::new("compact-session".to_string(), messages);
     store.save(&original).expect("save session");
 
@@ -1068,6 +1084,112 @@ fn slash_compact_summarizes_old_turns_and_archives_full_session() {
         serde_json::from_slice(&std::fs::read(archives[0].path()).expect("archive payload"))
             .expect("archived session");
     assert_eq!(archived.messages, original.messages);
+    let info = agent_command()
+        .env("HOME", temp_home.path())
+        .args([
+            "--model",
+            "mock",
+            "--single",
+            "--resume",
+            "compact-session",
+            "/session",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(info).unwrap().contains("Cost: $1.6500"));
+    assert_eq!(compacted.compacted_usages.len(), 1);
+}
+
+#[tokio::test]
+async fn slash_compact_records_provider_usage_and_keeps_prior_spend_on_repeat() {
+    use agent_rs::agent::{AgentMessage, AssistantMessage, Usage};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output_text": "durable context",
+            "usage": {"input_tokens": 20, "output_tokens": 5, "total_cost": 0.30}
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut messages = vec![];
+    for i in 0..6 {
+        messages.push(AgentMessage::User {
+            content: format!("turn {i}"),
+        });
+        messages.push(AgentMessage::Assistant(AssistantMessage {
+            content: format!("answer {i}"),
+            tool_calls: vec![],
+            usage: (i == 0).then_some(Usage {
+                input_tokens: 100,
+                output_tokens: 10,
+                raw: Some(json!({"total_cost": 1.25})),
+            }),
+            model: Some("openai:gpt-5.2".into()),
+            metadata: Default::default(),
+        }));
+    }
+    store
+        .save(&agent_rs::session::Session::new(
+            "repeat-compact".into(),
+            messages,
+        ))
+        .unwrap();
+    for i in 0..2 {
+        agent_command()
+            .env("HOME", home.path())
+            .env("OPENAI_API_KEY", "test-key")
+            .env("AGENT_BASE_URL", server.uri())
+            .args([
+                "--model",
+                "gpt-5.2",
+                "--single",
+                "--resume",
+                "repeat-compact",
+                "/compact",
+            ])
+            .assert()
+            .success();
+        let saved = store.load(Some("repeat-compact")).unwrap();
+        assert_eq!(saved.compacted_usages.len(), i + 2);
+        let expected = if i == 0 {
+            "Cost: $1.5500"
+        } else {
+            "Cost: $1.8500"
+        };
+        let line = agent_rs::providers::format_cost_and_context_line_with_all_usages(
+            &saved.messages,
+            "gpt-5.2",
+            false,
+            &saved.name_usages,
+            &saved.compacted_usages,
+        );
+        assert!(line.contains(expected), "{line}");
+        if i == 0 {
+            // More turns make the second compaction eligible.
+            let mut next = saved;
+            for n in 0..3 {
+                next.messages.push(AgentMessage::User {
+                    content: format!("new turn {n}"),
+                });
+                next.messages
+                    .push(AgentMessage::Assistant(AssistantMessage {
+                        content: "reply".into(),
+                        tool_calls: vec![],
+                        usage: None,
+                        model: None,
+                        metadata: Default::default(),
+                    }));
+            }
+            store.save(&next).unwrap();
+        }
+    }
 }
 
 #[test]

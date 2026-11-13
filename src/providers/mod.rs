@@ -8,7 +8,8 @@ pub mod openai_compatible;
 pub use api::{Provider, ProviderError};
 pub use configuration::{
     DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, ParsedModelId, build_provider, context_window_tokens,
-    effective_model_name, format_cost_and_context_line, format_cost_and_context_line_with_usages,
+    effective_model_name, format_cost_and_context_line,
+    format_cost_and_context_line_with_all_usages, format_cost_and_context_line_with_usages,
     parse_model_id, total_session_cost_usd, total_session_cost_usd_with,
 };
 pub use mock::MockProvider;

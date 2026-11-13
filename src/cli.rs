@@ -26,7 +26,7 @@ use crate::display::TerminalDisplay;
 use crate::memory::load_all_agents_memory_with_files;
 use crate::pricing::refresh_pricing_cache;
 use crate::providers::{
-    Provider, build_provider, effective_model_name, format_cost_and_context_line_with_usages,
+    Provider, build_provider, effective_model_name, format_cost_and_context_line_with_all_usages,
     list_models,
 };
 use crate::session::{Session, SessionStore};
@@ -419,11 +419,12 @@ async fn run_with_args_and_prefill(
                 monitor_enabled.then_some(monitor_manager.clone()),
             )?);
         }
-        let status_line = format_cost_and_context_line_with_usages(
+        let status_line = format_cost_and_context_line_with_all_usages(
             &session.messages,
             &model_name,
             allow_git_writes,
             &session.name_usages,
+            &session.compacted_usages,
         );
         display.render_turn_submitted(&status_line);
         let cancellation_token = CancellationToken::new();
@@ -495,12 +496,15 @@ async fn run_with_args_and_prefill(
                         observed_messages.borrow_mut().push(message.clone());
                         let mut status_messages = session.messages.clone();
                         status_messages.extend(observed_messages.borrow().iter().cloned());
-                        display.update_working_footer(&format_cost_and_context_line_with_usages(
-                            &status_messages,
-                            &model_name,
-                            allow_git_writes,
-                            &session.name_usages,
-                        ));
+                        display.update_working_footer(
+                            &format_cost_and_context_line_with_all_usages(
+                                &status_messages,
+                                &model_name,
+                                allow_git_writes,
+                                &session.name_usages,
+                                &session.compacted_usages,
+                            ),
+                        );
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
                             let mut checkpoint = session.clone();
@@ -1700,11 +1704,12 @@ async fn prompt_for_input(
     let prompt = DefaultPrompt::default();
     print!(
         "{}",
-        TerminalDisplay::format_standalone_footer(&format_cost_and_context_line_with_usages(
+        TerminalDisplay::format_standalone_footer(&format_cost_and_context_line_with_all_usages(
             &session.messages,
             model_name,
             allow_git_writes,
-            &session.name_usages
+            &session.name_usages,
+            &session.compacted_usages
         ))
     );
     seed_line_editor_prefill(&mut line_editor, prefill);
@@ -1972,10 +1977,10 @@ async fn compact_session(
             ),
         },
     ];
-    let summary = build_provider(model_name)?
+    let summary_response = build_provider(model_name)?
         .complete(&summary_request, &[])
-        .await?
-        .content;
+        .await?;
+    let summary = &summary_response.content;
     if summary.trim().is_empty() {
         return Err("provider returned an empty compacted context".into());
     }
@@ -1989,6 +1994,27 @@ async fn compact_session(
     compacted.extend(recent_messages);
     let new_tokens = crate::agent::count_tokens(&compacted, model_name);
     let removed_messages = session.messages.len().saturating_sub(compacted.len());
+    // Only usage attached to messages no longer present needs moving; surviving
+    // messages continue to contribute their own cost directly.
+    let discarded_usages = old_messages.iter().flat_map(|message| match message {
+        AgentMessage::Assistant(assistant) => assistant
+            .usage
+            .iter()
+            .map(|usage| crate::agent::SubagentUsage {
+                usage: usage.clone(),
+                model: assistant.model.as_deref().unwrap_or(model_name).to_string(),
+            })
+            .collect::<Vec<_>>(),
+        AgentMessage::Tool(result) => result.subagent_usages.clone(),
+        _ => Vec::new(),
+    });
+    session.compacted_usages.extend(discarded_usages);
+    if let Some(usage) = summary_response.usage {
+        session.compacted_usages.push(crate::agent::SubagentUsage {
+            usage,
+            model: model_name.to_string(),
+        });
+    }
     session.replace_messages(compacted);
     store.save(session)?;
     println!(
@@ -2030,11 +2056,12 @@ fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bo
         session.created_at.to_rfc3339(),
         session.updated_at.to_rfc3339(),
         session.messages.len(),
-        format_cost_and_context_line_with_usages(
+        format_cost_and_context_line_with_all_usages(
             &session.messages,
             model_name,
             allow_git_writes,
-            &session.name_usages
+            &session.name_usages,
+            &session.compacted_usages
         ),
     )
 }

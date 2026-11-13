@@ -141,6 +141,22 @@ pub fn format_cost_and_context_line_with_usages(
     allow_git_writes: bool,
     name_usages: &[crate::agent::SubagentUsage],
 ) -> String {
+    format_cost_and_context_line_with_all_usages(
+        messages,
+        raw_model,
+        allow_git_writes,
+        name_usages,
+        &[],
+    )
+}
+
+pub fn format_cost_and_context_line_with_all_usages(
+    messages: &[AgentMessage],
+    raw_model: &str,
+    allow_git_writes: bool,
+    name_usages: &[crate::agent::SubagentUsage],
+    compacted_usages: &[crate::agent::SubagentUsage],
+) -> String {
     let max_context_tokens = context_window_tokens(raw_model);
     let used = crate::agent::count_tokens(messages, raw_model);
     let remaining = max_context_tokens.saturating_sub(used);
@@ -171,6 +187,7 @@ pub fn format_cost_and_context_line_with_usages(
             total_session_cost_usd(messages, raw_model)
                 + name_usages
                     .iter()
+                    .chain(compacted_usages)
                     .map(|entry| usage_cost_usd(&entry.usage, &entry.model))
                     .sum::<f64>()
         ),

@@ -19,6 +19,8 @@ pub struct Session {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_usages: Vec<SubagentUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted_usages: Vec<SubagentUsage>,
     pub messages: Vec<AgentMessage>,
 }
 
@@ -34,6 +36,7 @@ impl Session {
             allow_git_writes: false,
             title: None,
             name_usages: Vec::new(),
+            compacted_usages: Vec::new(),
             messages,
         }
     }
