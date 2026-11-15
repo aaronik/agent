@@ -47,12 +47,13 @@ fn realtime_session_update_configures_voice_vad_and_interruption() {
     assert_eq!(event["session"]["audio"]["output"]["speed"], 1.15);
     assert_eq!(
         event["session"]["audio"]["input"]["turn_detection"]["type"],
-        "server_vad"
+        "semantic_vad"
     );
-    assert_eq!(
-        event["session"]["audio"]["input"]["turn_detection"]["interrupt_response"],
-        true
-    );
+    let detection = &event["session"]["audio"]["input"]["turn_detection"];
+    assert_eq!(detection["eagerness"], "medium");
+    assert!(detection.get("silence_duration_ms").is_none());
+    assert!(detection.get("threshold").is_none());
+    assert_eq!(detection["interrupt_response"], true);
 }
 
 #[test]
@@ -60,6 +61,8 @@ fn wake_word_session_waits_for_explicit_response() {
     let config = test_config().with_wake_word("Computer".to_string());
     let event = session_update_event(&config);
     let detection = &event["session"]["audio"]["input"]["turn_detection"];
+    assert_eq!(detection["type"], "semantic_vad");
+    assert_eq!(detection["eagerness"], "medium");
     assert_eq!(detection["create_response"], false);
     assert_eq!(detection["interrupt_response"], false);
     assert_eq!(
@@ -313,6 +316,38 @@ async fn wake_word_protocol_deletes_audio_item_then_sends_command_and_response()
     client.delete_item("audio_1").await.unwrap();
     client.create_user_text("status?").await.unwrap();
     client.create_response().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn realtime_connection_sends_medium_eagerness_semantic_vad() {
+    use futures_util::StreamExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let update: serde_json::Value =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        let detection = &update["session"]["audio"]["input"]["turn_detection"];
+        assert_eq!(
+            detection,
+            &json!({
+                "type": "semantic_vad",
+                "eagerness": "medium",
+                "create_response": true,
+                "interrupt_response": true
+            })
+        );
+    });
+    let mut config = test_config();
+    config.base_url = format!("ws://{address}/v1/realtime");
+    let _client = agent_rs::voice::realtime::RealtimeClient::connect(&config)
+        .await
+        .unwrap();
     server.await.unwrap();
 }
 

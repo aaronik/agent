@@ -247,10 +247,8 @@ pub fn session_update_event(config: &RealtimeConfig) -> Value {
                     "model": config.transcription_model
                 },
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
+                    "type": "semantic_vad",
+                    "eagerness": "medium",
                     "create_response": config.wake_word.is_none(),
                     "interrupt_response": config.wake_word.is_none()
                 }
@@ -551,12 +549,16 @@ mod tests {
     }
 
     #[test]
-    fn session_update_enables_server_vad_and_barge_in() {
+    fn session_update_enables_medium_eagerness_semantic_vad_and_barge_in() {
         let event = session_update_event(&test_config());
         assert_eq!(event["session"]["type"], "realtime");
         assert_eq!(
             event["session"]["audio"]["input"]["turn_detection"]["type"],
-            "server_vad"
+            "semantic_vad"
+        );
+        assert_eq!(
+            event["session"]["audio"]["input"]["turn_detection"]["eagerness"],
+            "medium"
         );
         assert_eq!(
             event["session"]["audio"]["input"]["turn_detection"]["interrupt_response"],
