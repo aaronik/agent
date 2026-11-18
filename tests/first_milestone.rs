@@ -186,6 +186,137 @@ fn ctrl_c_at_prompt_prints_session_id_on_exit() {
 
 #[test]
 #[cfg(unix)]
+fn ctrl_c_while_title_request_in_flight_exits_immediately() {
+    assert_prompt_exit_aborts_title(b"\x03");
+}
+
+#[test]
+#[cfg(unix)]
+fn ctrl_d_while_title_request_in_flight_exits_immediately() {
+    assert_prompt_exit_aborts_title(b"\x04");
+}
+
+#[cfg(unix)]
+fn assert_prompt_exit_aborts_title(exit_key: &[u8]) {
+    use agent_rs::agent::AgentMessage;
+    use agent_rs::session::Session;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = tempfile::tempdir().unwrap();
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let session = Session::new(
+        "pending-title".into(),
+        vec![AgentMessage::User {
+            content: "hello".into(),
+        }],
+    );
+    store.save(&session).unwrap();
+
+    let (mut master, mut slave) = (0, 0);
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty initializes both descriptors and reads a valid window size.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        },
+        0
+    );
+    // SAFETY: these are owned descriptors returned by openpty.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"))
+        .env("HOME", home.path())
+        .env("AGENT_MOCK_TITLE_DELAY_MS", "15000")
+        .args([
+            "--model",
+            "mock",
+            "--no-completion-sound",
+            "--resume",
+            &session.session_id,
+        ])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    // SAFETY: master remains a live PTY descriptor throughout the test.
+    assert_ne!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        -1
+    );
+    let mut terminal = vt100::Parser::new(24, 80, 100);
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut answered_query = false;
+    let mut pending_query = Vec::new();
+    while Instant::now() < deadline {
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+            for byte in &buf[..n] {
+                terminal.process(&[*byte]);
+                pending_query.push(*byte);
+                if pending_query.ends_with(b"\x1b[6n") {
+                    let (row, col) = terminal.screen().cursor_position();
+                    write!(master, "\x1b[{};{}R", row + 1, col + 1).unwrap();
+                    answered_query = true;
+                }
+            }
+        }
+        if answered_query {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !answered_query {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("no cursor query: {}", String::from_utf8_lossy(&output));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    master.write_all(exit_key).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        let mut buf = [0; 4096];
+        if let Ok(n) = master.read(&mut buf) {
+            output.extend_from_slice(&buf[..n]);
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!(
+                "agent waited for the in-flight title after {exit_key:?}: {}",
+                String::from_utf8_lossy(&output)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "{}", String::from_utf8_lossy(&output));
+    assert!(!output.windows(17).any(|s| s == b"Mock Conversation"));
+    let saved = store.load(Some(&session.session_id)).unwrap();
+    assert!(saved.title.is_none(), "{:?}", saved.title);
+    assert!(saved.name_usages.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
 fn tty_turn_sets_two_word_conversation_title() {
     use std::io::Read;
     use std::os::fd::FromRawFd;

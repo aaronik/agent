@@ -308,10 +308,14 @@ async fn run_with_args_and_prefill(
                         continue;
                     }
                     Err(err) if err.to_string() == "Interrupted!" => {
+                        abort_conversation_title(&mut title_task);
                         println!("sessionId: {}", session.session_id);
                         break;
                     }
-                    Err(err) if err.to_string() == "Goodbye!" => break,
+                    Err(err) if err.to_string() == "Goodbye!" => {
+                        abort_conversation_title(&mut title_task);
+                        break;
+                    }
                     Err(err) => return Err(err),
                 }
             }
@@ -1586,6 +1590,16 @@ fn spawn_conversation_title(
         }
         result
     })
+}
+
+/// Cancel the best-effort title request rather than waiting for it on exit.
+fn abort_conversation_title(task: &mut Option<tokio::task::JoinHandle<Option<NameResult>>>) {
+    // Keep completed results so the normal finalizer can persist their title and usage.
+    if task.as_ref().is_some_and(|handle| !handle.is_finished())
+        && let Some(handle) = task.take()
+    {
+        handle.abort();
+    }
 }
 
 async fn finish_conversation_title(
