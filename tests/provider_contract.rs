@@ -908,6 +908,221 @@ async fn agent_loop_stops_after_three_transport_attempts() {
 }
 
 #[tokio::test]
+async fn providers_report_empty_sse_stream_as_incomplete() {
+    for flavor in [ProviderFlavor::OpenAiChat, ProviderFlavor::OpenAiResponses] {
+        let server = MockServer::start().await;
+        let endpoint = if flavor == ProviderFlavor::OpenAiChat {
+            "/chat/completions"
+        } else {
+            "/responses"
+        };
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(""),
+            )
+            .mount(&server)
+            .await;
+        let provider = OpenAiCompatibleProvider::new(ProviderConfig {
+            provider: "test".into(),
+            model: "test-model".into(),
+            base_url: server.uri(),
+            api_key: "test-key".into(),
+            flavor,
+        });
+        let error = provider
+            .events(
+                &[AgentMessage::User {
+                    content: "hi".into(),
+                }],
+                &[],
+            )
+            .await
+            .expect_err("empty stream must not count as a final message");
+        assert!(
+            matches!(error, ProviderError::InvalidResponse(message) if message == "provider did not produce a final message")
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_loop_retries_incomplete_empty_stream_without_using_tool_turns() {
+    #[derive(Clone)]
+    struct IncompleteProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for IncompleteProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            unreachable!("must stream")
+        }
+
+        async fn stream_events(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+            on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+        ) -> Result<(), ProviderError> {
+            assert_eq!(messages.len(), 1, "retry must keep history unchanged");
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 2 {
+                on_event(ProviderEvent::FinalMessage {
+                    message: AssistantMessage {
+                        content: "recovered".into(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                        model: None,
+                        metadata: Default::default(),
+                    },
+                });
+            }
+            Ok(())
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        IncompleteProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 1,
+            model: "mock".into(),
+        },
+    );
+    let result = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect("third silent attempt completes");
+    assert_eq!(result.final_text, "recovered");
+    assert_eq!(result.new_messages.len(), 1);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn agent_loop_stops_after_three_incomplete_empty_streams() {
+    #[derive(Clone)]
+    struct EmptyProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for EmptyProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::InvalidResponse(
+                "provider did not produce a final message".into(),
+            ))
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        EmptyProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+    let error = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect_err("incomplete response should surface after three tries");
+    assert!(
+        matches!(error, ProviderError::InvalidResponse(message) if message.contains("did not produce a final message"))
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn agent_loop_does_not_retry_incomplete_stream_after_text_was_emitted() {
+    #[derive(Clone)]
+    struct PartialProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for PartialProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            unreachable!("must stream")
+        }
+
+        async fn stream_events(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+            on_event: &mut (dyn FnMut(ProviderEvent) + Send),
+        ) -> Result<(), ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            on_event(ProviderEvent::TextDelta {
+                text: "partial".into(),
+            });
+            Ok(())
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        PartialProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+    let error = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect_err("partial output must not be replayed");
+    assert!(matches!(error, ProviderError::InvalidResponse(_)));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn agent_loop_does_not_retry_other_invalid_responses() {
+    #[derive(Clone)]
+    struct InvalidProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for InvalidProvider {
+        async fn complete(
+            &self,
+            _messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::InvalidResponse("malformed tool call".into()))
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        InvalidProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+    let error = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect_err("malformed response must surface without retrying");
+    assert!(
+        matches!(error, ProviderError::InvalidResponse(message) if message == "malformed tool call")
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn agent_loop_stops_repeated_request_errors() {
     #[derive(Clone)]
     struct RejectingProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);

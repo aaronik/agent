@@ -147,7 +147,13 @@ where
                     ) => result,
                     _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
                 };
-                if matches!(&result, Err(ProviderError::Request(message)) if message.contains("error sending request for url"))
+                let incomplete_response = matches!(&result, Ok(()))
+                    && !events
+                        .iter()
+                        .any(|event| matches!(event, ProviderEvent::FinalMessage { .. }))
+                    || matches!(&result, Err(ProviderError::InvalidResponse(message)) if message == "provider did not produce a final message");
+                let transport_failure = matches!(&result, Err(ProviderError::Request(message)) if message.contains("error sending request for url"));
+                if (incomplete_response || transport_failure)
                     && events.is_empty()
                     && transport_attempts < 3
                 {

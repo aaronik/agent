@@ -121,9 +121,11 @@ impl OpenAiCompatibleProvider {
         let mut content = String::new();
         let mut tool_calls = BTreeMap::new();
         let mut usage = None;
+        let mut received_chunk = false;
 
         while let Some(chunk) = stream.next().await {
             let chunk: Value = chunk.map_err(|err| ProviderError::request(err.to_string()))?;
+            received_chunk = true;
             if let Some(chunk_usage) = parse_usage(chunk.get("usage")) {
                 usage = Some(chunk_usage.clone());
                 on_event(ProviderEvent::Usage { usage: chunk_usage });
@@ -148,6 +150,11 @@ impl OpenAiCompatibleProvider {
             }
         }
 
+        if !received_chunk {
+            return Err(ProviderError::InvalidResponse(
+                "provider did not produce a final message".to_string(),
+            ));
+        }
         let final_tool_calls = finalize_tool_calls(tool_calls);
         for call in &final_tool_calls {
             on_event(ProviderEvent::ToolCall { call: call.clone() });
@@ -233,13 +240,9 @@ impl OpenAiCompatibleProvider {
             }
         }
 
-        let message = final_message.unwrap_or(AssistantMessage {
-            content,
-            tool_calls: Vec::new(),
-            usage: None,
-            model: None,
-            metadata: Map::new(),
-        });
+        let message = final_message.ok_or_else(|| {
+            ProviderError::InvalidResponse("provider did not produce a final message".to_string())
+        })?;
         on_event(ProviderEvent::FinalMessage { message });
         Ok(())
     }
