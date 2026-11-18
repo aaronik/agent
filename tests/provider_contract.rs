@@ -821,6 +821,93 @@ async fn agent_loop_bounces_non_context_provider_request_error_back_to_agent() {
 }
 
 #[tokio::test]
+async fn agent_loop_retries_transport_failure_without_modifying_history_or_turn_budget() {
+    #[derive(Clone)]
+    struct FlakyProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for FlakyProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            assert_eq!(messages.len(), 1, "retry must use unchanged history");
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt < 2 {
+                return Err(ProviderError::Request(
+                    "http error: error sending request for url (https://example.com)".into(),
+                ));
+            }
+            Ok(AssistantMessage {
+                content: "connected".into(),
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                metadata: Default::default(),
+            })
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        FlakyProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig {
+            max_turns: 1,
+            model: "mock".into(),
+        },
+    );
+    let result = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect("transport should recover on third attempt");
+    assert_eq!(result.final_text, "connected");
+    assert_eq!(result.new_messages.len(), 1);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn agent_loop_stops_after_three_transport_attempts() {
+    #[derive(Clone)]
+    struct OfflineProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for OfflineProvider {
+        async fn complete(
+            &self,
+            messages: &[AgentMessage],
+            _tools: &[agent_rs::tools::ToolDefinition],
+        ) -> Result<AssistantMessage, ProviderError> {
+            assert_eq!(messages.len(), 1, "retry must not add a recovery message");
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Request(
+                "http error: error sending request for url (https://example.com)".into(),
+            ))
+        }
+    }
+
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = AgentLoop::new(
+        OfflineProvider(attempts.clone()),
+        ToolRegistry::new(),
+        AgentLoopConfig::default(),
+    );
+    let error = runner
+        .run_turn(&[AgentMessage::User {
+            content: "continue".into(),
+        }])
+        .await
+        .expect_err("offline provider should surface the original error");
+    assert!(
+        matches!(error, ProviderError::Request(message) if message.contains("error sending request for url"))
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn agent_loop_stops_repeated_request_errors() {
     #[derive(Clone)]
     struct RejectingProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);

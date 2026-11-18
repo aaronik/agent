@@ -132,21 +132,39 @@ where
             check_cancelled(cancellation_token)?;
             drain_steering(steering, &mut messages, &mut new_messages, &mut on_message);
             let mut events = Vec::new();
-            let mut receive_event = |event| {
-                on_event(&event);
-                events.push(event);
-            };
-            let provider_result = tokio::select! {
-                result = self.provider.stream_events(
-                    &messages,
-                    self.tools.definitions(),
-                    &mut receive_event,
-                ) => result,
-                _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+            let mut transport_attempts = 0;
+            let provider_result = loop {
+                transport_attempts += 1;
+                let mut receive_event = |event| {
+                    on_event(&event);
+                    events.push(event);
+                };
+                let result = tokio::select! {
+                    result = self.provider.stream_events(
+                        &messages,
+                        self.tools.definitions(),
+                        &mut receive_event,
+                    ) => result,
+                    _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+                };
+                if matches!(&result, Err(ProviderError::Request(message)) if message.contains("error sending request for url"))
+                    && events.is_empty()
+                    && transport_attempts < 3
+                {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100 * transport_attempts)) => {},
+                        _ = cancellation_token.cancelled() => return Err(ProviderError::Cancelled),
+                    }
+                    continue;
+                }
+                break result;
             };
             let events = match provider_result {
                 Ok(()) => events,
                 Err(error @ ProviderError::ContextLengthExceeded(_)) => return Err(error),
+                Err(error @ ProviderError::Request(_)) if transport_attempts == 3 => {
+                    return Err(error);
+                }
                 Err(ProviderError::Request(error)) => {
                     if request_recovery_attempted {
                         return Err(ProviderError::Request(error));
