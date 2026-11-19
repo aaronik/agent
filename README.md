@@ -60,6 +60,16 @@ Refresh cached LiteLLM pricing data:
 cargo run -- --update-pricing
 ```
 
+List available models with input, cached-input (cache-read), and output prices
+in USD per million tokens, using locally cached LiteLLM rates:
+
+```sh
+cargo run -- --models
+```
+
+`--list-models` and interactive `/models` show the same prices. Missing rates
+appear as `unknown`; refresh them with the command above or `/pricing refresh`.
+
 Agent state is stored under `$HOME/.agent`.
 Pricing data is cached under `$HOME/.agent/pricing`.
 User-level instructions are read from `$HOME/.agent/AGENTS.md`.

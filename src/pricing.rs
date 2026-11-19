@@ -224,6 +224,44 @@ pub fn pricing_cache_path(root: &Path) -> PathBuf {
     root.join(PRICING_DIR).join(PRICING_CACHE_FILE)
 }
 
+/// Format discovered models using cached standard text-token rates (no network access).
+pub fn format_model_prices(root: &Path, models: &[String]) -> String {
+    let pricing = fs::read_to_string(pricing_cache_path(root))
+        .ok()
+        .and_then(|payload| parse_pricing_map(&payload).ok());
+    let width = models.iter().map(String::len).max().unwrap_or(5).max(5);
+    let mut table = format!(
+        "Prices: USD / 1M tokens (cached LiteLLM rates)\n{:<width$}  {:>12}  {:>12}  {:>12}\n",
+        "Model", "Input", "Cached input", "Output"
+    );
+    for model in models {
+        let rates = pricing
+            .as_ref()
+            .and_then(|map| map.pricing_for_model(model));
+        let input = format_token_rate(rates.and_then(|rates| rates.input_cost_per_token));
+        let cached = format_token_rate(rates.and_then(|rates| rates.cache_read_input_token_cost));
+        let output = format_token_rate(rates.and_then(|rates| rates.output_cost_per_token));
+        table.push_str(&format!(
+            "{model:<width$}  {input:>12}  {cached:>12}  {output:>12}\n"
+        ));
+    }
+    table.push_str("Refresh prices: /pricing refresh or --update-pricing\n");
+    table
+}
+
+fn format_token_rate(rate: Option<f64>) -> String {
+    match rate.filter(|rate| rate.is_finite() && *rate >= 0.0) {
+        Some(rate) => {
+            let mut price = format!("{:.6}", rate * 1_000_000.0);
+            while price.ends_with('0') && price.len() - price.find('.').unwrap() > 3 {
+                price.pop();
+            }
+            format!("${price}")
+        }
+        None => "unknown".to_string(),
+    }
+}
+
 pub fn context_window_from_cache_at(root: &Path, raw_model: &str) -> Option<usize> {
     let payload = fs::read_to_string(pricing_cache_path(root)).ok()?;
     let pricing_map = parse_pricing_map(&payload).ok()?;

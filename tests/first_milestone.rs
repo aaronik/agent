@@ -1056,6 +1056,90 @@ fn help_does_not_require_provider_configuration() {
 }
 
 #[tokio::test]
+async fn model_listings_show_cached_token_prices_and_unknown_rates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "priced"}, {"name": "partial"}, {"name": "unknown"}]
+        })))
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let cache = agent_rs::pricing::pricing_cache_path(&home.path().join(".agent"));
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cache,
+        json!({
+            "ollama/priced": {
+                "input_cost_per_token": 0.00000125,
+                "cache_read_input_token_cost": 0.000000125,
+                "output_cost_per_token": 0.000005
+            },
+            "ollama/partial": {"input_cost_per_token": 0, "cache_read_input_token_cost": 0}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    for args in [
+        vec!["--models"],
+        vec!["--list-models"],
+        vec!["--model", "mock", "--single", "/models"],
+    ] {
+        let output = agent_command()
+            .env("HOME", home.path())
+            .env_remove("OPENAI_API_KEY")
+            .env("OLLAMA_URL", server.uri())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("USD / 1M tokens"), "{text}");
+        assert!(
+            text.contains("Input") && text.contains("Cached input") && text.contains("Output"),
+            "{text}"
+        );
+        for (model, input, cached, output) in [
+            ("ollama:priced", "$1.25", "$0.125", "$5.00"),
+            ("ollama:partial", "$0.00", "$0.00", "unknown"),
+            ("ollama:unknown", "unknown", "unknown", "unknown"),
+        ] {
+            let row = text.lines().find(|line| line.contains(model)).unwrap();
+            assert_eq!(
+                row.split_whitespace().collect::<Vec<_>>(),
+                [model, input, cached, output]
+            );
+        }
+    }
+
+    for payload in [None, Some("not valid json")] {
+        std::fs::remove_file(&cache).unwrap();
+        if let Some(payload) = payload {
+            std::fs::write(&cache, payload).unwrap();
+        }
+        agent_command()
+            .env("HOME", home.path())
+            .env_remove("OPENAI_API_KEY")
+            .env("OLLAMA_URL", server.uri())
+            .arg("--models")
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("ollama:priced"))
+            .stdout(predicates::str::contains("unknown"))
+            .stdout(predicates::str::contains("--update-pricing"));
+        if payload.is_none() {
+            std::fs::write(&cache, "{}").unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn update_pricing_flag_downloads_litellm_pricing_without_provider_configuration() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

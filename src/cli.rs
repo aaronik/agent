@@ -24,7 +24,7 @@ use std::time::Duration;
 use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
 use crate::display::TerminalDisplay;
 use crate::memory::load_all_agents_memory_with_files;
-use crate::pricing::refresh_pricing_cache;
+use crate::pricing::{format_model_prices, refresh_pricing_cache};
 use crate::providers::{
     Provider, build_provider, effective_model_name, format_cost_and_context_line_with_all_usages,
     list_models,
@@ -56,7 +56,12 @@ enum InteractionMode {
 pub struct Args {
     #[arg(short, long, help = "Model id, optionally provider-prefixed")]
     pub model: Option<String>,
-    #[arg(short, long, help = "List available OpenAI and Ollama models")]
+    #[arg(
+        short,
+        long,
+        visible_alias = "models",
+        help = "List available OpenAI and Ollama models with cached token prices"
+    )]
     pub list_models: bool,
     #[arg(
         short,
@@ -158,9 +163,11 @@ async fn run_with_args_and_prefill(
     }
 
     if args.list_models {
-        for model in list_models().await {
-            println!("{model}");
-        }
+        let store = SessionStore::new()?;
+        print!(
+            "{}",
+            format_model_prices(store.root(), &list_models().await)
+        );
         return Ok(());
     }
 
@@ -1885,9 +1892,10 @@ async fn handle_slash_command(
         }
         "/models" => {
             if rest.is_empty() {
-                for model in list_models().await {
-                    println!("{model}");
-                }
+                print!(
+                    "{}",
+                    format_model_prices(store.root(), &list_models().await)
+                );
             } else {
                 return Ok(SlashCommandResult::SwitchModel(rest.to_string()));
             }
@@ -2081,7 +2089,7 @@ fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bo
 }
 
 fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
-    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models or switch the active model.\n  /monitors\n      Show active background monitors.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models with cached token prices or switch the active model.\n  /monitors\n      Show active background monitors.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
         .to_string();
     let project_dir = std::env::current_dir()?;
     for skill in crate::skills::discover(store.root(), &project_dir)? {

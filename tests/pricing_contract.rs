@@ -163,3 +163,40 @@ async fn refresh_pricing_cache_writes_validated_litellm_map() {
     assert_eq!(report.priced_model_count, 2);
     assert!(pricing_cache_path(&root).exists());
 }
+
+#[test]
+fn model_price_table_resolves_provider_prefixes_aliases_and_small_rates() {
+    let home = tempfile::tempdir().unwrap();
+    let cache = pricing_cache_path(home.path());
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(
+        cache,
+        json!({
+            "gpt-test": {
+                "aliases": ["gpt-test-latest"],
+                "input_cost_per_token": "0.000000001",
+                "cache_read_input_token_cost": "0.0000000001",
+                "output_cost_per_token": 0.0000025
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let table = agent_rs::pricing::format_model_prices(
+        home.path(),
+        &[
+            "openai:gpt-test".into(),
+            "gpt-test-latest".into(),
+            "missing".into(),
+        ],
+    );
+    for model in ["openai:gpt-test", "gpt-test-latest"] {
+        let row = table.lines().find(|line| line.contains(model)).unwrap();
+        assert!(
+            row.contains("$0.001") && row.contains("$0.0001") && row.contains("$2.50"),
+            "{row}"
+        );
+    }
+    let missing = table.lines().find(|line| line.contains("missing")).unwrap();
+    assert_eq!(missing.matches("unknown").count(), 3);
+}
