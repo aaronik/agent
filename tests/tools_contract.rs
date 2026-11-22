@@ -152,6 +152,16 @@ async fn registry_exposes_and_executes_active_tool_surface() {
             .description
             .contains("Only use focus=true when the user explicitly asks")
     );
+    assert!(
+        live_tab
+            .description
+            .contains("Close each tab you open as soon as you are done with it")
+    );
+    assert!(
+        live_tab
+            .description
+            .contains("unless the user asks to keep it open")
+    );
     let focus = &live_tab.parameters["properties"]["focus"];
     assert!(
         focus["type"]
