@@ -1059,10 +1059,33 @@ async fn spawn_runs_requested_agents_in_parallel_with_distinct_tasks() {
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_activity_arrives_before_batch_completion_without_polluting_errors() {
+    use agent_rs::agent::{AgentMessage, AssistantMessage, Usage};
+    use agent_rs::session::{Session, SessionStore};
     use agent_rs::tools::SpawnState;
     use std::os::unix::fs::PermissionsExt;
     let _lock = ENV_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", dir.path().to_str().unwrap());
+    let store = SessionStore::with_root(dir.path().join(".agent"));
+    let usage = Usage {
+        input_tokens: 1,
+        output_tokens: 2,
+        raw: None,
+    };
+    for (id, model) in [("slow", "mock:slow"), ("fast", "mock:fast")] {
+        store
+            .save(&Session::new(
+                id.into(),
+                vec![AgentMessage::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![],
+                    usage: Some(usage.clone()),
+                    model: Some(model.into()),
+                    metadata: Default::default(),
+                })],
+            ))
+            .unwrap();
+    }
     let script = dir.path().join("worker");
     std::fs::write(
         &script,
@@ -1070,6 +1093,8 @@ async fn spawn_activity_arrives_before_batch_completion_without_polluting_errors
 for task do :; done
 [ "$AGENT_CHILD_ACTIVITY" = 1 ] || exit 9
 printf '@agent-activity "Reviewing files"\n' >&2
+printf '@agent-usage {"model":"mock:%s","usage":{"input_tokens":1,"output_tokens":2}}\n' "$task" >&2
+printf 'sessionId: %s\n' "$task"
 if [ "$task" = slow ]; then
     while [ ! -f "$0.release" ]; do sleep 0.02; done
     echo 'real diagnostic' >&2
@@ -1096,11 +1121,17 @@ echo success
     });
     let mut slow_status = false;
     let mut fast_done = false;
+    let mut slow_usage = false;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !slow_status || !fast_done {
+        while !slow_status || !fast_done || !slow_usage {
             let e = rx.recv().await.unwrap();
             assert_eq!((e.group.as_str(), e.total), ("batch", 2));
             slow_status |= e.index == 0 && e.state == SpawnState::Status("Reviewing files".into());
+            if let SpawnState::Usage(entry) = &e.state {
+                assert_eq!(entry.usage, usage);
+                assert_eq!(entry.model, format!("mock:{}", e.task));
+                slow_usage |= e.index == 0;
+            }
             fast_done |= e.task == "fast" && e.index == 1 && e.state == SpawnState::Done;
         }
     })
@@ -1110,6 +1141,16 @@ echo success
     let result = work.await.unwrap();
     assert!(result.content.contains("real diagnostic"));
     assert!(!result.content.contains("@agent-activity"));
+    assert!(!result.content.contains("@agent-usage"));
+    // Both the successful worker and the worker that later failed were billed.
+    assert_eq!(
+        result
+            .subagent_usages
+            .iter()
+            .map(|u| u.model.as_str())
+            .collect::<Vec<_>>(),
+        ["mock:slow", "mock:fast"]
+    );
     assert_eq!(rx.recv().await.unwrap().state, SpawnState::Failed);
 }
 

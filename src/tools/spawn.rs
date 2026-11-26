@@ -16,11 +16,13 @@ use crate::session::SessionStore;
 
 pub(crate) const ACTIVITY_ENV: &str = "AGENT_CHILD_ACTIVITY";
 pub(crate) const ACTIVITY_PREFIX: &str = "@agent-activity ";
+pub(crate) const USAGE_PREFIX: &str = "@agent-usage ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnState {
     Started,
     Status(String),
+    Usage(SubagentUsage),
     Done,
     Failed,
     Cancelled,
@@ -72,7 +74,13 @@ pub async fn spawn_cancellable_with_usage(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
-    spawn_observed(args, cancellation_token, "", None).await
+    let output = spawn_observed(args, cancellation_token, "", None).await?;
+    output.content.map(|content| (content, output.usages))
+}
+
+pub(super) struct SpawnOutput {
+    pub content: Result<String, String>,
+    pub usages: Vec<SubagentUsage>,
 }
 
 pub(super) async fn spawn_observed(
@@ -80,7 +88,7 @@ pub(super) async fn spawn_observed(
     cancellation_token: &CancellationToken,
     group: &str,
     observer: Option<&Observer>,
-) -> Result<(String, Vec<SubagentUsage>), String> {
+) -> Result<SpawnOutput, String> {
     let agents = args.agents;
     if agents.is_empty() {
         return Err("agents must contain at least one agent".to_string());
@@ -123,9 +131,9 @@ pub(super) async fn spawn_observed(
                 let result =
                     spawn_one(agent, cancellation_token, observer.is_some(), &report).await;
                 report(match &result {
-                    Ok(_) => SpawnState::Done,
-                    Err(_) if cancellation_token.is_cancelled() => SpawnState::Cancelled,
-                    Err(_) => SpawnState::Failed,
+                    Ok(output) if output.content.is_ok() => SpawnState::Done,
+                    _ if cancellation_token.is_cancelled() => SpawnState::Cancelled,
+                    _ => SpawnState::Failed,
                 });
                 result
             }),
@@ -133,12 +141,23 @@ pub(super) async fn spawn_observed(
     .await;
     let mut outputs = Vec::with_capacity(results.len());
     let mut usages = Vec::new();
+    let mut first_error = None;
     for result in results {
-        let (output, child_usages) = result?;
-        outputs.push(output);
-        usages.extend(child_usages);
+        let content = result.and_then(|output| {
+            usages.extend(output.usages);
+            output.content
+        });
+        match content {
+            Ok(content) => outputs.push(content),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
     }
-    Ok((outputs.join("\n\n"), usages))
+    Ok(SpawnOutput {
+        content: first_error.map_or_else(|| Ok(outputs.join("\n\n")), Err),
+        usages,
+    })
 }
 
 async fn spawn_one(
@@ -146,7 +165,7 @@ async fn spawn_one(
     cancellation_token: &CancellationToken,
     observed: bool,
     report: &(dyn Fn(SpawnState) + Sync),
-) -> Result<(String, Vec<SubagentUsage>), String> {
+) -> Result<SpawnOutput, String> {
     let raw_model = args.model.clone().unwrap_or_else(|| {
         std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None))
     });
@@ -215,31 +234,31 @@ async fn spawn_one(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        let mut error = String::new();
-        if !stdout.trim().is_empty() {
-            error.push_str(stdout.trim_end());
-            error.push('\n');
-        }
-        if !stderr.trim().is_empty() {
-            error.push_str(stderr.trim_end());
-            error.push('\n');
-        }
-        error.push_str(&format!(
-            "Error spawning agent: exited with status {}",
-            output.status
-        ));
-        return Err(error);
-    }
-
-    let formatted_output = format_spawn_output(&stdout);
+    // Saved assistant messages are the final accounting source. Exclude usage
+    // from before this invocation, including when the worker exits with an error.
     let usages = session_id_from_agent_output(&stdout)
         .and_then(|session_id| SessionStore::new().ok()?.load(Some(&session_id)).ok())
         .map(|session| subagent_usages(&session.messages, &raw_model))
         .map(|usages| usages.into_iter().skip(existing_usage_count).collect())
         .unwrap_or_default();
 
-    Ok((formatted_output, usages))
+    let content = if output.status.success() {
+        Ok(format_spawn_output(&stdout))
+    } else {
+        let mut error = String::new();
+        for text in [&stdout, &stderr] {
+            if !text.trim().is_empty() {
+                error.push_str(text.trim_end());
+                error.push('\n');
+            }
+        }
+        error.push_str(&format!(
+            "Error spawning agent: exited with status {}",
+            output.status
+        ));
+        Err(error)
+    };
+    Ok(SpawnOutput { content, usages })
 }
 
 fn subagent_usages(messages: &[AgentMessage], fallback_model: &str) -> Vec<SubagentUsage> {
@@ -286,6 +305,11 @@ async fn read_stderr(
         {
             diagnostics.truncate(start);
             report(SpawnState::Status(message));
+        } else if let Some(record) = diagnostics[start..].strip_prefix(USAGE_PREFIX.as_bytes())
+            && let Ok(usage) = serde_json::from_slice::<SubagentUsage>(record)
+        {
+            diagnostics.truncate(start);
+            report(SpawnState::Usage(usage));
         }
     }
     Ok(diagnostics)

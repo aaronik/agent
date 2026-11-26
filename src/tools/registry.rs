@@ -242,9 +242,9 @@ impl ToolRegistry {
                     )
                     .await
                     {
-                        Ok((content, usages)) => {
-                            subagent_usages = usages;
-                            Ok(content)
+                        Ok(output) => {
+                            subagent_usages = output.usages;
+                            output.content
                         }
                         Err(error) => Err(error),
                     }

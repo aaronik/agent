@@ -2769,6 +2769,196 @@ async fn child_activity_sanitizes_and_bounds_progress_without_echoing_commands()
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn subagent_cost_updates_before_spawn_finishes_and_is_not_counted_twice() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let mount = |prompt, response| {
+        let event = json!({"type": "response.completed", "response": response});
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(wiremock::matchers::body_string_contains(prompt))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!("data: {event}\n\ndata: [DONE]\n\n"),
+                "text/event-stream",
+            ))
+    };
+    let tool = |name, args: serde_json::Value| json!({"type":"function_call", "call_id":name, "name":name, "arguments":args.to_string()});
+    let release = home.path().join("release");
+    let shell = tool(
+        "run_shell_command",
+        json!({
+            "intent":"Wait for release",
+            "cmd":format!("for i in $(seq 1 80); do if [ -f '{}' ]; then exit 0; fi; sleep .02; done; exit 1", release.display())
+        }),
+    );
+    mount(
+        "worker-slow",
+        json!({"output":[shell], "usage":{"input_tokens":10,"output_tokens":1,"total_cost":0.0200}}),
+    )
+    .with_priority(2)
+    .expect(1)
+    .mount(&server)
+    .await;
+    mount(
+        "worker-fast",
+        json!({"output_text":"Worker done", "usage":{"input_tokens":10,"output_tokens":1,"total_cost":0.0300}}),
+    )
+    .with_priority(3)
+    .expect(1)
+    .mount(&server)
+    .await;
+    mount("function_call_output", json!({"output_text":"Finished"}))
+        .with_priority(1)
+        .expect(2)
+        .mount(&server)
+        .await;
+    let spawn = tool(
+        "spawn",
+        json!({"intent":"Run two workers","agents":[{"task":"worker-slow"},{"task":"worker-fast"}]}),
+    );
+    mount(
+        "parent-task",
+        json!({"output":[spawn], "usage":{"input_tokens":10,"output_tokens":1,"total_cost":0.0100}}),
+    )
+    .with_priority(4)
+    .expect(1)
+    .mount(&server)
+    .await;
+
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    let mut session = agent_rs::session::Session::new("parent".into(), vec![]);
+    session.title = Some("Parent task".into());
+    store.save(&session).unwrap();
+    let (mut master, mut slave) = (0, 0);
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty fills the two descriptors on success and reads the supplied size.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        },
+        0
+    );
+    // SAFETY: both descriptors were just opened and are owned by this test.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("agent"));
+    command
+        .env("HOME", home.path())
+        .env("AGENT_NO_LIVE", "0")
+        .env("OPENAI_API_KEY", "local")
+        .env("AGENT_BASE_URL", server.uri())
+        .env("AGENT_SPAWN_MODEL", "openai:test")
+        .env_remove("AGENT_SPAWN_BIN")
+        .args([
+            "--model",
+            "openai:test",
+            "--resume",
+            "parent",
+            "--single",
+            "--no-completion-sound",
+            "parent-task",
+        ])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    // SAFETY: the child only makes libc calls before exec. Attach its PTY so
+    // crossterm measures this test terminal, not the developer's /dev/tty.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    // SAFETY: master is a live PTY descriptor.
+    assert_ne!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        -1
+    );
+    let mut terminal = vt100::Parser::new(24, 100, 100);
+    let mut recent = [0; 8];
+    let mut live_total_seen = false;
+    let mut settled_total_seen = false;
+    let mut double_counted = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        let mut buf = [0; 8192];
+        let read = master.read(&mut buf).unwrap_or(0);
+        if read != 0 {
+            for &byte in &buf[..read] {
+                terminal.process(&[byte]);
+                recent.rotate_left(1);
+                recent[7] = byte;
+                if recent.ends_with(b"\x1b[6n") {
+                    let (row, col) = terminal.screen().cursor_position();
+                    write!(master, "\x1b[{};{}R", row + 1, col + 1).unwrap();
+                }
+                if recent.ends_with(b"\x1b[?2026l") {
+                    let screen = terminal.screen().contents();
+                    if !live_total_seen
+                        && screen.contains("Cost: $0.0600")
+                        && screen.contains("Wait for release")
+                    {
+                        live_total_seen = true;
+                        std::fs::write(&release, "").unwrap();
+                    }
+                    settled_total_seen |= live_total_seen
+                        && screen.contains("Cost: $0.0600")
+                        && screen.contains("Spawn: 2 done")
+                        && !screen.contains("[> Running] spawn");
+                    double_counted |= screen.contains("Cost: $0.1100");
+                }
+            }
+        }
+        if read == 0
+            && let Some(status) = child.try_wait().unwrap()
+        {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    let screen = terminal.screen().contents();
+    assert!(status.is_some_and(|status| status.success()), "{screen}");
+    assert!(
+        live_total_seen,
+        "expected $0.0600 before releasing the slow child: {screen}"
+    );
+    assert!(
+        settled_total_seen,
+        "expected $0.0600 after the batch: {screen}"
+    );
+    assert!(!double_counted, "{screen}");
+    let saved = store.load(Some("parent")).unwrap();
+    let total = agent_rs::providers::total_session_cost_usd(&saved.messages, "openai:test");
+    assert!((total - 0.0600).abs() < 1e-9, "cost was {total}");
+}
+
 #[tokio::test]
 async fn incomplete_responses_save_billed_usage_once_without_running_partial_tools() {
     for streamed_text in ["", "A partial answer"] {

@@ -45,6 +45,14 @@ impl SpawnRows {
         if activity.index >= activity.total || self.closed.contains(&activity.group) {
             return Change::None;
         }
+        let (label, outcome) = match &activity.state {
+            SpawnState::Usage(_) => return Change::None,
+            SpawnState::Started => ("Waiting for model", None),
+            SpawnState::Status(status) => (status.trim(), None),
+            SpawnState::Done => ("done", Some(Outcome::Done)),
+            SpawnState::Failed => ("failed", Some(Outcome::Failed)),
+            SpawnState::Cancelled => ("cancelled", Some(Outcome::Cancelled)),
+        };
         let position = self
             .groups
             .iter()
@@ -68,13 +76,6 @@ impl SpawnRows {
         {
             return Change::None;
         }
-        let (label, outcome) = match &activity.state {
-            SpawnState::Started => ("Waiting for model", None),
-            SpawnState::Status(status) => (status.trim(), None),
-            SpawnState::Done => ("done", Some(Outcome::Done)),
-            SpawnState::Failed => ("failed", Some(Outcome::Failed)),
-            SpawnState::Cancelled => ("cancelled", Some(Outcome::Cancelled)),
-        };
         let row = group.rows.entry(activity.index).or_insert_with(|| Row {
             started: Instant::now(),
             finished_after: None,

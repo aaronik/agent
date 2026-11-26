@@ -11,17 +11,17 @@ use reedline::{
     Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, SearchDirection, SearchQuery, Signal,
     Span, Suggestion, Vi, default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
-use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
+use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken, SubagentUsage};
 use crate::display::TerminalDisplay;
 use crate::memory::load_all_agents_memory_with_files;
 use crate::pricing::{format_model_prices, refresh_pricing_cache};
@@ -31,14 +31,13 @@ use crate::providers::{
     parse_model_id,
 };
 use crate::session::{Session, SessionStore};
-use crate::tools::ToolRegistry;
 use crate::tools::monitor::{MonitorManager, stop_all};
+use crate::tools::spawn::{ACTIVITY_ENV, ACTIVITY_PREFIX, USAGE_PREFIX};
+use crate::tools::{SpawnState, ToolRegistry};
 
 const COMPLETION_MENU_NAME: &str = "completion_menu";
 const TOGGLE_TALK_HOST_COMMAND: &str = "agent:toggle-talk";
 const SPINNER_UPDATE_INTERVAL: Duration = Duration::from_millis(128);
-
-use crate::tools::spawn::{ACTIVITY_ENV, ACTIVITY_PREFIX};
 
 struct ChildActivity(bool);
 
@@ -94,11 +93,30 @@ impl ChildActivity {
         message
     }
 
+    fn usage(&self, assistant: &crate::agent::AssistantMessage, model: &str) {
+        if self.0
+            && let Some(usage) = &assistant.usage
+        {
+            self.emit_record(
+                USAGE_PREFIX,
+                &SubagentUsage {
+                    usage: usage.clone(),
+                    model: assistant.model.as_deref().unwrap_or(model).to_string(),
+                },
+            );
+        }
+    }
+
     fn emit(&self, message: &str) {
-        if self.0 {
-            let json = serde_json::to_string(message).expect("serializing a string cannot fail");
+        self.emit_record(ACTIVITY_PREFIX, &message);
+    }
+
+    fn emit_record(&self, prefix: &str, record: &impl serde::Serialize) {
+        if self.0
+            && let Ok(json) = serde_json::to_string(record)
+        {
             // Progress is best-effort; a closed stderr pipe should not stop the turn.
-            let _ = writeln!(std::io::stderr().lock(), "{ACTIVITY_PREFIX}{json}");
+            let _ = writeln!(std::io::stderr().lock(), "{prefix}{json}");
         }
     }
 }
@@ -255,6 +273,7 @@ async fn run_with_args_and_prefill(
     let monitor_enabled =
         !args.single && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
+    let live_subagent_usages = Arc::new(Mutex::new(Vec::new()));
     let (mut session, loaded_agents_files) = load_or_create_session_with_files(&args, &store)?;
     let mut allow_git_writes = session.allow_git_writes || args.allow_git;
     session.allow_git_writes = allow_git_writes;
@@ -503,7 +522,7 @@ async fn run_with_args_and_prefill(
                 args.no_subagent,
                 session.fast,
                 monitor_enabled.then_some(monitor_manager.clone()),
-                Arc::clone(&display),
+                (&display, &live_subagent_usages),
             )?);
         }
         let status_line =
@@ -522,6 +541,20 @@ async fn run_with_args_and_prefill(
             )
         };
         let observed_messages = RefCell::new(Vec::new());
+        let displayed_usage_count = Cell::new(0);
+        let update_footer = || {
+            let usages = live_subagent_usages.lock().expect("subagent usage lock");
+            let mut messages = session.messages.clone();
+            messages.extend(observed_messages.borrow().iter().cloned());
+            display.update_working_footer(&format_text_footer_with_live_usage(
+                &session,
+                &messages,
+                &model_name,
+                allow_git_writes,
+                &usages,
+            ));
+            displayed_usage_count.set(usages.len());
+        };
         let streamed_assistant = Arc::new(std::sync::Mutex::new(AssistantStreamBuffer::default()));
         let persistence_error = RefCell::new(None);
         let streamed_assistant_for_events = Arc::clone(&streamed_assistant);
@@ -551,6 +584,7 @@ async fn run_with_args_and_prefill(
                             })
                             .unwrap_or_default();
                         if let AgentMessage::Assistant(assistant) = message {
+                            child_activity.usage(assistant, &model_name);
                             if !streamed_content.1.is_empty() {
                                 display.render_assistant_delta(&streamed_content.1);
                             }
@@ -571,20 +605,20 @@ async fn run_with_args_and_prefill(
                             }
                         } else {
                             if let AgentMessage::Tool(result) = message {
+                                if result.name == "spawn" {
+                                    // Tool calls are executed serially; this result now owns the batch's usage.
+                                    live_subagent_usages
+                                        .lock()
+                                        .expect("subagent usage lock")
+                                        .clear();
+                                }
                                 child_activity.emit("Waiting for model");
                                 display.render_tool_result(result);
                             }
                             display.render_new_message(message);
                         }
                         observed_messages.borrow_mut().push(message.clone());
-                        let mut status_messages = session.messages.clone();
-                        status_messages.extend(observed_messages.borrow().iter().cloned());
-                        display.update_working_footer(&format_text_footer(
-                            &session,
-                            &status_messages,
-                            &model_name,
-                            allow_git_writes,
-                        ));
+                        update_footer();
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
                             let mut checkpoint = session.clone();
@@ -612,6 +646,9 @@ async fn run_with_args_and_prefill(
                 tokio::select! {
                 result = &mut turn => break result,
                 _ = tick.tick(), if animate => {
+                    if live_subagent_usages.lock().expect("subagent usage lock").len() != displayed_usage_count.get() {
+                        update_footer();
+                    }
                     frame += 1;
                     display.update_spinner(frame);
                 }
@@ -635,6 +672,11 @@ async fn run_with_args_and_prefill(
                 }
             }
         };
+        // A cancelled turn can drop the spawn future without a tool result.
+        live_subagent_usages
+            .lock()
+            .expect("subagent usage lock")
+            .clear();
         let typed_ahead = esc_abort.stop().await;
         if !typed_ahead.is_empty() {
             prompt_prefill
@@ -2186,12 +2228,26 @@ fn format_text_footer(
     model_name: &str,
     allow_git_writes: bool,
 ) -> String {
+    format_text_footer_with_live_usage(session, messages, model_name, allow_git_writes, &[])
+}
+
+fn format_text_footer_with_live_usage(
+    session: &Session,
+    messages: &[AgentMessage],
+    model_name: &str,
+    allow_git_writes: bool,
+    live_usages: &[SubagentUsage],
+) -> String {
+    let mut extra_usages = std::borrow::Cow::Borrowed(session.compacted_usages.as_slice());
+    if !live_usages.is_empty() {
+        extra_usages.to_mut().extend_from_slice(live_usages);
+    }
     let mut line = format_cost_and_context_line_with_all_usages(
         messages,
         model_name,
         allow_git_writes,
         &session.name_usages,
-        &session.compacted_usages,
+        &extra_usages,
     );
     if session.fast && parse_model_id(model_name).provider == "openai" {
         line.push_str("   fast:on");
@@ -2237,11 +2293,19 @@ fn build_loop_runner(
     no_subagent: bool,
     fast: bool,
     monitor: Option<MonitorManager>,
-    display: Arc<TerminalDisplay>,
+    (display, live_subagent_usages): (&Arc<TerminalDisplay>, &Arc<Mutex<Vec<SubagentUsage>>>),
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
     let mut tools = build_tool_registry(allow_git_writes, !no_subagent);
     if !no_subagent && display.live_enabled() && std::io::stdout().is_terminal() {
-        tools = tools.with_spawn_activity(move |activity| display.render_spawn_activity(activity));
+        let display = Arc::clone(display);
+        let usages = Arc::clone(live_subagent_usages);
+        tools = tools.with_spawn_activity(move |activity| match &activity.state {
+            SpawnState::Usage(usage) => usages
+                .lock()
+                .expect("subagent usage lock")
+                .push(usage.clone()),
+            _ => display.render_spawn_activity(activity),
+        });
     }
     if let Some(monitor) = monitor {
         tools = tools.with_monitor(monitor);
