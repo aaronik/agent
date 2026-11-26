@@ -2156,7 +2156,7 @@ async fn fast_flag_requests_priority_only_when_enabled() {
     let home = tempfile::tempdir().unwrap();
     for args in [
         vec!["--single", "standard request"],
-        vec!["--fast", "--single", "priority request"],
+        vec!["-f", "--single", "priority request"],
         vec!["--fast", "--command", "priority command"],
     ] {
         agent_command()

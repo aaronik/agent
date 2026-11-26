@@ -31,7 +31,7 @@ OPENAI_API_KEY=... cargo run -- --model openai:gpt-6-sol
 cargo run -- --model openai:gpt-6-sol --single --image screenshot.png "What is wrong here?"
 ```
 
-Use `--fast` to start with OpenAI Priority processing enabled, or type `/fast` in
+Use `-f` or `--fast` to start with OpenAI Priority processing enabled, or type `/fast` in
 an interactive text chat to toggle it for the session. The setting is saved
 and restored when you resume. The footer shows `fast:on` after any `git:allowed`
 badge; it indicates that Fast mode is requested, not the tier that served the

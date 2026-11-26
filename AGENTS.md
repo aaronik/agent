@@ -16,6 +16,12 @@ For example, `agent --model mock --single "run echo hi"` should be run as:
 cargo run -- --model mock --single "run echo hi"
 ```
 
+## CLI flag conventions
+
+Give every new long CLI flag a unique, mnemonic single-letter shorthand (for
+example, `-f` for `--fast`). Keep existing shortcuts stable and show both forms
+in `--help`.
+
 ## Session modes and footer layout
 
 Use `/allow-git` and `/fast` as the pattern for session-scoped modes. Save their

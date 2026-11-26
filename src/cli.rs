@@ -73,6 +73,7 @@ pub struct Args {
     #[arg(short, long, help = "Run one turn and exit")]
     pub single: bool,
     #[arg(
+        short = 'f',
         long,
         help = "Request OpenAI Priority processing for text turns (may cost more)"
     )]
