@@ -1058,6 +1058,63 @@ async fn spawn_runs_requested_agents_in_parallel_with_distinct_tasks() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn spawn_activity_arrives_before_batch_completion_without_polluting_errors() {
+    use agent_rs::tools::SpawnState;
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("worker");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+for task do :; done
+[ "$AGENT_CHILD_ACTIVITY" = 1 ] || exit 9
+printf '@agent-activity "Reviewing files"\n' >&2
+if [ "$task" = slow ]; then
+    while [ ! -f "$0.release" ]; do sleep 0.02; done
+    echo 'real diagnostic' >&2
+    exit 1
+fi
+echo success
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _bin = EnvGuard::set("AGENT_SPAWN_BIN", script.to_str().unwrap());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let registry = ToolRegistry::new().with_spawn_activity(move |e| {
+        tx.send(e.clone()).unwrap();
+    });
+    let work = tokio::spawn(async move {
+        registry
+            .execute(
+                "batch".into(),
+                "spawn",
+                json!({"intent":"test progress", "agents":[{"task":"slow"},{"task":"fast"}]}),
+            )
+            .await
+    });
+    let mut slow_status = false;
+    let mut fast_done = false;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !slow_status || !fast_done {
+            let e = rx.recv().await.unwrap();
+            assert_eq!((e.group.as_str(), e.total), ("batch", 2));
+            slow_status |= e.index == 0 && e.state == SpawnState::Status("Reviewing files".into());
+            fast_done |= e.task == "fast" && e.index == 1 && e.state == SpawnState::Done;
+        }
+    })
+    .await
+    .expect("slow worker still blocked");
+    std::fs::write(script.with_extension("release"), "").unwrap();
+    let result = work.await.unwrap();
+    assert!(result.content.contains("real diagnostic"));
+    assert!(!result.content.contains("@agent-activity"));
+    assert_eq!(rx.recv().await.unwrap().state, SpawnState::Failed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn spawn_does_not_hang_when_a_descendant_keeps_output_pipes_open() {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;

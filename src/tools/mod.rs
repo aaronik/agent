@@ -11,3 +11,4 @@ pub mod shell;
 pub mod spawn;
 
 pub use registry::{ToolDefinition, ToolRegistry};
+pub use spawn::{SpawnActivity, SpawnState};

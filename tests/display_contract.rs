@@ -1266,3 +1266,196 @@ fn running_previews_are_bounded_sanitized_and_resize_safely() {
     assert!(!history.contains("url="), "{history}");
     assert!(history.contains("PRESERVE"));
 }
+
+fn spawn_activity(
+    group: &str,
+    index: usize,
+    total: usize,
+    task: &str,
+    state: agent_rs::tools::SpawnState,
+) -> agent_rs::tools::SpawnActivity {
+    agent_rs::tools::SpawnActivity {
+        group: group.into(),
+        index,
+        total,
+        task: task.into(),
+        state,
+    }
+}
+
+#[test]
+fn spawn_activity_updates_in_place_and_leaves_one_summary() {
+    use agent_rs::tools::SpawnState::*;
+
+    let mut terminal = vt100::Parser::new(12, 80, 1000);
+    let mut live = LiveRenderer::new(80, 12);
+    feed(&mut terminal, live.start("footer"));
+    feed(&mut terminal, live.output("previous transcript\n"));
+    feed(&mut terminal, live.input("draft", 5, "INSERT", "~"));
+    let mut first = spawn_activity("batch", 0, 3, "Inspect parser", Started);
+    let mut second = spawn_activity("batch", 1, 3, "Review tests", Started);
+    let mut third = spawn_activity("batch", 2, 3, "Check docs", Started);
+    for activity in [&third, &second, &first] {
+        feed(&mut terminal, live.spawn_activity(activity));
+    }
+    first.state = Status("reading inputs".into());
+    feed(&mut terminal, live.spawn_activity(&first));
+    first.state = Status("checking syntax".into());
+    feed(&mut terminal, live.spawn_activity(&first));
+    let visible = terminal.screen().contents();
+    assert!(
+        visible.contains("[Spawn 1/3] checking syntax · Inspect parser · 0s"),
+        "{visible}"
+    );
+    assert!(visible.find("Inspect parser") < visible.find("Review tests"));
+    assert_eq!(visible.matches("Inspect parser").count(), 1);
+    assert!(!visible.contains("reading inputs"));
+    for i in 0..30 {
+        feed(&mut terminal, live.output(&format!("STREAM-{i:02}\n")));
+        feed(&mut terminal, live.spinner(i));
+    }
+    first.state = Done;
+    second.state = Failed;
+    third.state = Cancelled;
+    feed(&mut terminal, live.spawn_activity(&first));
+    feed(&mut terminal, live.spawn_activity(&second));
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("done · Inspect parser"), "{visible}");
+    assert!(visible.contains("failed · Review tests"), "{visible}");
+    assert!(!visible.contains("Spawn:"));
+    feed(&mut terminal, live.output("unterminated output"));
+    feed(&mut terminal, live.spawn_activity(&third));
+    assert!(live.spawn_activity(&third).is_empty());
+    first.state = Status("late status".into());
+    assert!(live.spawn_activity(&first).is_empty());
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("draft│"), "{visible}");
+    assert!(visible.contains("footer"), "{visible}");
+    feed(&mut terminal, live.tool_result("batch", "parent result\n"));
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(
+        history
+            .contains("unterminated output\nSpawn: 1 done, 1 failed, 1 cancelled\nparent result"),
+        "{visible}"
+    );
+    assert!(history.contains("previous transcript"));
+    for i in 0..30 {
+        assert!(history.contains(&format!("STREAM-{i:02}")));
+    }
+    for transient in [
+        "[Spawn",
+        "Inspect parser",
+        "Review tests",
+        "Check docs",
+        "draft│",
+    ] {
+        assert!(
+            !history.contains(transient),
+            "{transient} leaked into transcript"
+        );
+    }
+    // The scrollback helper returns overlapping windows; count on the live screen.
+    assert_eq!(terminal.screen().contents().matches("Spawn:").count(), 1);
+}
+
+#[test]
+fn spawn_activity_shares_footer_space_and_cleans_up_incomplete_groups() {
+    use agent_rs::tools::SpawnState::*;
+
+    let mut terminal = vt100::Parser::new(12, 44, 100);
+    let mut live = LiveRenderer::new(44, 12);
+    feed(&mut terminal, live.start("working"));
+    feed(&mut terminal, live.tool_start(&ToolCall {
+        id: "a".into(),
+        name: "spawn".into(),
+        arguments: json!({"agents": [{"task": "a long parent preview that must not use all the available footer rows"}]}),
+    }));
+    feed(
+        &mut terminal,
+        live.spawn_activity(&spawn_activity(
+            "a",
+            0,
+            2,
+            "Task-A",
+            Status("\x1b[2Jscan\nfiles".into()),
+        )),
+    );
+    feed(
+        &mut terminal,
+        live.spawn_activity(&spawn_activity("b", 0, 1, "Task-B", Started)),
+    );
+    let visible = terminal.screen().contents();
+    assert!(visible.contains("[> Running] spawn"), "{visible}");
+    assert!(visible.contains("scan↵files · Task-A"), "{visible}");
+    assert!(visible.contains("Task-B"), "{visible}");
+    assert!(!visible.contains("agents="), "{visible}");
+    for i in 1..10 {
+        let text = live.spawn_activity(&spawn_activity(
+            "many",
+            i,
+            20,
+            &"漢字🙂".repeat(90),
+            Started,
+        ));
+        assert!(!text.contains("\x1b[2J"));
+        feed(&mut terminal, text);
+    }
+    assert!(terminal.screen().contents().contains("more agents"));
+    terminal.screen_mut().set_size(6, 32);
+    feed(&mut terminal, live.resize(32, 6));
+    assert!(terminal.screen().contents().contains("working"));
+    terminal.screen_mut().set_size(12, 44);
+    feed(&mut terminal, live.resize(44, 12));
+    feed(&mut terminal, live.tool_result("a", "aborted parent\n"));
+    assert!(!terminal.screen().contents().contains("Task-A"));
+    assert!(terminal.screen().contents().contains("Task-B"));
+    assert!(
+        live.spawn_activity(&spawn_activity("a", 1, 2, "late", Started))
+            .is_empty()
+    );
+    feed(&mut terminal, live.finish());
+    let history = transcript(&mut terminal);
+    assert!(history.contains("aborted parent"));
+    assert!(!history.contains("[Spawn"));
+    assert!(!history.contains("Spawn:"));
+    assert!(!terminal.screen().hide_cursor());
+    feed(&mut terminal, live.start("next turn"));
+    feed(
+        &mut terminal,
+        live.spawn_activity(&spawn_activity("a", 0, 1, "new task", Started)),
+    );
+    assert!(terminal.screen().contents().contains("new task"));
+}
+
+#[test]
+fn spawn_activity_fits_task_status_and_summary_without_wrapping() {
+    use agent_rs::tools::SpawnState::*;
+
+    let mut terminal = vt100::Parser::new(9, 30, 100);
+    let mut live = LiveRenderer::new(30, 9);
+    feed(&mut terminal, live.start("footer"));
+    feed(
+        &mut terminal,
+        live.spawn_activity(&spawn_activity(
+            "short",
+            0,
+            1,
+            "Parser regression",
+            Status("Scanning the repository for regression coverage".into()),
+        )),
+    );
+    let visible = terminal.screen().contents();
+    let row = visible
+        .lines()
+        .find(|line| line.contains("[Spawn"))
+        .unwrap();
+    assert!(row.contains("Scann"), "{row}");
+    assert!(row.contains("Parser"), "{row}");
+    feed(
+        &mut terminal,
+        live.spawn_activity(&spawn_activity("short", 0, 1, "", Done)),
+    );
+    feed(&mut terminal, live.finish());
+    assert_eq!(terminal.screen().contents().trim(), "Spawn: 1✓ 0✗ 0−");
+}

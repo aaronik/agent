@@ -6,13 +6,36 @@ use futures_util::future::join_all;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
 use tokio::time;
 
 use crate::agent::{AgentMessage, CancellationToken, SubagentUsage};
 use crate::providers::{effective_model_name, list_models};
 use crate::session::SessionStore;
+
+pub(crate) const ACTIVITY_ENV: &str = "AGENT_CHILD_ACTIVITY";
+pub(crate) const ACTIVITY_PREFIX: &str = "@agent-activity ";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpawnState {
+    Started,
+    Status(String),
+    Done,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct SpawnActivity {
+    pub group: String,
+    pub index: usize,
+    pub total: usize,
+    pub task: String,
+    pub state: SpawnState,
+}
+
+pub(super) type Observer = dyn Fn(&SpawnActivity) + Send + Sync;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +72,15 @@ pub async fn spawn_cancellable_with_usage(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
+    spawn_observed(args, cancellation_token, "", None).await
+}
+
+pub(super) async fn spawn_observed(
+    args: SpawnArgs,
+    cancellation_token: &CancellationToken,
+    group: &str,
+    observer: Option<&Observer>,
+) -> Result<(String, Vec<SubagentUsage>), String> {
     let agents = args.agents;
     if agents.is_empty() {
         return Err("agents must contain at least one agent".to_string());
@@ -70,10 +102,33 @@ pub async fn spawn_cancellable_with_usage(
         }
     }
 
+    let total = agents.len();
     let results = join_all(
         agents
             .into_iter()
-            .map(|agent| spawn_one(agent, cancellation_token)),
+            .enumerate()
+            .map(|(index, agent)| async move {
+                let task: String = agent.task.chars().take(160).collect();
+                let report = |state| {
+                    if let Some(observer) = observer {
+                        observer(&SpawnActivity {
+                            group: group.to_owned(),
+                            index,
+                            total,
+                            task: task.clone(),
+                            state,
+                        });
+                    }
+                };
+                let result =
+                    spawn_one(agent, cancellation_token, observer.is_some(), &report).await;
+                report(match &result {
+                    Ok(_) => SpawnState::Done,
+                    Err(_) if cancellation_token.is_cancelled() => SpawnState::Cancelled,
+                    Err(_) => SpawnState::Failed,
+                });
+                result
+            }),
     )
     .await;
     let mut outputs = Vec::with_capacity(results.len());
@@ -89,6 +144,8 @@ pub async fn spawn_cancellable_with_usage(
 async fn spawn_one(
     args: SpawnAgent,
     cancellation_token: &CancellationToken,
+    observed: bool,
+    report: &(dyn Fn(SpawnState) + Sync),
 ) -> Result<(String, Vec<SubagentUsage>), String> {
     let raw_model = args.model.clone().unwrap_or_else(|| {
         std::env::var("AGENT_SPAWN_MODEL").unwrap_or_else(|_| effective_model_name(None))
@@ -111,6 +168,11 @@ async fn spawn_one(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if observed {
+        command.env(ACTIVITY_ENV, "1");
+    } else {
+        command.env_remove(ACTIVITY_ENV);
+    }
     set_process_group(&mut command);
 
     if let Some(conversation_id) = args.conversation_id.as_deref() {
@@ -123,25 +185,29 @@ async fn spawn_one(
         .spawn()
         .map_err(|err| format!("Error spawning agent: {err}"))?;
 
-    let process_group_id = child.id();
+    // Dropping the outer turn (e.g. Escape) must also stop descendants and
+    // both pipe readers; none of these futures should outlive the batch.
+    let mut group = ProcessGroup(child.id());
+    report(SpawnState::Started);
     let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(read_pipe(stdout));
-    let stderr_task = tokio::spawn(read_pipe(stderr));
-
+    let stderr = child.stderr.take().expect("piped stderr");
     let output = tokio::select! {
-        status = child.wait() => {
-            let status = status.map_err(|err| format!("Error spawning agent: {err}"))?;
-            // The agent may have exited while a descendant still owns its stdout
-            // or stderr. Stop the process group before draining so those pipes
-            // reach EOF instead of hanging this tool call indefinitely.
-            terminate_process_group(process_group_id);
-            let stdout = join_pipe_task(stdout_task, "stdout").await?;
-            let stderr = join_pipe_task(stderr_task, "stderr").await?;
-            std::process::Output { status, stdout, stderr }
+        result = async {
+            let wait = async {
+                let status = child.wait().await.map_err(|err| format!("Error spawning agent: {err}"))?;
+                // Descendants can retain pipes after the agent exits.
+                group.stop();
+                Ok(status)
+            };
+            tokio::try_join!(wait, read_pipe(stdout), read_stderr(stderr, observed, report))
+        } => {
+            let (status, stdout, stderr) = result?;
+            std::process::Output {status, stdout, stderr}
         }
         _ = cancellation_token.cancelled() => {
-            terminate_child(&mut child).await;
+            group.stop();
+            let _ = child.start_kill();
+            let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
             return Err("tool call cancelled".to_string());
         }
     };
@@ -194,12 +260,35 @@ fn subagent_usages(messages: &[AgentMessage], fallback_model: &str) -> Vec<Subag
         .collect()
 }
 
-async fn join_pipe_task(
-    task: tokio::task::JoinHandle<Result<Vec<u8>, String>>,
-    name: &str,
+async fn read_stderr(
+    pipe: tokio::process::ChildStderr,
+    observed: bool,
+    report: &(dyn Fn(SpawnState) + Sync),
 ) -> Result<Vec<u8>, String> {
-    task.await
-        .map_err(|err| format!("failed to join {name} reader: {err}"))?
+    if !observed {
+        return read_pipe(Some(pipe)).await;
+    }
+    let mut reader = BufReader::new(pipe);
+    let mut diagnostics = Vec::new();
+    loop {
+        let start = diagnostics.len();
+        if reader
+            .read_until(b'\n', &mut diagnostics)
+            .await
+            .map_err(|e| format!("failed to read spawned agent stderr: {e}"))?
+            == 0
+        {
+            break;
+        }
+        if let Some(record) = diagnostics[start..].strip_prefix(ACTIVITY_PREFIX.as_bytes())
+            && record.len() < 2048
+            && let Ok(message) = serde_json::from_slice::<String>(record)
+        {
+            diagnostics.truncate(start);
+            report(SpawnState::Status(message));
+        }
+    }
+    Ok(diagnostics)
 }
 
 async fn read_pipe<T>(pipe: Option<T>) -> Result<Vec<u8>, String>
@@ -215,13 +304,18 @@ where
     Ok(output)
 }
 
-async fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
+struct ProcessGroup(Option<u32>);
+
+impl ProcessGroup {
+    fn stop(&mut self) {
+        terminate_process_group(self.0.take());
     }
-    terminate_process_group(child.id());
-    let _ = child.start_kill();
-    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 #[cfg(unix)]

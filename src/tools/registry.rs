@@ -17,7 +17,7 @@ use crate::tools::image::{GenImageArgs, gen_image};
 use crate::tools::monitor::{MonitorArgs, MonitorManager};
 use crate::tools::output::truncate_tool_output;
 use crate::tools::shell::{RunShellCommandArgs, run_shell_command_cancellable};
-use crate::tools::spawn::{SpawnArgs, spawn_cancellable_with_usage};
+use crate::tools::spawn::{Observer, SpawnActivity, SpawnArgs, spawn_observed};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
@@ -26,11 +26,21 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
+#[derive(Clone)]
+struct ActivitySink(std::sync::Arc<Observer>);
+
+impl std::fmt::Debug for ActivitySink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActivitySink")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolRegistry {
     definitions: Vec<ToolDefinition>,
     allow_git_writes: bool,
     monitor: Option<MonitorManager>,
+    activity: Option<ActivitySink>,
 }
 
 impl Default for ToolRegistry {
@@ -97,7 +107,16 @@ impl ToolRegistry {
             definitions,
             allow_git_writes,
             monitor: None,
+            activity: None,
         }
+    }
+
+    pub fn with_spawn_activity(
+        mut self,
+        observe: impl Fn(&SpawnActivity) + Send + Sync + 'static,
+    ) -> Self {
+        self.activity = Some(ActivitySink(std::sync::Arc::new(observe)));
+        self
     }
 
     pub fn with_monitor(mut self, monitor: MonitorManager) -> Self {
@@ -215,7 +234,14 @@ impl ToolRegistry {
             },
             "spawn" => match serde_json::from_value::<SpawnArgs>(arguments) {
                 Ok(args) => {
-                    match Box::pin(spawn_cancellable_with_usage(args, cancellation_token)).await {
+                    match spawn_observed(
+                        args,
+                        cancellation_token,
+                        &tool_call_id,
+                        self.activity.as_ref().map(|sink| sink.0.as_ref()),
+                    )
+                    .await
+                    {
                         Ok((content, usages)) => {
                             subagent_usages = usages;
                             Ok(content)

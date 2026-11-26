@@ -8,6 +8,9 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::spawn_activity::{Change, SpawnRows};
+use crate::tools::SpawnActivity;
+
 use super::{
     RESET, SPINNER_FRAMES, char_byte_index, fit_footer_status, truncate_to_width,
     working_input_preview,
@@ -38,6 +41,7 @@ pub struct LiveRenderer {
     prompt: String,
     frame: usize,
     running_tools: Vec<(String, String, Option<String>)>,
+    spawn_rows: SpawnRows,
 }
 
 impl std::fmt::Debug for LiveRenderer {
@@ -66,6 +70,7 @@ impl LiveRenderer {
             prompt: super::working_directory_prompt(),
             frame: 0,
             running_tools: Vec::new(),
+            spawn_rows: SpawnRows::default(),
         }
     }
 
@@ -199,6 +204,7 @@ impl LiveRenderer {
     }
 
     pub fn tool_result(&mut self, id: &str, completed: &str) -> String {
+        self.spawn_rows.close(id);
         self.running_tools
             .retain(|(running_id, _, _)| running_id != id);
         // output() clears the old transient area before appending the result,
@@ -206,16 +212,51 @@ impl LiveRenderer {
         self.output(completed)
     }
 
-    fn tool_lines(&self, input_rows: usize) -> Vec<String> {
+    /// Render an update in the transient area, or commit a single summary line.
+    pub fn spawn_activity(&mut self, activity: &SpawnActivity) -> String {
+        if !self.active {
+            return String::new();
+        }
+        match self.spawn_rows.update(activity, usize::from(self.width)) {
+            Change::None => String::new(),
+            Change::Redraw => {
+                let mut out = self.clear();
+                out.push_str(&self.draw());
+                out
+            }
+            Change::Complete(summary) => {
+                let prefix = if self.terminal.screen().cursor_position().1 > 0 {
+                    "\n"
+                } else {
+                    ""
+                };
+                self.output(&format!("{RESET}{prefix}{summary}\n"))
+            }
+        }
+    }
+
+    fn activity_lines(&self, input_rows: usize) -> Vec<String> {
         // Preserve the input viewport, status, separator, and an output row.
         let budget = usize::from(self.height).saturating_sub(input_rows + 3);
-        if budget == 0 || self.width < 6 {
+        let spawn_budget = budget.saturating_sub(usize::from(!self.running_tools.is_empty()));
+        let spawn = self
+            .spawn_rows
+            .lines(spawn_budget, usize::from(self.width - 1));
+        let mut lines = self.tool_lines(budget - spawn.len());
+        lines.extend(spawn);
+        lines
+    }
+
+    fn tool_lines(&self, budget: usize) -> Vec<String> {
+        if budget == 0 {
             return Vec::new();
         }
         let width = usize::from(self.width - 1);
         let mut lines = Vec::new();
         let mut shown = 0;
-        for (_, summary, details) in &self.running_tools {
+        for (id, summary, details) in &self.running_tools {
+            // Child rows already identify the tasks; do not repeat the raw spawn arguments.
+            let details = details.as_ref().filter(|_| !self.spawn_rows.contains(id));
             // Reserve space for the arguments and an overflow indicator for other calls.
             let remaining = self.running_tools.len() - shown - 1;
             let reserved = usize::from(remaining > 0) + usize::from(details.is_some());
@@ -268,9 +309,9 @@ impl LiveRenderer {
         if lines.is_empty() {
             return self.restore_cursor();
         }
-        let tools = self.tool_lines(lines.len());
-        let tool_rows = tools.len() as u16;
-        let reserve = lines.len() as u16 + tool_rows + 2;
+        let activity = self.activity_lines(lines.len());
+        let activity_rows = activity.len() as u16;
+        let reserve = lines.len() as u16 + activity_rows + 2;
         let (row, col) = self.terminal.screen().cursor_position();
         let available = self.height - row - 1;
         let mut out = String::new();
@@ -306,7 +347,7 @@ impl LiveRenderer {
         }
         let row = self.terminal.screen().cursor_position().0;
         out.push_str(&format!("{RESET}\x1b[{};1H\x1b[J", row + 2));
-        for (index, line) in tools.iter().enumerate() {
+        for (index, line) in activity.iter().enumerate() {
             out.push_str(&format!(
                 "\x1b[{};1H\x1b[36m{line}{RESET}",
                 row + 3 + index as u16
@@ -314,7 +355,7 @@ impl LiveRenderer {
         }
         out.push_str(&format!(
             "\x1b[{};1H\x1b[2m{}",
-            row + 3 + tool_rows,
+            row + 3 + activity_rows,
             fit_footer_status(
                 &working_input_preview(&self.status),
                 usize::from(self.width - 1)
@@ -323,7 +364,7 @@ impl LiveRenderer {
         for (index, line) in lines.iter().enumerate() {
             out.push_str(&format!(
                 "\x1b[{};1H\x1b[0;36m{line}{RESET}",
-                row + 4 + tool_rows + index as u16
+                row + 4 + activity_rows + index as u16
             ));
         }
         out.push_str(&self.restore_cursor());
@@ -395,6 +436,8 @@ impl LiveRenderer {
     pub fn finish(&mut self) -> String {
         let mut out = self.clear();
         self.active = false;
+        self.running_tools.clear();
+        self.spawn_rows = SpawnRows::default();
         // A streamed final response need not end in LF. Keep the next prompt
         // and session-id line separate from the final assistant text.
         if self.terminal.screen().cursor_position().1 > 0 {

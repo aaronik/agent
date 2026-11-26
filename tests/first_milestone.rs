@@ -2666,6 +2666,109 @@ async fn fast_cost_uses_the_served_tier_and_survives_resume() {
         .stdout(predicates::str::contains("Cost: $0.0031 + unknown"));
 }
 
+#[test]
+fn child_activity_is_opt_in_and_keeps_progress_off_stdout() {
+    let home = tempfile::tempdir().unwrap();
+    for setting in [None, Some("0"), Some("1")] {
+        let mut command = agent_command();
+        command.env("HOME", home.path());
+        match setting {
+            Some(value) => command.env("AGENT_CHILD_ACTIVITY", value),
+            None => command.env_remove("AGENT_CHILD_ACTIVITY"),
+        };
+        let output = command
+            .args(["--model", "mock", "--single", "run echo hi"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&output.get_output().stdout);
+        let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+        assert!(stdout.contains("Tool completed: hi"), "{stdout}");
+        assert!(!stdout.contains("@agent-activity "), "{stdout}");
+        if setting == Some("1") {
+            assert_eq!(
+                stderr.lines().collect::<Vec<_>>(),
+                [
+                    r#"@agent-activity "run the configured mock command""#,
+                    r#"@agent-activity "Waiting for model""#,
+                ],
+            );
+        } else {
+            assert!(!stderr.contains("@agent-activity "), "{stderr}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn child_activity_sanitizes_and_bounds_progress_without_echoing_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let response = |response| {
+        let event = json!({"type": "response.completed", "response": response});
+        ResponseTemplate::new(200).set_body_raw(
+            format!("data: {event}\n\ndata: [DONE]\n\n"),
+            "text/event-stream",
+        )
+    };
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(wiremock::matchers::body_string_contains(
+            "function_call_output",
+        ))
+        .respond_with(response(json!({"output_text": "done"})))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let shell_args = json!({
+        "intent": "  Check\r\n\t\"status\"\u{7}  ",
+        "cmd": "printf RAW_COMMAND_MARKER",
+    });
+    let progress_args = json!({
+        "intent": "Send a progress update",
+        "message": format!(" Progress\u{2028}\u{1b}{} ", "界".repeat(500)),
+    });
+    let invalid_args = json!({"intent": "é".repeat(200), "cmd": "false"});
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(response(json!({"output": [
+            {"type":"function_call", "call_id":"check", "name":"run_shell_command", "arguments":shell_args.to_string()},
+            {"type":"function_call", "call_id":"update", "name":"communicate", "arguments":progress_args.to_string()},
+            {"type":"function_call", "call_id":"invalid", "name":"run_shell_command", "arguments":invalid_args.to_string()}
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = agent_command()
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "local")
+        .env("AGENT_BASE_URL", server.uri())
+        .env("AGENT_CHILD_ACTIVITY", "1")
+        .args(["--model", "openai:test", "--single", "check status"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr);
+    assert!(!stderr.contains("RAW_COMMAND_MARKER"), "{stderr}");
+    let progress = stderr
+        .lines()
+        .map(|line| {
+            let json = line.strip_prefix("@agent-activity ").expect(line);
+            serde_json::from_str::<String>(json).expect("JSON string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(progress.len(), 6, "{progress:?}");
+    assert_eq!(progress[0], "Check \"status\"");
+    assert!(progress[2].starts_with("Progress 界"), "{}", progress[2]);
+    assert!(progress[2].chars().count() <= 160);
+    assert!(progress[4].starts_with('é') && progress[4].chars().count() <= 80);
+    for message in &progress {
+        assert!(!message.chars().any(char::is_control), "{message:?}");
+    }
+    for index in [1, 3, 5] {
+        assert_eq!(progress[index], "Waiting for model");
+    }
+}
+
 #[tokio::test]
 async fn incomplete_responses_save_billed_usage_once_without_running_partial_tools() {
     for streamed_text in ["", "A partial answer"] {

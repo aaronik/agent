@@ -13,7 +13,7 @@ use reedline::{
 };
 use std::cell::RefCell;
 use std::error::Error;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, RwLock,
@@ -37,6 +37,71 @@ use crate::tools::monitor::{MonitorManager, stop_all};
 const COMPLETION_MENU_NAME: &str = "completion_menu";
 const TOGGLE_TALK_HOST_COMMAND: &str = "agent:toggle-talk";
 const SPINNER_UPDATE_INTERVAL: Duration = Duration::from_millis(128);
+
+use crate::tools::spawn::{ACTIVITY_ENV, ACTIVITY_PREFIX};
+
+struct ChildActivity(bool);
+
+impl ChildActivity {
+    fn tool_started(&self, call: &crate::agent::ToolCall) {
+        if !self.0 {
+            return;
+        }
+        let argument = |key, limit| {
+            call.arguments
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(|text| Self::sanitize(text, limit))
+                .filter(|text| !text.is_empty())
+        };
+        // The user-facing message is more useful than the intent for communicate.
+        let message = if call.name == "communicate" {
+            argument("message", 160).or_else(|| argument("intent", 80))
+        } else {
+            argument("intent", 80)
+        };
+        self.emit(message.as_deref().unwrap_or("Running tool"));
+    }
+
+    fn sanitize(text: &str, limit: usize) -> String {
+        let mut message = String::new();
+        let mut space = false;
+        let mut len = 0;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                space = len > 0;
+                continue;
+            }
+            if ch.is_control()
+                || matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                continue;
+            }
+            len += 1 + usize::from(space);
+            if len > limit {
+                if let Some((offset, _)) = message.char_indices().nth(limit - 1) {
+                    message.truncate(offset);
+                }
+                message.push('…');
+                break;
+            }
+            if space {
+                message.push(' ');
+                space = false;
+            }
+            message.push(ch);
+        }
+        message
+    }
+
+    fn emit(&self, message: &str) {
+        if self.0 {
+            let json = serde_json::to_string(message).expect("serializing a string cannot fail");
+            // Progress is best-effort; a closed stderr pipe should not stop the turn.
+            let _ = writeln!(std::io::stderr().lock(), "{ACTIVITY_PREFIX}{json}");
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PromptInput {
@@ -182,6 +247,7 @@ async fn run_with_args_and_prefill(
         return run_command_mode(&args).await;
     }
 
+    let child_activity = ChildActivity(std::env::var(ACTIVITY_ENV).as_deref() == Ok("1"));
     let store = SessionStore::new()?;
     let display = Arc::new(TerminalDisplay::new());
     let wake_signal = Arc::new(AtomicBool::new(false));
@@ -437,6 +503,7 @@ async fn run_with_args_and_prefill(
                 args.no_subagent,
                 session.fast,
                 monitor_enabled.then_some(monitor_manager.clone()),
+                Arc::clone(&display),
             )?);
         }
         let status_line =
@@ -504,6 +571,7 @@ async fn run_with_args_and_prefill(
                             }
                         } else {
                             if let AgentMessage::Tool(result) = message {
+                                child_activity.emit("Waiting for model");
                                 display.render_tool_result(result);
                             }
                             display.render_new_message(message);
@@ -529,12 +597,24 @@ async fn run_with_args_and_prefill(
                             }
                         }
                     },
-                    |call| display.render_tool_start(call),
+                    |call| {
+                        child_activity.tool_started(call);
+                        display.render_tool_start(call);
+                    },
                 );
             tokio::pin!(turn);
+            // Redraw even when no input watcher is running (e.g. --single).
+            let animate = display.live_enabled() && std::io::stdout().is_terminal();
+            let mut tick = tokio::time::interval(SPINNER_UPDATE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut frame = 0;
             loop {
                 tokio::select! {
                 result = &mut turn => break result,
+                _ = tick.tick(), if animate => {
+                    frame += 1;
+                    display.update_spinner(frame);
+                }
                 title = async { title_task.as_mut().expect("title task").await }, if title_task.is_some() => {
                     title_task = None;
                     if let Ok(Some(name)) = title {
@@ -1254,16 +1334,7 @@ impl EscAbortWatcher {
                     return;
                 }
                 let _input_mode = InputModeGuard;
-                let mut spinner_frame = 0;
-                let mut last_spinner_update = std::time::Instant::now();
                 while !stop_watcher.load(Ordering::SeqCst) && !cancellation_token.is_cancelled() {
-                    if last_spinner_update.elapsed() >= SPINNER_UPDATE_INTERVAL {
-                        spinner_frame += 1;
-                        if let Some(display) = &display {
-                            display.update_spinner(spinner_frame);
-                        }
-                        last_spinner_update = std::time::Instant::now();
-                    }
                     let next_event = {
                         let _input = crate::display::TERMINAL_INPUT
                             .lock()
@@ -2166,8 +2237,12 @@ fn build_loop_runner(
     no_subagent: bool,
     fast: bool,
     monitor: Option<MonitorManager>,
+    display: Arc<TerminalDisplay>,
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
     let mut tools = build_tool_registry(allow_git_writes, !no_subagent);
+    if !no_subagent && display.live_enabled() && std::io::stdout().is_terminal() {
+        tools = tools.with_spawn_activity(move |activity| display.render_spawn_activity(activity));
+    }
     if let Some(monitor) = monitor {
         tools = tools.with_monitor(monitor);
     }

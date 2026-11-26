@@ -8,10 +8,12 @@ use unicode_width::UnicodeWidthStr;
 
 mod live;
 mod markdown_stream;
+mod spawn_activity;
 pub use live::LiveRenderer;
 pub use markdown_stream::AssistantMarkdownStream;
 
 use crate::agent::{AgentMessage, ToolCall, ToolResult, ToolStatus};
+use crate::tools::SpawnActivity;
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -247,6 +249,14 @@ impl TerminalDisplay {
         self.output_with(&rendered, |renderer| {
             renderer.tool_result(&result.tool_call_id, &rendered)
         });
+    }
+
+    /// Update a live subagent row, keyed by group and zero-based index.
+    /// Use the parent tool-call ID as the group so its result can clear any
+    /// unfinished rows. A fully settled group appends one summary line.
+    /// Ignored when no live turn is active (including pipes and AGENT_NO_LIVE).
+    pub fn render_spawn_activity(&self, activity: &SpawnActivity) {
+        self.transaction(|renderer| renderer.spawn_activity(activity));
     }
 
     pub fn render_tool_start(&self, call: &ToolCall) {
