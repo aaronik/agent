@@ -463,6 +463,70 @@ fn realtime_reconnect_restores_prior_chat_messages_and_tool_context() {
     assert_eq!(events[3]["item"]["output"], "blue\n");
 }
 
+#[test]
+fn realtime_history_replays_oversized_tool_call_ids_with_distinct_matching_aliases() {
+    let first = "call_0123456789abcdef0123456789abcdef";
+    let second = "call_0123456789abcdef0123456789abcdee";
+    assert_eq!(first.len(), 37);
+    assert_eq!(&first[..32], &second[..32]);
+
+    let tool_exchange = |ids: &[&str]| {
+        let mut history = vec![AgentMessage::Assistant(AssistantMessage {
+            content: String::new(),
+            tool_calls: ids
+                .iter()
+                .map(|id| ToolCall {
+                    id: (*id).to_string(),
+                    name: "run_shell_command".into(),
+                    arguments: json!({"cmd": "echo blue"}),
+                })
+                .collect(),
+            usage: None,
+            model: None,
+            metadata: Default::default(),
+        })];
+        history.extend(ids.iter().rev().map(|id| {
+            AgentMessage::Tool(ToolResult {
+                tool_call_id: (*id).to_string(),
+                name: "run_shell_command".into(),
+                status: ToolStatus::Success,
+                content: format!("output for {id}"),
+                elapsed_ms: None,
+                subagent_usages: Vec::new(),
+                images: Vec::new(),
+            })
+        }));
+        history
+    };
+
+    // Reserve a short ID that the first replay would otherwise allocate as an alias.
+    let unreserved = conversation_item_create_events(&tool_exchange(&[first]));
+    let short = unreserved[0]["item"]["call_id"].as_str().unwrap();
+    assert!(short.len() <= 32);
+    let boundary = "x".repeat(32);
+    let ids = [first, second, short, &boundary];
+    let history = tool_exchange(&ids);
+    let events = conversation_item_create_events(&history);
+
+    assert_eq!(events.len(), 2 * ids.len());
+    assert_eq!(events, conversation_item_create_events(&history));
+    let mut seen = std::collections::HashSet::new();
+    for (index, original) in ids.into_iter().enumerate() {
+        let call = &events[index]["item"];
+        let result = &events[events.len() - 1 - index]["item"];
+        let alias = call["call_id"].as_str().unwrap();
+        assert!(!alias.is_empty() && alias.len() <= 32);
+        assert!(seen.insert(alias));
+        if original.len() <= 32 {
+            assert_eq!(alias, original);
+        }
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(result["type"], "function_call_output");
+        assert_eq!(result["call_id"], alias);
+        assert_eq!(result["output"], format!("output for {original}"));
+    }
+}
+
 fn test_config() -> agent_rs::voice::realtime::RealtimeConfig {
     agent_rs::voice::realtime::RealtimeConfig {
         model: "gpt-realtime".to_string(),

@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
@@ -298,9 +300,44 @@ pub fn function_call_output_event(call_id: &str, output: &str) -> Value {
 }
 
 pub fn conversation_item_create_events(messages: &[AgentMessage]) -> Vec<Value> {
-    messages
+    const MAX_CALL_ID_LEN: usize = 32;
+
+    let mut items: Vec<_> = messages
         .iter()
         .flat_map(conversation_items_for_message)
+        .collect();
+
+    // Reserve valid IDs before assigning aliases so they can pass through unchanged.
+    let mut reserved: HashSet<String> = items
+        .iter()
+        .filter_map(|item| item["call_id"].as_str())
+        .filter(|id| id.len() <= MAX_CALL_ID_LEN)
+        .map(str::to_owned)
+        .collect();
+    let mut aliases = HashMap::new();
+    let mut next_alias = 0_u64;
+
+    for item in &mut items {
+        if let Some(id) = item["call_id"].as_str()
+            && id.len() > MAX_CALL_ID_LEN
+        {
+            // Both the call and its result must use the same wire ID. Keep the
+            // saved history and live Realtime call IDs untouched.
+            let alias = aliases.entry(id.to_owned()).or_insert_with(|| {
+                loop {
+                    let candidate = format!("call_replay_{next_alias:x}");
+                    next_alias += 1;
+                    if reserved.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                }
+            });
+            item["call_id"] = json!(alias);
+        }
+    }
+
+    items
+        .into_iter()
         .map(|item| json!({ "type": "conversation.item.create", "item": item }))
         .collect()
 }
