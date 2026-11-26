@@ -93,6 +93,30 @@ struct ModelPricing {
     cache_creation_input_token_cost: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_optional_f64")]
     output_cost_per_token: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    input_cost_per_token_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_read_input_token_cost_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_creation_input_token_cost_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    output_cost_per_token_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    input_cost_per_token_above_272k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_read_input_token_cost_above_272k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_creation_input_token_cost_above_272k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    output_cost_per_token_above_272k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    input_cost_per_token_above_272k_tokens_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_read_input_token_cost_above_272k_tokens_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    cache_creation_input_token_cost_above_272k_tokens_priority: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    output_cost_per_token_above_272k_tokens_priority: Option<f64>,
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_optional_usize")]
@@ -117,20 +141,82 @@ impl ModelPricing {
     }
 
     fn cost_usd(&self, usage: &Usage) -> Option<f64> {
+        let fast = match service_tier(usage) {
+            None | Some("default" | "standard" | "auto") => false,
+            Some("fast" | "priority") => true,
+            Some(_) => return None,
+        };
+        // LiteLLM's long-context rate applies to the whole request, not just
+        // the tokens over the threshold.
+        let long = usage.input_tokens > 272_000
+            && (self.input_cost_per_token_above_272k_tokens.is_some()
+                || self.output_cost_per_token_above_272k_tokens.is_some()
+                || self
+                    .input_cost_per_token_above_272k_tokens_priority
+                    .is_some()
+                || self
+                    .output_cost_per_token_above_272k_tokens_priority
+                    .is_some());
+        let (input, read, write, output) = match (fast, long) {
+            (true, true) => (
+                self.input_cost_per_token_above_272k_tokens_priority,
+                self.cache_read_input_token_cost_above_272k_tokens_priority,
+                self.cache_creation_input_token_cost_above_272k_tokens_priority,
+                self.output_cost_per_token_above_272k_tokens_priority,
+            ),
+            (true, false) => (
+                self.input_cost_per_token_priority,
+                self.cache_read_input_token_cost_priority,
+                self.cache_creation_input_token_cost_priority,
+                self.output_cost_per_token_priority,
+            ),
+            (false, true) => (
+                self.input_cost_per_token_above_272k_tokens,
+                self.cache_read_input_token_cost_above_272k_tokens,
+                self.cache_creation_input_token_cost_above_272k_tokens,
+                self.output_cost_per_token_above_272k_tokens,
+            ),
+            (false, false) => (
+                self.input_cost_per_token,
+                self.cache_read_input_token_cost,
+                self.cache_creation_input_token_cost,
+                self.output_cost_per_token,
+            ),
+        };
+        let (cached, written) = cache_token_counts(usage);
+        let ordinary = usage.input_tokens - cached - written;
+        if fast || long {
+            // Don't silently substitute Standard or short-context rates when
+            // a needed tier-specific rate is absent.
+            return Some(
+                token_cost(ordinary, input)?
+                    + token_cost(cached, read)?
+                    + token_cost(written, write)?
+                    + token_cost(usage.output_tokens, output)?,
+            );
+        }
         if !self.has_text_pricing() {
             return None;
         }
-
-        let input_rate = self.input_cost_per_token.unwrap_or(0.0);
-        let (cached, written) = cache_token_counts(usage);
-        let ordinary = usage.input_tokens - cached - written;
+        let input = input.unwrap_or(0.0);
         Some(
-            (ordinary as f64 * input_rate)
-                + (cached as f64 * self.cache_read_input_token_cost.unwrap_or(input_rate))
-                + (written as f64 * self.cache_creation_input_token_cost.unwrap_or(input_rate))
-                + (usage.output_tokens as f64 * self.output_cost_per_token.unwrap_or(0.0)),
+            (ordinary as f64 * input)
+                + (cached as f64 * read.unwrap_or(input))
+                + (written as f64 * write.unwrap_or(input))
+                + (usage.output_tokens as f64 * output.unwrap_or(0.0)),
         )
     }
+}
+
+fn token_cost(tokens: u64, rate: Option<f64>) -> Option<f64> {
+    if tokens == 0 {
+        return Some(0.0);
+    }
+    Some(tokens as f64 * rate.filter(|rate| rate.is_finite() && *rate >= 0.0)?)
+}
+
+pub(crate) fn service_tier(usage: &Usage) -> Option<&str> {
+    usage.raw.as_ref()?.get("service_tier")?.as_str()
 }
 
 /// Counts are included in total input tokens, not additional tokens.
@@ -226,9 +312,7 @@ pub fn pricing_cache_path(root: &Path) -> PathBuf {
 
 /// Format discovered models using cached standard text-token rates (no network access).
 pub fn format_model_prices(root: &Path, models: &[String]) -> String {
-    let pricing = fs::read_to_string(pricing_cache_path(root))
-        .ok()
-        .and_then(|payload| parse_pricing_map(&payload).ok());
+    let pricing = load_pricing_map_at(root);
     let width = models.iter().map(String::len).max().unwrap_or(5).max(5);
     let mut table = format!(
         "Prices: USD / 1M tokens (cached LiteLLM rates)\n{:<width$}  {:>12}  {:>12}  {:>12}\n",
@@ -262,28 +346,38 @@ fn format_token_rate(rate: Option<f64>) -> String {
     }
 }
 
-pub fn context_window_from_cache_at(root: &Path, raw_model: &str) -> Option<usize> {
+pub(crate) fn load_pricing_map_at(root: &Path) -> Option<PricingMap> {
     let payload = fs::read_to_string(pricing_cache_path(root)).ok()?;
-    let pricing_map = parse_pricing_map(&payload).ok()?;
+    parse_pricing_map(&payload).ok()
+}
+
+pub(crate) fn load_cached_pricing_map() -> Option<PricingMap> {
+    load_pricing_map_at(&dirs::home_dir()?.join(".agent"))
+}
+
+pub(crate) fn context_window_from_pricing_map(
+    pricing_map: &PricingMap,
+    raw_model: &str,
+) -> Option<usize> {
     pricing_map
         .pricing_for_model(raw_model)?
         .context_window_tokens()
 }
 
+pub fn context_window_from_cache_at(root: &Path, raw_model: &str) -> Option<usize> {
+    context_window_from_pricing_map(&load_pricing_map_at(root)?, raw_model)
+}
+
 pub fn context_window_from_cached_litellm_pricing(raw_model: &str) -> Option<usize> {
-    let root = dirs::home_dir()?.join(".agent");
-    context_window_from_cache_at(&root, raw_model)
+    context_window_from_pricing_map(&load_cached_pricing_map()?, raw_model)
 }
 
 pub fn cost_from_cached_litellm_pricing(raw_model: &str, usage: &Usage) -> Option<f64> {
-    let root = dirs::home_dir()?.join(".agent");
-    cost_from_cache_at(&root, raw_model, usage)
+    cost_from_pricing_map(&load_cached_pricing_map()?, raw_model, usage)
 }
 
 pub fn cost_from_cache_at(root: &Path, raw_model: &str, usage: &Usage) -> Option<f64> {
-    let payload = fs::read_to_string(pricing_cache_path(root)).ok()?;
-    let pricing_map = parse_pricing_map(&payload).ok()?;
-    cost_from_pricing_map(&pricing_map, raw_model, usage)
+    cost_from_pricing_map(&load_pricing_map_at(root)?, raw_model, usage)
 }
 
 pub fn cost_from_pricing_map(

@@ -818,6 +818,17 @@ fn feed(parser: &mut vt100::Parser, text: String) {
 }
 
 #[test]
+fn live_footer_keeps_trailing_mode_badges_when_details_are_clipped() {
+    let mut terminal = vt100::Parser::new(12, 80, 100);
+    let mut live = LiveRenderer::new(80, 12);
+    feed(&mut terminal, live.start("Cost: $0.0093   Context 99% (1,000 C/1,234 I/1,050,000 T)   Model: openai:gpt-6.2-sol   git:allowed   fast:on"));
+    let visible = terminal.screen().contents();
+    let footer = visible.lines().find(|line| line.contains("Cost:")).unwrap();
+    assert!(footer.starts_with("Cost: $0.0093"), "{footer}");
+    assert!(footer.ends_with("git:allowed   fast:on"), "{footer}");
+}
+
+#[test]
 fn live_output_preserves_scrollback_and_cleans_up_the_footer() {
     let mut terminal = vt100::Parser::new(12, 40, 1000);
     let mut live = LiveRenderer::new(40, 12);

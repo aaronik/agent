@@ -16,6 +16,18 @@ For example, `agent --model mock --single "run echo hi"` should be run as:
 cargo run -- --model mock --single "run echo hi"
 ```
 
+## Session modes and footer layout
+
+Use `/allow-git` and `/fast` as the pattern for session-scoped modes. Save their
+current setting when toggled, restore it on both `--resume` and `/resume`, and
+use a backward-compatible default for older sessions. A startup flag can enable
+the mode for the session being opened.
+
+Keep cost, context, and model on the left side of the footer. Append active mode
+badges on the right after `git:allowed` (for example, `git:allowed   fast:on`).
+When space is tight, shorten the details before dropping badges where possible.
+Keep the same ordering in the idle footer, live footer, and `/session`.
+
 ## Testing Requirements
 
 **CRITICAL: No job is finished until the formatter, build, lints, and tests are passing, and any changed feature has been manually tested.**

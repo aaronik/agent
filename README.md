@@ -31,6 +31,19 @@ OPENAI_API_KEY=... cargo run -- --model openai:gpt-6-sol
 cargo run -- --model openai:gpt-6-sol --single --image screenshot.png "What is wrong here?"
 ```
 
+Use `--fast` to start with OpenAI Priority processing enabled, or type `/fast` in
+an interactive text chat to toggle it for the session. The setting is saved
+and restored when you resume. The footer shows `fast:on` after any `git:allowed`
+badge; it indicates that Fast mode is requested, not the tier that served the
+response. `/session` also shows the current setting. Fast mode requests
+`service_tier: "priority"` without changing the model. Support depends on your
+model and API project. Priority may cost more.
+The `Cost` footer uses the tier OpenAI actually reports, including when a Fast
+request is served at standard rates. Run `/pricing refresh` to update cached
+LiteLLM rates. If the provider doesn't report a tier for a Fast request or a
+needed Fast rate is missing, the footer marks that portion `unknown`.
+The toggle doesn't apply to Ollama, realtime voice, background titles, or spawned agents.
+
 Run with Ollama (using a vision-capable model):
 
 ```sh

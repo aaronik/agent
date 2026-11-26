@@ -2125,6 +2125,89 @@ async fn streamed_code_is_highlighted_on_first_render_and_saved_as_markdown() {
 }
 
 #[tokio::test]
+async fn fast_flag_requests_priority_only_when_enabled() {
+    let server = MockServer::start().await;
+    let completed =
+        json!({"type": "response.completed", "response": {"output_text": "test answer"}});
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"stream": true}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!("data: {completed}\n\ndata: [DONE]\n\n"),
+            "text/event-stream",
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"service_tier": "priority"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"output_text": "test answer"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--single", "standard request"],
+        vec!["--fast", "--single", "priority request"],
+        vec!["--fast", "--command", "priority command"],
+    ] {
+        agent_command()
+            .env("HOME", home.path())
+            .env("OPENAI_API_KEY", "test-key")
+            .env("AGENT_BASE_URL", server.uri())
+            .args(["--model", "openai:test"])
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("test answer"));
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|request| request.body_json().unwrap())
+        .collect();
+    assert!(bodies[0].get("service_tier").is_none());
+    assert_eq!(bodies[1]["service_tier"], "priority");
+    assert_eq!(bodies[2]["service_tier"], "priority");
+}
+
+#[test]
+fn fast_slash_command_toggles_without_contacting_the_provider() {
+    let home = tempfile::tempdir().unwrap();
+    for (model, flag, command, message) in [
+        ("openai:test", None, "/fast", "Fast mode: on"),
+        ("openai:test", Some("--fast"), "/fast", "Fast mode: off"),
+        ("openai:test", None, "/fast extra", "Usage: /fast"),
+        (
+            "mock",
+            None,
+            "/fast",
+            "Fast mode is only available for OpenAI text requests",
+        ),
+    ] {
+        agent_command()
+            .env("HOME", home.path())
+            .env_remove("OPENAI_API_KEY")
+            .args(flag)
+            .args(["--model", model, "--single", command])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(message));
+    }
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    assert!(completion_values_for_line(&store, "/fas", 4).contains(&"/fast".to_string()));
+}
+
+#[tokio::test]
 async fn context_limit_error_notifies_user_without_crashing() {
     let server = MockServer::start().await;
     let body = concat!(
@@ -2422,4 +2505,222 @@ async fn monitor_listing_shows_active_check_and_removes_stopped_check() {
         )
         .await;
     assert_eq!(manager.list(), "No active monitors.");
+}
+
+#[test]
+fn session_footer_shows_fast_only_for_enabled_openai_text() {
+    let home = tempfile::tempdir().unwrap();
+    for (model, fast, badge) in [
+        ("openai:test", Some("--fast"), true),
+        ("openai:test", None, false),
+        ("mock", Some("--fast"), false),
+    ] {
+        let output = agent_command()
+            .env("HOME", home.path())
+            .env_remove("OPENAI_API_KEY")
+            .args(fast)
+            .args(["--model", model, "--allow-git", "--single", "/session"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        let footer = output.lines().find(|line| line.contains("Cost:")).unwrap();
+        assert!(footer.contains("git:allowed"), "{footer}");
+        if badge {
+            assert!(footer.ends_with("git:allowed   fast:on"), "{footer}");
+        } else {
+            assert!(!footer.contains("fast:on"), "{footer}");
+        }
+    }
+}
+
+#[test]
+fn fast_setting_is_saved_and_restored_by_both_resume_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let command = || {
+        let mut cmd = agent_command();
+        cmd.env("HOME", home.path()).env_remove("OPENAI_API_KEY");
+        cmd
+    };
+    let store = SessionStore::with_root(home.path().join(".agent"));
+    for enable in ["flag", "toggle"] {
+        let mut start = command();
+        start.args(["--model", "openai:test", "--single"]);
+        if enable == "flag" {
+            start.args(["--fast", "/session"]);
+        } else {
+            start.arg("/fast");
+        }
+        start.assert().success();
+        let id = store.load(None).unwrap().session_id;
+        command()
+            .args(["--single", "--resume", &id, "/session"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("fast:on"));
+        command()
+            .args(["--model", "mock", "--single", &format!("/resume {id}")])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Fast mode: on"));
+        command()
+            .args(["--single", "--resume", &id, "/fast"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Fast mode: off"));
+        command()
+            .args(["--single", "--resume", &id, "/session"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Fast mode: off"));
+    }
+}
+
+#[tokio::test]
+async fn fast_cost_uses_the_served_tier_and_survives_resume() {
+    let server = MockServer::start().await;
+    let usage = json!({
+        "input_tokens": 2000, "output_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 1000}
+    });
+    for (priority, (query, tier)) in [
+        ("unreported", None),
+        ("downgraded", Some("default")),
+        ("fast please", Some("fast")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut response = json!({"output_text": "test answer", "usage": usage});
+        if let Some(tier) = tier {
+            response["service_tier"] = json!(tier);
+        }
+        let completed = json!({"type": "response.completed", "response": response});
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(wiremock::matchers::body_string_contains(query))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!("data: {completed}\n\ndata: [DONE]\n\n"),
+                "text/event-stream",
+            ))
+            .with_priority(priority as u8 + 1)
+            .mount(&server)
+            .await;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let cache = agent_rs::pricing::pricing_cache_path(&home.path().join(".agent"));
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    let standard = json!({"gpt-test": {"input_cost_per_token": 0.000002, "cache_read_input_token_cost": 0.0000001, "output_cost_per_token": 0.00001}});
+    let mut rates = standard.clone();
+    rates["gpt-test"]["input_cost_per_token_priority"] = json!(0.000004);
+    rates["gpt-test"]["cache_read_input_token_cost_priority"] = json!(0.0000002);
+    rates["gpt-test"]["output_cost_per_token_priority"] = json!(0.00002);
+    std::fs::write(&cache, rates.to_string()).unwrap();
+
+    let command = || {
+        let mut cmd = agent_command();
+        cmd.env("HOME", home.path())
+            .env("OPENAI_API_KEY", "test-key")
+            .env("AGENT_BASE_URL", server.uri())
+            .env("AGENT_INPUT_COST_PER_MILLION", "1")
+            .env("AGENT_OUTPUT_COST_PER_MILLION", "1")
+            .args(["--model", "openai:gpt-test", "--single"]);
+        cmd
+    };
+    for (i, (query, expected)) in [
+        ("fast please", "Cost: $0.0062"),
+        ("downgraded", "Cost: $0.0093"),
+        ("unreported", "Cost: $0.0093 + unknown"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Mounts match the full conversation body, so prefer the latest request's matcher.
+        let mut run = command();
+        if i > 0 {
+            run.arg("--resume=__LATEST__");
+        } else {
+            run.arg("--fast");
+        }
+        run.arg(query).assert().success();
+        command()
+            .args(["--resume=__LATEST__", "/session"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!("{expected}   Context")))
+            .stdout(predicates::str::contains(
+                "Model: openai:gpt-test   fast:on",
+            ));
+    }
+    for request in server.received_requests().await.unwrap() {
+        let body: serde_json::Value = request.body_json().unwrap();
+        assert_eq!(body["service_tier"], "priority");
+    }
+    std::fs::write(&cache, standard.to_string()).unwrap();
+    command()
+        .args(["--resume=__LATEST__", "/session"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Cost: $0.0031 + unknown"));
+}
+
+#[tokio::test]
+async fn incomplete_responses_save_billed_usage_once_without_running_partial_tools() {
+    for streamed_text in ["", "A partial answer"] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        let mut body = String::new();
+        if !streamed_text.is_empty() {
+            let delta = json!({"type":"response.output_text.delta", "delta":streamed_text});
+            body.push_str(&format!("data: {delta}\n\n"));
+        }
+        let terminal = json!({"type":"response.incomplete", "response": {
+            "status":"incomplete", "service_tier":"priority",
+            "incomplete_details":{"reason":"max_output_tokens"},
+            "usage":{"input_tokens":120, "output_tokens":30},
+            "output":[{"type":"function_call", "name":"run_shell_command", "call_id":"unfinished",
+                       "arguments":"{\"cmd\":"}]
+        }});
+        body.push_str(&format!("data: {terminal}\n\ndata: [DONE]\n\n"));
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let root = home.path().join(".agent");
+        let cache = agent_rs::pricing::pricing_cache_path(&root);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(cache, r#"{"test":{"input_cost_per_token_priority":0.0001,"output_cost_per_token_priority":0.0002}}"#).unwrap();
+        agent_command()
+            .env("HOME", home.path())
+            .env("OPENAI_API_KEY", "local")
+            .env("AGENT_BASE_URL", server.uri())
+            .args(["--model", "openai:test", "--fast", "--single", "hello"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("max_output_tokens"));
+        let session = SessionStore::with_root(root).load(None).unwrap();
+        let assistant = session
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                agent_rs::agent::AgentMessage::Assistant(a) => Some(a),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].content, streamed_text);
+        assert!(assistant[0].tool_calls.is_empty());
+        assert_eq!(assistant[0].usage.as_ref().unwrap().output_tokens, 30);
+        agent_command()
+            .env("HOME", home.path())
+            .args(["--resume=__LATEST__", "--single", "/session"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Cost: $0.0180"));
+    }
 }

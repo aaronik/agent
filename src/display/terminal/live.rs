@@ -8,7 +8,10 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::{RESET, SPINNER_FRAMES, char_byte_index, truncate_to_width, working_input_preview};
+use super::{
+    RESET, SPINNER_FRAMES, char_byte_index, fit_footer_status, truncate_to_width,
+    working_input_preview,
+};
 
 fn wrap_preview(text: &str, width: usize) -> Vec<String> {
     let mut lines = vec![String::new()];
@@ -312,7 +315,7 @@ impl LiveRenderer {
         out.push_str(&format!(
             "\x1b[{};1H\x1b[2m{}",
             row + 3 + tool_rows,
-            truncate_to_width(
+            fit_footer_status(
                 &working_input_preview(&self.status),
                 usize::from(self.width - 1)
             )

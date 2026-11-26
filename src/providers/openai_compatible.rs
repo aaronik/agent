@@ -28,6 +28,7 @@ pub struct ProviderConfig {
 pub struct OpenAiCompatibleProvider {
     config: ProviderConfig,
     client: Client<OpenAIConfig>,
+    fast: bool,
 }
 
 impl OpenAiCompatibleProvider {
@@ -38,7 +39,34 @@ impl OpenAiCompatibleProvider {
         Self {
             config,
             client: Client::with_config(openai_config),
+            fast: false,
         }
+    }
+
+    pub(super) fn with_fast_mode(mut self, fast: bool) -> Self {
+        self.fast = fast;
+        self
+    }
+
+    fn responses_request(
+        &self,
+        messages: &[AgentMessage],
+        tools: &[ToolDefinition],
+        stream: bool,
+    ) -> Value {
+        let mut request = json!({
+            "model": self.config.model,
+            "input": responses_input(messages),
+            "tools": responses_tools(tools),
+            "text": {"verbosity": "low"}
+        });
+        if stream {
+            request["stream"] = json!(true);
+        }
+        if self.fast {
+            request["service_tier"] = json!("priority");
+        }
+        request
     }
 
     async fn complete_chat(
@@ -68,17 +96,10 @@ impl OpenAiCompatibleProvider {
         let value: Value = self
             .client
             .responses()
-            .create_byot(json!({
-                "model": self.config.model,
-                "input": responses_input(messages),
-                "tools": responses_tools(tools),
-                "text": {
-                    "verbosity": "low"
-                }
-            }))
+            .create_byot(self.responses_request(messages, tools, false))
             .await
             .map_err(|err| ProviderError::request(err.to_string()))?;
-        parse_responses_response(value)
+        parse_responses_response(value, self.fast)
     }
 
     async fn emit_stream_events(
@@ -180,15 +201,7 @@ impl OpenAiCompatibleProvider {
         let mut stream = self
             .client
             .responses()
-            .create_stream_byot(json!({
-                "model": self.config.model,
-                "input": responses_input(messages),
-                "tools": responses_tools(tools),
-                "text": {
-                    "verbosity": "low"
-                },
-                "stream": true
-            }))
+            .create_stream_byot(self.responses_request(messages, tools, true))
             .await
             .map_err(|err| ProviderError::request(err.to_string()))?;
 
@@ -220,11 +233,31 @@ impl OpenAiCompatibleProvider {
                         });
                     }
                 }
+                Some("response.incomplete") => {
+                    let response = &chunk["response"];
+                    let reason = response
+                        .pointer("/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("reason not reported");
+                    let mut partial = parse_responses_response(response.clone(), self.fast)?;
+                    if partial.content.is_empty() {
+                        partial.content = content;
+                    }
+                    // Incomplete output can contain truncated function arguments.
+                    partial.tool_calls.clear();
+                    partial
+                        .metadata
+                        .insert("incomplete_reason".into(), json!(reason));
+                    return Err(ProviderError::Incomplete {
+                        reason: reason.into(),
+                        partial: Box::new(partial),
+                    });
+                }
                 Some("response.completed") => {
                     let Some(response) = chunk.get("response") else {
                         continue;
                     };
-                    let message = parse_responses_response(response.clone())?;
+                    let message = parse_responses_response(response.clone(), self.fast)?;
                     if let Some(usage) = message.usage.clone() {
                         on_event(ProviderEvent::Usage { usage });
                     }
@@ -559,7 +592,10 @@ fn finalize_tool_calls(tool_calls: BTreeMap<u64, StreamingToolCall>) -> Vec<Tool
         .collect()
 }
 
-fn parse_responses_response(value: Value) -> Result<AssistantMessage, ProviderError> {
+fn parse_responses_response(
+    value: Value,
+    requested_fast: bool,
+) -> Result<AssistantMessage, ProviderError> {
     let mut content_parts = Vec::new();
     let mut tool_calls = Vec::new();
     if let Some(output) = value.get("output").and_then(Value::as_array) {
@@ -610,10 +646,24 @@ fn parse_responses_response(value: Value) -> Result<AssistantMessage, ProviderEr
     Ok(AssistantMessage {
         content: content_parts.join("\n"),
         tool_calls,
-        usage: parse_usage(value.get("usage")),
+        usage: parse_responses_usage(&value, requested_fast),
         model: None,
         metadata: Map::new(),
     })
+}
+
+fn parse_responses_usage(response: &Value, requested_fast: bool) -> Option<Usage> {
+    let mut usage = parse_usage(response.get("usage"))?;
+    if let Some(raw) = usage.raw.as_mut() {
+        if let Some(tier) = response.get("service_tier").and_then(Value::as_str) {
+            raw["service_tier"] = json!(tier);
+        } else if requested_fast && !raw.get("service_tier").is_some_and(Value::is_string) {
+            // A priority request can be served at the standard tier. Don't assume
+            // either price when the provider doesn't say which tier it used.
+            raw["service_tier"] = json!("unreported");
+        }
+    }
+    Some(usage)
 }
 
 fn parse_usage(value: Option<&Value>) -> Option<Usage> {

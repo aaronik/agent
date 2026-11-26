@@ -15,6 +15,8 @@ pub struct Session {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_git_writes: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -34,6 +36,7 @@ impl Session {
             updated_at: now,
             model: None,
             allow_git_writes: false,
+            fast: false,
             title: None,
             name_usages: Vec::new(),
             compacted_usages: Vec::new(),

@@ -25,9 +25,10 @@ use crate::agent::{AgentLoop, AgentLoopConfig, AgentMessage, CancellationToken};
 use crate::display::TerminalDisplay;
 use crate::memory::load_all_agents_memory_with_files;
 use crate::pricing::{format_model_prices, refresh_pricing_cache};
+use crate::providers::configuration::build_provider_with_fast_mode;
 use crate::providers::{
-    Provider, build_provider, effective_model_name, format_cost_and_context_line_with_all_usages,
-    list_models,
+    Provider, effective_model_name, format_cost_and_context_line_with_all_usages, list_models,
+    parse_model_id,
 };
 use crate::session::{Session, SessionStore};
 use crate::tools::ToolRegistry;
@@ -71,6 +72,11 @@ pub struct Args {
     pub update_pricing: bool,
     #[arg(short, long, help = "Run one turn and exit")]
     pub single: bool,
+    #[arg(
+        long,
+        help = "Request OpenAI Priority processing for text turns (may cost more)"
+    )]
+    pub fast: bool,
     #[arg(short = 't', long = "talk", help = "Start a realtime voice session")]
     pub talk: bool,
     #[arg(
@@ -185,6 +191,7 @@ async fn run_with_args_and_prefill(
     let (mut session, loaded_agents_files) = load_or_create_session_with_files(&args, &store)?;
     let mut allow_git_writes = session.allow_git_writes || args.allow_git;
     session.allow_git_writes = allow_git_writes;
+    session.fast |= args.fast;
     let mut model_name = effective_model_name(
         args.model
             .as_deref()
@@ -192,10 +199,10 @@ async fn run_with_args_and_prefill(
             .or_else(|| session.saved_model()),
     );
     session.model = Some(model_name.clone());
-    if args.resume.is_some() || args.allow_git {
+    if args.resume.is_some() || args.allow_git || args.fast {
         store.save(&session)?;
     }
-    print_agent_header(&model_name);
+    print_agent_header(&model_name, session.fast);
     println!("sessionId: {}", session.session_id);
     if args.resume.is_none() || args.new {
         print_agents_files(&loaded_agents_files);
@@ -231,7 +238,7 @@ async fn run_with_args_and_prefill(
     } else {
         Some(args.query.join(" "))
     };
-    let mut pending_images = Some(args.images.as_slice());
+    let mut use_initial_images = true;
     let mut title_task: Option<tokio::task::JoinHandle<Option<NameResult>>> = None;
     let mut pending_name_result: Option<NameResult> = None;
     if first_input.is_none()
@@ -264,7 +271,7 @@ async fn run_with_args_and_prefill(
                 Ok(crate::voice::session::TalkSessionExit::ToggleText) => {
                     interaction_mode = InteractionMode::Text;
                     loop_runner = None;
-                    print_agent_header(&model_name);
+                    print_agent_header(&model_name, session.fast);
                     continue;
                 }
                 Ok(crate::voice::session::TalkSessionExit::Ended) => break,
@@ -328,12 +335,12 @@ async fn run_with_args_and_prefill(
             }
         };
 
-        let image_paths = if monitor_event {
-            Vec::new()
+        let image_paths = if !monitor_event && std::mem::take(&mut use_initial_images) {
+            args.images.as_slice()
         } else {
-            pending_images.take().unwrap_or_default().to_vec()
+            &[]
         };
-        let mut parsed_input = parse_user_input(&user_input, &image_paths)?;
+        let mut parsed_input = parse_user_input(&user_input, image_paths)?;
         if !monitor_event && parsed_input.images.is_empty() {
             match handle_slash_command(
                 &user_input,
@@ -386,7 +393,7 @@ async fn run_with_args_and_prefill(
                     session.model = Some(model_name.clone());
                     store.save(&session)?;
                     loop_runner = None;
-                    print_agent_header(&model_name);
+                    print_agent_header(&model_name, session.fast);
                     if args.single {
                         break;
                     }
@@ -427,16 +434,12 @@ async fn run_with_args_and_prefill(
                 &model_name,
                 allow_git_writes,
                 args.no_subagent,
+                session.fast,
                 monitor_enabled.then_some(monitor_manager.clone()),
             )?);
         }
-        let status_line = format_cost_and_context_line_with_all_usages(
-            &session.messages,
-            &model_name,
-            allow_git_writes,
-            &session.name_usages,
-            &session.compacted_usages,
-        );
+        let status_line =
+            format_text_footer(&session, &session.messages, &model_name, allow_git_writes);
         display.render_turn_submitted(&status_line);
         let cancellation_token = CancellationToken::new();
         let (steering_tx, steering_rx) = std::sync::mpsc::channel();
@@ -507,15 +510,12 @@ async fn run_with_args_and_prefill(
                         observed_messages.borrow_mut().push(message.clone());
                         let mut status_messages = session.messages.clone();
                         status_messages.extend(observed_messages.borrow().iter().cloned());
-                        display.update_working_footer(
-                            &format_cost_and_context_line_with_all_usages(
-                                &status_messages,
-                                &model_name,
-                                allow_git_writes,
-                                &session.name_usages,
-                                &session.compacted_usages,
-                            ),
-                        );
+                        display.update_working_footer(&format_text_footer(
+                            &session,
+                            &status_messages,
+                            &model_name,
+                            allow_git_writes,
+                        ));
                         let can_save = persistence_error.borrow().is_none();
                         if can_save {
                             let mut checkpoint = session.clone();
@@ -592,7 +592,10 @@ async fn run_with_args_and_prefill(
             Err(crate::providers::ProviderError::ContextLengthExceeded(error)) => {
                 eprintln!("{}", context_limit_notice(&error));
             }
-            Err(error @ crate::providers::ProviderError::Request(_)) if !args.single => {
+            Err(
+                error @ (crate::providers::ProviderError::Request(_)
+                | crate::providers::ProviderError::Incomplete { .. }),
+            ) if !args.single => {
                 eprintln!("{error}");
             }
             Err(err) => return Err(err.into()),
@@ -796,6 +799,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
             list_models: false,
             update_pricing: false,
             single: true,
+            fast: args.fast,
             talk: false,
             wake_word: None,
             command: false,
@@ -825,7 +829,7 @@ async fn run_command_mode(args: &Args) -> Result<(), Box<dyn Error>> {
     });
 
     let model_name = effective_model_name(args.model.as_deref());
-    let assistant = build_provider(&model_name)?
+    let assistant = build_provider_with_fast_mode(&model_name, args.fast)?
         .complete(&session.messages, &[])
         .await?;
 
@@ -1573,9 +1577,10 @@ struct NameResult {
 async fn generate_conversation_title(
     messages: Vec<AgentMessage>,
     model: String,
+    fast: bool,
 ) -> Option<NameResult> {
     let request = title_request(&messages)?;
-    let provider = build_provider(&model).ok()?;
+    let provider = build_provider_with_fast_mode(&model, fast).ok()?;
     let response = provider.complete(&request, &[]).await.ok()?;
     Some(NameResult {
         title: validated_title(&response.content),
@@ -1591,7 +1596,8 @@ fn spawn_conversation_title(
     display: Arc<TerminalDisplay>,
 ) -> tokio::task::JoinHandle<Option<NameResult>> {
     tokio::spawn(async move {
-        let result = generate_conversation_title(messages, model).await;
+        // Background naming does not need Priority processing.
+        let result = generate_conversation_title(messages, model, false).await;
         if let Some(title) = result.as_ref().and_then(|result| result.title.as_deref()) {
             display.set_terminal_title(title);
         }
@@ -1644,8 +1650,21 @@ fn show_conversation_title(session: &Session, display: &TerminalDisplay) {
     display.set_terminal_title(session.title.as_deref().unwrap_or("New Conversation"));
 }
 
-fn print_agent_header(model_name: &str) {
+fn fast_mode_status(model_name: &str, fast: bool) -> &'static str {
+    if !fast {
+        "Fast mode: off"
+    } else if parse_model_id(model_name).provider == "openai" {
+        "Fast mode: on (OpenAI Priority requested for text; may cost more)"
+    } else {
+        "Fast mode: inactive (requires an OpenAI text model)"
+    }
+}
+
+fn print_agent_header(model_name: &str, fast: bool) {
     println!("\n[agent]\nmodel: {model_name}");
+    if fast {
+        println!("{}", fast_mode_status(model_name, fast));
+    }
 }
 
 fn replay_session(session: &Session, display: &TerminalDisplay) {
@@ -1725,12 +1744,11 @@ async fn prompt_for_input(
     let prompt = DefaultPrompt::default();
     print!(
         "{}",
-        TerminalDisplay::format_standalone_footer(&format_cost_and_context_line_with_all_usages(
+        TerminalDisplay::format_standalone_footer(&format_text_footer(
+            session,
             &session.messages,
             model_name,
             allow_git_writes,
-            &session.name_usages,
-            &session.compacted_usages
         ))
     );
     seed_line_editor_prefill(&mut line_editor, prefill);
@@ -1797,20 +1815,35 @@ async fn handle_slash_command(
                 crate::display::terminal::sanitize_terminal_text(&monitors.list())
             );
         }
+        "/fast" => {
+            if !rest.is_empty() {
+                println!("Usage: /fast");
+            } else if !session.fast && parse_model_id(model_name).provider != "openai" {
+                println!("Fast mode is only available for OpenAI text requests.");
+            } else {
+                session.fast = !session.fast;
+                store.save(session)?;
+                println!("{}", fast_mode_status(model_name, session.fast));
+            }
+        }
         "/session" => {
+            println!("{}", fast_mode_status(model_name, session.fast));
             println!(
                 "{}",
                 format_session_info(session, model_name, *allow_git_writes)
             );
         }
         "/compact" => {
-            compact_session(store, session, model_name, rest).await?;
+            compact_session(store, session, model_name, rest, session.fast).await?;
         }
         "/name" => {
             if rest.is_empty() {
-                if let Some(result) =
-                    generate_conversation_title(session.messages.clone(), model_name.to_string())
-                        .await
+                if let Some(result) = generate_conversation_title(
+                    session.messages.clone(),
+                    model_name.to_string(),
+                    session.fast,
+                )
+                .await
                 {
                     let title = result.title.clone();
                     record_name_result(session, store, result, display)?;
@@ -1844,6 +1877,7 @@ async fn handle_slash_command(
             );
         }
         "/clear" | "/new" => {
+            let fast = session.fast;
             let (new_session, loaded_agents_files) = load_or_create_session_with_files(
                 &Args {
                     new: true,
@@ -1851,6 +1885,7 @@ async fn handle_slash_command(
                     images: Vec::new(),
                     query: Vec::new(),
                     single: args.single,
+                    fast,
                     model: args.model.clone(),
                     list_models: false,
                     update_pricing: false,
@@ -1866,6 +1901,7 @@ async fn handle_slash_command(
             crate::tools::browser::shutdown_browser_tabs().await;
             *session = new_session;
             session.allow_git_writes = *allow_git_writes;
+            session.fast = fast;
             session.model = Some(model_name.to_string());
             store.save(session)?;
             println!("cleared");
@@ -1942,6 +1978,7 @@ async fn compact_session(
     session: &mut Session,
     model_name: &str,
     focus: &str,
+    fast: bool,
 ) -> Result<(), Box<dyn Error>> {
     const RECENT_USER_TURNS: usize = 2;
 
@@ -1999,7 +2036,7 @@ async fn compact_session(
             ),
         },
     ];
-    let summary_response = build_provider(model_name)?
+    let summary_response = build_provider_with_fast_mode(model_name, fast)?
         .complete(&summary_request, &[])
         .await?;
     let summary = &summary_response.content;
@@ -2071,6 +2108,25 @@ fn compaction_message_text(message: &AgentMessage) -> String {
     }
 }
 
+fn format_text_footer(
+    session: &Session,
+    messages: &[AgentMessage],
+    model_name: &str,
+    allow_git_writes: bool,
+) -> String {
+    let mut line = format_cost_and_context_line_with_all_usages(
+        messages,
+        model_name,
+        allow_git_writes,
+        &session.name_usages,
+        &session.compacted_usages,
+    );
+    if session.fast && parse_model_id(model_name).provider == "openai" {
+        line.push_str("   fast:on");
+    }
+    line
+}
+
 fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bool) -> String {
     format!(
         "Session ID: {}\nCreated: {}\nUpdated: {}\nMessages: {}\n{}",
@@ -2078,18 +2134,12 @@ fn format_session_info(session: &Session, model_name: &str, allow_git_writes: bo
         session.created_at.to_rfc3339(),
         session.updated_at.to_rfc3339(),
         session.messages.len(),
-        format_cost_and_context_line_with_all_usages(
-            &session.messages,
-            model_name,
-            allow_git_writes,
-            &session.name_usages,
-            &session.compacted_usages
-        ),
+        format_text_footer(session, &session.messages, model_name, allow_git_writes,),
     )
 }
 
 fn slash_help(store: &SessionStore) -> Result<String, Box<dyn Error>> {
-    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models with cached token prices or switch the active model.\n  /monitors\n      Show active background monitors.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
+    let mut help = "Available commands:\n  /allow-git\n      Toggle git commands that modify repositories for this session.\n  /clear, /new\n      Clear the UI and start a new conversation/session.\n  /compact [focus]\n      Summarize older turns into compact working context.\n  /fast\n      Toggle OpenAI Priority processing for this text session.\n  /find <query>\n      Search saved conversation histories.\n  /help\n      Show this help.\n  /models [<model_id>]\n      List models with cached token prices or switch the active model.\n  /monitors\n      Show active background monitors.\n  /name [<two words>]\n      Generate a two-word name or set it explicitly.\n  /pricing refresh\n      Download and cache LiteLLM pricing data.\n  /resume [latest|<session_id>]\n      Resume a saved conversation/session.\n  /session\n      Show information about the current session.\n\nSkills:\n  /<skill-name> [arguments]\n      Invoke a skill from .agent/skills or ~/.agent/skills.\n  Create ~/.agent/skills/<name>/SKILL.md (user) or .agent/skills/<name>/SKILL.md (project).\n  The agent can create these files with its file tools too.\n\n"
         .to_string();
     let project_dir = std::env::current_dir()?;
     for skill in crate::skills::discover(store.root(), &project_dir)? {
@@ -2113,6 +2163,7 @@ fn build_loop_runner(
     model_name: &str,
     allow_git_writes: bool,
     no_subagent: bool,
+    fast: bool,
     monitor: Option<MonitorManager>,
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
     let mut tools = build_tool_registry(allow_git_writes, !no_subagent);
@@ -2120,7 +2171,7 @@ fn build_loop_runner(
         tools = tools.with_monitor(monitor);
     }
     Ok(AgentLoop::new(
-        build_provider(model_name)?,
+        build_provider_with_fast_mode(model_name, fast)?,
         tools,
         AgentLoopConfig {
             model: model_name.to_string(),
@@ -2176,6 +2227,7 @@ fn prompt_completion_candidates(store: &SessionStore) -> Vec<String> {
         "/allow-git".to_string(),
         "/clear".to_string(),
         "/compact".to_string(),
+        "/fast".to_string(),
         "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),
@@ -2211,6 +2263,7 @@ fn completion_candidates_in_dir(
         "/allow-git".to_string(),
         "/clear".to_string(),
         "/compact".to_string(),
+        "/fast".to_string(),
         "/find".to_string(),
         "/help".to_string(),
         "/models".to_string(),

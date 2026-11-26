@@ -10,6 +10,11 @@ pub enum ProviderError {
     Request(String),
     #[error("provider context limit exceeded: {0}")]
     ContextLengthExceeded(String),
+    #[error("provider response incomplete: {reason}")]
+    Incomplete {
+        reason: String,
+        partial: Box<AssistantMessage>,
+    },
     #[error("provider response was invalid: {0}")]
     InvalidResponse(String),
     #[error("agent exceeded max tool turns ({0})")]

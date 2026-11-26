@@ -95,7 +95,14 @@ impl TerminalDisplay {
     }
 
     pub fn format_standalone_footer(status_line: &str) -> String {
-        format!("\n\n{status_line}")
+        let status = if io::stdout().is_terminal()
+            && let Ok((width, _)) = crossterm::terminal::size()
+        {
+            fit_footer_status(status_line, usize::from(width.saturating_sub(1)))
+        } else {
+            status_line.to_string()
+        };
+        format!("\n\n{status}")
     }
 
     fn transaction(&self, update: impl FnOnce(&mut LiveRenderer) -> String) {
@@ -690,6 +697,29 @@ fn char_byte_index(text: &str, character_index: usize) -> usize {
         .nth(character_index)
         .map(|(index, _)| index)
         .unwrap_or(text.len())
+}
+
+fn fit_footer_status(status: &str, width: usize) -> String {
+    if status.width() > width && status.starts_with("Cost: ") {
+        // The first three fields are cost, context, and model. Keep session
+        // badges after them even when the details no longer fit.
+        let mut fields = status.splitn(4, "   ");
+        let cost = fields.next().unwrap_or_default();
+        if let Some(badges) = fields.nth(2) {
+            let suffix_width = badges.width() + 3;
+            if width >= cost.width() + suffix_width {
+                let details = &status[..status.len() - badges.len() - 3];
+                let available = width - suffix_width;
+                let prefix = if available > cost.width() {
+                    format!("{}…", truncate_to_width(details, available - 1).trim_end())
+                } else {
+                    cost.to_string()
+                };
+                return format!("{prefix}   {badges}");
+            }
+        }
+    }
+    truncate_to_width(status, width)
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {

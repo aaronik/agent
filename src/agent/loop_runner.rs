@@ -167,6 +167,16 @@ where
             };
             let events = match provider_result {
                 Ok(()) => events,
+                Err(ProviderError::Incomplete {
+                    reason,
+                    mut partial,
+                }) => {
+                    // This is a terminal, potentially billed response, not a lost
+                    // connection. Checkpoint its text and usage before surfacing it.
+                    partial.model = Some(self.config.model.clone());
+                    on_message(&AgentMessage::Assistant((*partial).clone()));
+                    return Err(ProviderError::Incomplete { reason, partial });
+                }
                 Err(error @ ProviderError::ContextLengthExceeded(_)) => return Err(error),
                 Err(error @ ProviderError::Request(_)) if transport_attempts == 3 => {
                     return Err(error);

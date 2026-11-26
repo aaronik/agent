@@ -200,3 +200,53 @@ fn model_price_table_resolves_provider_prefixes_aliases_and_small_rates() {
     let missing = table.lines().find(|line| line.contains("missing")).unwrap();
     assert_eq!(missing.matches("unknown").count(), 3);
 }
+
+#[test]
+fn fast_rates_price_cached_input_and_long_context_without_standard_fallback() {
+    let map = parse_pricing_map(
+        &json!({
+            "gpt-test": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.00001,
+                "input_cost_per_token_priority": 0.000004,
+                "cache_read_input_token_cost_priority": 0.0000002,
+                "cache_creation_input_token_cost_priority": 0.000005,
+                "output_cost_per_token_priority": 0.00002,
+                "input_cost_per_token_above_272k_tokens_priority": 0.000008,
+                "cache_read_input_token_cost_above_272k_tokens_priority": 0.0000004,
+                "output_cost_per_token_above_272k_tokens_priority": 0.00003
+            },
+            "gpt-standard-only": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.00001
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for tier in ["priority", "fast"] {
+        let usage = Usage {
+            input_tokens: 272_000,
+            output_tokens: 1000,
+            raw: Some(
+                json!({"service_tier": tier, "input_tokens_details": {"cached_tokens": 100_000, "cache_write_tokens": 20_000}}),
+            ),
+        };
+        let cost = cost_from_pricing_map(&map, "openai:gpt-test", &usage).unwrap();
+        assert!((cost - 0.748).abs() < 1e-12, "{cost}");
+        assert_eq!(
+            cost_from_pricing_map(&map, "gpt-standard-only", &usage),
+            None
+        );
+
+        let long = Usage {
+            input_tokens: 272_001,
+            raw: Some(
+                json!({"service_tier": tier, "input_tokens_details": {"cached_tokens": 100_000}}),
+            ),
+            ..usage
+        };
+        let cost = cost_from_pricing_map(&map, "openai:gpt-test", &long).unwrap();
+        assert!((cost - 1.446008).abs() < 1e-12, "{cost}");
+    }
+}
