@@ -31,7 +31,7 @@ use crate::providers::{
     parse_model_id,
 };
 use crate::session::{Session, SessionStore};
-use crate::tools::monitor::{MonitorManager, stop_all};
+use crate::tools::monitor::{MonitorManager, SessionMonitors};
 use crate::tools::spawn::{ACTIVITY_ENV, ACTIVITY_PREFIX, USAGE_PREFIX};
 use crate::tools::{SpawnState, ToolRegistry};
 
@@ -268,8 +268,7 @@ async fn run_with_args_and_prefill(
     let child_activity = ChildActivity(std::env::var(ACTIVITY_ENV).as_deref() == Ok("1"));
     let store = SessionStore::new()?;
     let display = Arc::new(TerminalDisplay::new());
-    let wake_signal = Arc::new(AtomicBool::new(false));
-    let (monitor_manager, mut monitor_events) = MonitorManager::new(Arc::clone(&wake_signal));
+    let mut monitors = SessionMonitors::new();
     let monitor_enabled =
         !args.single && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut loop_runner: Option<AgentLoop<Box<dyn Provider>>> = None;
@@ -374,9 +373,7 @@ async fn run_with_args_and_prefill(
                 if args.single && !session.messages.is_empty() {
                     break;
                 }
-                let pending_event = monitor_events.try_recv().ok();
-                let prompt_result = if let Some(event) = pending_event {
-                    wake_signal.store(false, Ordering::SeqCst);
+                let prompt_result = if let Some(event) = monitors.try_recv() {
                     Ok(PromptInput::Monitor(event.content))
                 } else {
                     prompt_for_input(
@@ -385,7 +382,7 @@ async fn run_with_args_and_prefill(
                         &model_name,
                         allow_git_writes,
                         prompt_prefill.take().as_deref(),
-                        Arc::clone(&wake_signal),
+                        monitors.wake_signal(),
                     )
                     .await
                 };
@@ -396,7 +393,7 @@ async fn run_with_args_and_prefill(
                         if !draft.is_empty() {
                             prompt_prefill = Some(draft);
                         }
-                        if let Ok(event) = monitor_events.try_recv() {
+                        if let Some(event) = monitors.try_recv() {
                             (event.content, false, true)
                         } else {
                             continue;
@@ -433,7 +430,7 @@ async fn run_with_args_and_prefill(
                 &args,
                 &store,
                 &mut session,
-                (&display, &monitor_manager),
+                (&display, &mut monitors),
                 &model_name,
                 &mut allow_git_writes,
             )
@@ -443,15 +440,10 @@ async fn run_with_args_and_prefill(
                 SlashCommandResult::InvokeSkill(content) => {
                     parsed_input.content = content;
                 }
+                SlashCommandResult::Unchanged => continue,
                 SlashCommandResult::Handled => {
                     if let Some(task) = title_task.take() {
                         task.abort();
-                    }
-                    if user_input.trim() == "/clear"
-                        || user_input.trim() == "/new"
-                        || user_input.starts_with("/resume")
-                    {
-                        stop_all(&monitor_manager);
                     }
                     show_conversation_title(&session, &display);
                     loop_runner = None;
@@ -521,7 +513,7 @@ async fn run_with_args_and_prefill(
                 allow_git_writes,
                 args.no_subagent,
                 session.fast,
-                monitor_enabled.then_some(monitor_manager.clone()),
+                monitor_enabled.then(|| monitors.manager.clone()),
                 (&display, &live_subagent_usages),
             )?);
         }
@@ -729,7 +721,7 @@ async fn run_with_args_and_prefill(
         }
     }
 
-    stop_all(&monitor_manager);
+    drop(monitors);
     finish_conversation_title(&mut title_task, &mut session, &store, &display).await?;
     Ok(())
 }
@@ -1897,6 +1889,7 @@ enum SlashCommandResult {
     NotCommand,
     InvokeSkill(String),
     Handled,
+    Unchanged,
     SwitchModel(String),
 }
 
@@ -1905,7 +1898,7 @@ async fn handle_slash_command(
     args: &Args,
     store: &SessionStore,
     session: &mut Session,
-    (display, monitors): (&TerminalDisplay, &MonitorManager),
+    (display, monitors): (&TerminalDisplay, &mut SessionMonitors),
     model_name: &str,
     allow_git_writes: &mut bool,
 ) -> Result<SlashCommandResult, Box<dyn Error>> {
@@ -1926,7 +1919,7 @@ async fn handle_slash_command(
         "/monitors" => {
             println!(
                 "{}",
-                crate::display::terminal::sanitize_terminal_text(&monitors.list())
+                crate::display::terminal::sanitize_terminal_text(&monitors.manager.list())
             );
         }
         "/fast" => {
@@ -2013,6 +2006,7 @@ async fn handle_slash_command(
                 store,
             )?;
             crate::tools::browser::shutdown_browser_tabs().await;
+            *monitors = SessionMonitors::new();
             *session = new_session;
             session.allow_git_writes = *allow_git_writes;
             session.fast = fast;
@@ -2055,7 +2049,21 @@ async fn handle_slash_command(
                 "" | "latest" => None,
                 other => Some(other.split('\t').next().unwrap_or(other)),
             };
-            *session = store.load(resume_id)?;
+            let resumed_session = match store.load(resume_id) {
+                Ok(session) => session,
+                Err(error) => {
+                    let message = format!("Could not resume session: {error}");
+                    if args.single {
+                        return Err(message.into());
+                    }
+                    eprintln!("{message}");
+                    return Ok(SlashCommandResult::Unchanged);
+                }
+            };
+            if resumed_session.session_id != session.session_id {
+                *monitors = SessionMonitors::new();
+            }
+            *session = resumed_session;
             *allow_git_writes = session.allow_git_writes;
             let resumed_model = session.saved_model().unwrap_or(model_name).to_string();
             replay_session(session, display);
@@ -2936,7 +2944,7 @@ mod tests {
         let store = SessionStore::with_root(temp.path().join(".agent"));
         let args = Args::parse_from(["agent"]);
         let display = TerminalDisplay::new();
-        let (monitors, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+        let mut monitors = SessionMonitors::new();
         let mut session = Session::new("test-session".to_string(), Vec::new());
         let mut allow_git_writes = false;
 
@@ -2946,7 +2954,7 @@ mod tests {
                 &args,
                 &store,
                 &mut session,
-                (&display, &monitors),
+                (&display, &mut monitors),
                 "mock",
                 &mut allow_git_writes,
             )
@@ -2962,7 +2970,7 @@ mod tests {
             &args,
             &store,
             &mut session,
-            (&display, &monitors),
+            (&display, &mut monitors),
             "mock",
             &mut allow_git_writes,
         )
@@ -2985,14 +2993,14 @@ mod tests {
         let mut allow_git_writes = false;
         let args = Args::parse_from(["agent"]);
         let display = TerminalDisplay::new();
-        let (monitors, _events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+        let mut monitors = SessionMonitors::new();
 
         handle_slash_command(
             "/resume allowed",
             &args,
             &store,
             &mut current,
-            (&display, &monitors),
+            (&display, &mut monitors),
             "mock",
             &mut allow_git_writes,
         )
@@ -3004,13 +3012,141 @@ mod tests {
             &args,
             &store,
             &mut current,
-            (&display, &monitors),
+            (&display, &mut monitors),
             "mock",
             &mut allow_git_writes,
         )
         .await
         .unwrap();
         assert!(!allow_git_writes);
+    }
+
+    fn start_test_monitor(monitors: &MonitorManager, cmd: &str, message: &str) {
+        monitors
+            .execute(
+                crate::tools::monitor::MonitorArgs {
+                    action: "start".into(),
+                    cmd: Some(cmd.into()),
+                    interval_seconds: Some(1),
+                    message: Some(message.into()),
+                    id: None,
+                },
+                false,
+            )
+            .unwrap();
+    }
+
+    async fn wait_for_monitor_wake(wake: &AtomicBool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !wake.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("monitor did not queue an event");
+    }
+
+    #[tokio::test]
+    async fn slash_session_switch_discards_active_and_queued_monitors() {
+        for command in ["/resume destination", "/new", "/clear"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = SessionStore::with_root(temp.path().join(".agent"));
+            let args = Args::parse_from(["agent"]);
+            let display = TerminalDisplay::new();
+            let mut session = Session::new("current".into(), Vec::new());
+            store
+                .save(&Session::new("destination".into(), Vec::new()))
+                .unwrap();
+            let mut monitors = SessionMonitors::new();
+            let old_manager = monitors.manager.clone();
+            start_test_monitor(&old_manager, "true", "old queued event");
+            wait_for_monitor_wake(&monitors.wake_signal()).await;
+            start_test_monitor(&old_manager, "false", "old active monitor");
+
+            handle_slash_command(
+                command,
+                &args,
+                &store,
+                &mut session,
+                (&display, &mut monitors),
+                "mock",
+                &mut false,
+            )
+            .await
+            .unwrap();
+
+            assert_ne!(session.session_id, "current", "{command}");
+            assert_eq!(old_manager.list(), "No active monitors.", "{command}");
+            assert_eq!(monitors.manager.list(), "No active monitors.", "{command}");
+            assert!(!monitors.wake_signal().load(Ordering::SeqCst), "{command}");
+            assert!(
+                monitors.try_recv().is_none(),
+                "{command} leaked a queued event"
+            );
+            start_test_monitor(&monitors.manager, "true", "new event");
+            wait_for_monitor_wake(&monitors.wake_signal()).await;
+            assert!(monitors.try_recv().unwrap().content.contains("new event"));
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_resume_load_failure_and_model_switch_keep_current_monitors() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::with_root(temp.path().join(".agent"));
+        let args = Args::parse_from(["agent"]);
+        let display = TerminalDisplay::new();
+        let mut session = Session::new("current".into(), Vec::new());
+        session.model = Some("mock".into());
+        session.fast = true;
+        session.allow_git_writes = true;
+        store.save(&session).unwrap();
+        std::fs::write(store.root().join("sessions/corrupt.json"), "invalid json").unwrap();
+        let mut monitors = SessionMonitors::new();
+        start_test_monitor(&monitors.manager, "true", "retained queued event");
+        wait_for_monitor_wake(&monitors.wake_signal()).await;
+        start_test_monitor(&monitors.manager, "false", "retained active monitor");
+        let mut allow_git_writes = true;
+
+        for command in [
+            "/resume missing",
+            "/resume corrupt",
+            "/models mock:other",
+            "/resume current",
+        ] {
+            let result = handle_slash_command(
+                command,
+                &args,
+                &store,
+                &mut session,
+                (&display, &mut monitors),
+                "mock",
+                &mut allow_git_writes,
+            )
+            .await
+            .expect("slash command should not end the session");
+            let expected = if command == "/models mock:other" {
+                SlashCommandResult::SwitchModel("mock:other".into())
+            } else if command == "/resume current" {
+                SlashCommandResult::SwitchModel("mock".into())
+            } else {
+                SlashCommandResult::Unchanged
+            };
+            assert_eq!(result, expected, "{command}");
+            assert_eq!(session.session_id, "current", "{command}");
+            assert_eq!(session.saved_model(), Some("mock"), "{command}");
+            assert!(session.fast && allow_git_writes, "{command}");
+            assert!(
+                monitors.manager.list().contains("retained active monitor"),
+                "{command}"
+            );
+        }
+        assert!(
+            monitors
+                .try_recv()
+                .unwrap()
+                .content
+                .contains("retained queued event")
+        );
     }
 
     #[test]

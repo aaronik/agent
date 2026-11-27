@@ -41,6 +41,36 @@ pub struct MonitorManager {
     wake: Arc<AtomicBool>,
 }
 
+/// Owns one conversation's monitor delivery. A session switch drops both the
+/// queue and the wake flag; an old task can never wake the next prompt.
+pub(crate) struct SessionMonitors {
+    pub(crate) manager: MonitorManager,
+    events: mpsc::UnboundedReceiver<MonitorEvent>,
+}
+
+impl SessionMonitors {
+    pub(crate) fn new() -> Self {
+        let (manager, events) = MonitorManager::new(Arc::new(AtomicBool::new(false)));
+        Self { manager, events }
+    }
+
+    pub(crate) fn wake_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.manager.wake)
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<MonitorEvent> {
+        self.manager.wake.store(false, Ordering::SeqCst);
+        self.events.try_recv().ok()
+    }
+}
+
+impl Drop for SessionMonitors {
+    fn drop(&mut self) {
+        self.events.close();
+        stop_all(&self.manager);
+    }
+}
+
 #[derive(Debug)]
 struct MonitorTask {
     handle: tokio::task::JoinHandle<()>,
@@ -86,6 +116,9 @@ impl MonitorManager {
         let mut tasks = self.tasks.lock().map_err(|e| e.to_string())?;
         match args.action.as_str() {
             "start" => {
+                if self.sender.is_closed() {
+                    return Err("monitor session is closed".into());
+                }
                 let cmd = args
                     .cmd
                     .filter(|cmd| !cmd.trim().is_empty())
@@ -114,18 +147,20 @@ impl MonitorManager {
                                     ),
                                     &ToolStatus::Success,
                                 );
-                                if manager.sender.send(MonitorEvent { content }).is_ok() {
+                                // Serialize delivery with stop/stop_all so a task
+                                // removed while its check finishes cannot publish.
+                                if let Ok(mut tasks) = manager.tasks.lock()
+                                    && tasks.remove(&task_id).is_some()
+                                    && manager.sender.send(MonitorEvent { content }).is_ok()
+                                {
                                     manager.wake.store(true, Ordering::SeqCst);
                                 }
-                                break;
+                                return;
                             }
                             Ok(None) | Err(_) => {
                                 tokio::time::sleep(Duration::from_secs(interval)).await
                             }
                         }
-                    }
-                    if let Ok(mut tasks) = manager.tasks.lock() {
-                        tasks.remove(&task_id);
                     }
                 });
                 tasks.insert(
@@ -159,5 +194,33 @@ pub fn stop_all(manager: &MonitorManager) {
         for (_, task) in tasks.drain() {
             task.handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropped_session_rejects_monitor_starts_from_old_manager_clones() {
+        let session = SessionMonitors::new();
+        let stale_manager = session.manager.clone();
+        drop(session);
+
+        assert!(
+            stale_manager
+                .execute(
+                    MonitorArgs {
+                        action: "start".into(),
+                        cmd: Some("false".into()),
+                        interval_seconds: None,
+                        message: None,
+                        id: None,
+                    },
+                    false
+                )
+                .is_err()
+        );
+        assert_eq!(stale_manager.list(), "No active monitors.");
     }
 }

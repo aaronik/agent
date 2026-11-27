@@ -409,13 +409,12 @@ async fn run_shell_command_reports_stdout_and_exit_code() {
     assert_eq!(ok, "hi");
 
     let err = run_shell_command(RunShellCommandArgs {
-        cmd: "printf nope && exit 7".to_string(),
+        cmd: "printf nope; printf STDERR >&2; exit 7".to_string(),
         timeout: 30,
     })
     .await
     .expect("error command output");
-    assert!(err.contains("nope"));
-    assert!(err.contains("(exit code: 7)"));
+    assert_eq!(err, "nopeSTDERR\n(exit code: 7)");
 }
 
 #[tokio::test]
@@ -1356,22 +1355,60 @@ impl Drop for EnvGuard {
 }
 
 #[tokio::test]
-async fn shell_preserves_full_output_and_times_out_after_child_exits_with_open_pipes() {
+async fn shell_spills_complete_lossy_output_in_stream_order() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
     let output = run_shell_command(RunShellCommandArgs {
-        cmd: "head -c 200000 /dev/zero | tr '\\0' x; printf TAIL; printf STDERR >&2; exit 7".into(),
+        // Split a UTF-8 character across the first 8192 bytes, and end stdout
+        // with an incomplete sequence that must not combine with stderr.
+        cmd: "head -c 8191 /dev/zero | tr '\\0' x; printf '\\342\\202\\254'; head -c 200000 /dev/zero | tr '\\0' y; printf '\\342\\202'; printf '\\254' >&2; head -c 40000 /dev/zero | tr '\\0' z >&2; printf TAIL >&2; exit 7".into(),
         timeout: 5,
     })
     .await
     .expect("output");
-    assert_eq!(
-        output,
-        format!("{}TAILSTDERR\n(exit code: 7)", "x".repeat(200_000))
+    assert!(output.chars().count() <= 32_000);
+    assert!(output.starts_with("xxxx"));
+    assert!(output.ends_with("zzTAIL\n(exit code: 7)"));
+    assert_saved_tool_output(
+        &output,
+        &format!(
+            "{}€{}��{}TAIL\n(exit code: 7)",
+            "x".repeat(8191),
+            "y".repeat(200_000),
+            "z".repeat(40_000)
+        ),
     );
+}
 
+#[tokio::test]
+async fn shell_spills_when_only_combined_output_exceeds_budget() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let output = run_shell_command(RunShellCommandArgs {
+        cmd: "head -c 16001 /dev/zero | tr '\\0' x; head -c 16001 /dev/zero | tr '\\0' y >&2"
+            .into(),
+        timeout: 5,
+    })
+    .await
+    .unwrap();
+    assert!(output.chars().count() <= 32_000);
+    assert_saved_tool_output(
+        &output,
+        &format!("{}{}", "x".repeat(16001), "y".repeat(16001)),
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_timeout_kills_descendants_after_shell_exits_with_open_pipes() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("descendant-survived");
     let timeout = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        Duration::from_secs(2),
         run_shell_command(RunShellCommandArgs {
-            cmd: "(sleep 30) & echo done".into(),
+            cmd: format!(
+                "(/bin/sleep 1.5 && printf alive > '{}') & exit 0",
+                marker.display()
+            ),
             timeout: 1,
         }),
     )
@@ -1379,4 +1416,6 @@ async fn shell_preserves_full_output_and_times_out_after_child_exits_with_open_p
     .expect("overall timeout must include pipe drain")
     .expect("timeout result");
     assert!(timeout.contains("(exit code: 124)"));
+    tokio::time::sleep(Duration::from_millis(850)).await;
+    assert!(!marker.exists(), "timed-out descendant was left running");
 }

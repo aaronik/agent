@@ -1,13 +1,20 @@
-use std::process::Stdio;
+use std::io;
+use std::path::PathBuf;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time;
 
-use crate::agent::CancellationToken;
+use crate::agent::{CancellationToken, ToolStatus};
+use crate::tools::output::{MAX_TOOL_RESPONSE_LENGTH, OutputPreview, new_output_file};
+
+// Leave room for the monitor event envelope added by the caller.
+const MONITOR_OUTPUT_LIMIT: usize = MAX_TOOL_RESPONSE_LENGTH - 1024;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RunShellCommandArgs {
@@ -34,10 +41,12 @@ pub async fn run_shell_command_cancellable(
         &args.cmd,
         Duration::from_secs(args.timeout),
         cancellation_token,
+        CaptureMode::Shell,
     )
     .await?
     {
-        CommandOutput::Completed(output) => Ok(format_completed_output(output)),
+        CommandOutput::Completed(output) => Ok(output),
+        CommandOutput::CheckFailed => unreachable!("shell commands keep unsuccessful output"),
         CommandOutput::TimedOut => Ok(format!(
             "(exit code: 124)\ncommand timed out after {}s",
             args.timeout
@@ -46,11 +55,19 @@ pub async fn run_shell_command_cancellable(
     }
 }
 
+#[derive(Clone, Copy)]
+enum CaptureMode {
+    Shell,
+    Monitor,
+}
+
 async fn run_command_output(
     command_text: &str,
     timeout: Duration,
     cancellation_token: &CancellationToken,
+    mode: CaptureMode,
 ) -> Result<CommandOutput, String> {
+    let deadline = time::Instant::now() + timeout;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = Command::new(shell);
     command
@@ -60,38 +77,38 @@ async fn run_command_output(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    set_process_group(&mut command);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|err| format!("failed to run command: {err}"))?;
-    let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
-    let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
-    let deadline = time::Instant::now() + timeout;
+    let mut group = ProcessGroup::new(&child);
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let spill = matches!(mode, CaptureMode::Shell);
 
-    let status = tokio::select! {
-        result = child.wait() => result.map_err(|err| format!("failed to wait for command: {err}"))?,
-        _ = time::sleep_until(deadline) => { terminate_child(&mut child).await; return Ok(CommandOutput::TimedOut); }
-        _ = cancellation_token.cancelled() => { terminate_child(&mut child).await; return Ok(CommandOutput::Cancelled); }
+    let outcome = tokio::select! {
+        // Keep the readers in this future rather than detaching them. On
+        // timeout or abort they drop their pipes and any incomplete spills.
+        result = async {
+            let (status, stdout, stderr) = tokio::try_join!(
+                child.wait(), read_pipe(stdout, spill), read_pipe(stderr, spill),
+            ).map_err(|err| format!("failed to capture command output: {err}"))?;
+            group.disarm();
+            if matches!(mode, CaptureMode::Monitor) && !status.success() {
+                return Ok(CommandOutput::CheckFailed);
+            }
+            Ok(CommandOutput::Completed(format_completed_output(status, stdout, stderr, mode).await))
+        } => return result,
+        _ = time::sleep_until(deadline) => CommandOutput::TimedOut,
+        _ = cancellation_token.cancelled() => CommandOutput::Cancelled,
     };
-    // A descendant can retain the pipes after the shell exits. The deadline
-    // applies to draining too; killing the group closes those inherited FDs.
-    let pipes = async {
-        Ok::<_, String>((
-            join_pipe_task(stdout_task, "stdout").await?,
-            join_pipe_task(stderr_task, "stderr").await?,
-        ))
-    };
-    tokio::pin!(pipes);
-    let (stdout, stderr) = tokio::select! {
-        result = &mut pipes => result?,
-        _ = time::sleep_until(deadline) => { terminate_process_group(&child); return Ok(CommandOutput::TimedOut); }
-        _ = cancellation_token.cancelled() => { terminate_process_group(&child); return Ok(CommandOutput::Cancelled); }
-    };
-    Ok(CommandOutput::Completed(CapturedOutput {
-        status,
-        stdout,
-        stderr,
-    }))
+    // child.id() becomes None after wait(), even while descendants still
+    // have the pipes open. The guard retains the original group ID.
+    drop(group);
+    let _ = child.start_kill();
+    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
+    Ok(outcome)
 }
 
 /// Return Some(output) only when the check exits successfully.
@@ -103,90 +120,237 @@ pub(crate) async fn check_shell_command(
     if !allow_git_writes && let Some(blocked) = blocked_git_write_operation(command) {
         return Err(format!("blocked git write operation: `{blocked}`"));
     }
-    match run_command_output(command, timeout, &CancellationToken::new()).await? {
-        CommandOutput::Completed(output) if output.status.success() => {
-            Ok(Some(format_completed_output(output)))
-        }
+    match run_command_output(
+        command,
+        timeout,
+        &CancellationToken::new(),
+        CaptureMode::Monitor,
+    )
+    .await?
+    {
+        CommandOutput::Completed(output) => Ok(Some(output)),
         _ => Ok(None),
     }
 }
 
 enum CommandOutput {
-    Completed(CapturedOutput),
+    Completed(String),
+    CheckFailed,
     TimedOut,
     Cancelled,
 }
-struct CapturedOutput {
-    status: std::process::ExitStatus,
-    stdout: PipeOutput,
-    stderr: PipeOutput,
-}
-struct PipeOutput {
-    bytes: Vec<u8>,
-}
 
-async fn join_pipe_task(
-    task: tokio::task::JoinHandle<Result<PipeOutput, String>>,
-    name: &str,
-) -> Result<PipeOutput, String> {
-    task.await
-        .map_err(|err| format!("failed to join {name} reader: {err}"))?
-}
-
-async fn read_pipe<T>(pipe: Option<T>) -> Result<PipeOutput, String>
-where
-    T: tokio::io::AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    if let Some(mut pipe) = pipe {
-        pipe.read_to_end(&mut bytes)
-            .await
-            .map_err(|err| format!("failed to read command output: {err}"))?;
-    }
-    Ok(PipeOutput { bytes })
-}
-
-async fn terminate_child(child: &mut Child) {
-    terminate_process_group(child);
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = child.start_kill();
-    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
-}
-#[cfg(unix)]
-fn set_process_group(command: &mut Command) {
-    command.process_group(0);
-}
-#[cfg(not(unix))]
-fn set_process_group(_command: &mut Command) {}
-fn terminate_process_group(child: &Child) {
+struct ProcessGroup {
     #[cfg(unix)]
-    kill_process_group(child);
+    id: Option<i32>,
 }
 
-#[cfg(unix)]
-fn kill_process_group(child: &Child) {
-    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
+impl ProcessGroup {
+    fn new(_child: &Child) -> Self {
+        Self {
+            #[cfg(unix)]
+            id: _child.id().and_then(|pid| i32::try_from(pid).ok()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.id = None;
         }
     }
 }
 
-fn format_completed_output(output: CapturedOutput) -> String {
-    let mut combined = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
-    if !output.status.success() {
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(id) = self.id {
+            // A negative ID signals every member of this process group.
+            unsafe { libc::kill(-id, libc::SIGKILL) };
         }
-        combined.push_str(&format!(
-            "(exit code: {})",
-            output.status.code().unwrap_or(1)
-        ));
     }
-    combined
+}
+
+#[derive(Default)]
+struct PipeOutput {
+    preview: OutputPreview,
+    spill: Option<io::Result<SpillFile>>,
+}
+
+impl PipeOutput {
+    async fn push(&mut self, text: &str, spill: bool) {
+        if text.is_empty() {
+            return;
+        }
+        if spill {
+            match &mut self.spill {
+                Some(Ok(file)) => {
+                    if let Err(err) = file.file.write_all(text.as_bytes()).await {
+                        self.spill = Some(Err(err));
+                    }
+                }
+                None if self.preview.len() + text.chars().count() > MAX_TOOL_RESPONSE_LENGTH => {
+                    self.spill = Some(
+                        async {
+                            let mut file = SpillFile::new().await?;
+                            file.write_preview(&self.preview).await?;
+                            file.file.write_all(text.as_bytes()).await?;
+                            Ok(file)
+                        }
+                        .await,
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.preview.push(text);
+    }
+
+    async fn write_to(&mut self, file: &mut SpillFile) -> io::Result<()> {
+        if let Some(spill) = self.spill.take() {
+            let mut spill = spill?;
+            spill.file.rewind().await?;
+            tokio::io::copy(&mut spill.file, &mut file.file).await?;
+            Ok(())
+        } else {
+            file.write_preview(&self.preview).await
+        }
+    }
+}
+
+struct SpillFile {
+    file: File,
+    path: tempfile::TempPath,
+}
+
+impl SpillFile {
+    async fn new() -> io::Result<Self> {
+        let (file, path) = tokio::task::spawn_blocking(new_output_file)
+            .await??
+            .into_parts();
+        Ok(Self {
+            file: File::from_std(file),
+            path,
+        })
+    }
+
+    async fn write_preview(&mut self, preview: &OutputPreview) -> io::Result<()> {
+        let (head, tail) = preview.retained_parts();
+        self.file.write_all(head.as_bytes()).await?;
+        self.file.write_all(tail.as_bytes()).await
+    }
+
+    async fn keep(mut self) -> io::Result<PathBuf> {
+        self.file.flush().await?;
+        self.path.keep().map_err(|err| err.error)
+    }
+}
+
+async fn read_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    spill: bool,
+) -> io::Result<PipeOutput> {
+    let mut output = PipeOutput::default();
+    let mut buf = [0; 8192 + 3];
+    let mut pending = 0;
+    loop {
+        let read = pipe.read(&mut buf[pending..]).await?;
+        if read == 0 {
+            if pending > 0 {
+                output.push("�", spill).await;
+            }
+            // Surface buffered write failures even when this file will be
+            // rewound and copied into another spill later.
+            if let Some(Ok(file)) = &mut output.spill
+                && let Err(err) = file.file.flush().await
+            {
+                output.spill = Some(Err(err));
+            }
+            return Ok(output);
+        }
+
+        let end = pending + read;
+        // Match from_utf8_lossy on the whole pipe: defer a trailing partial
+        // sequence until the next read, and write at most one chunk per read.
+        let bytes = &buf[..end];
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            pending = 0;
+            output.push(text, spill).await;
+            continue;
+        }
+        pending = {
+            let invalid = bytes
+                .utf8_chunks()
+                .last()
+                .expect("nonempty chunk")
+                .invalid();
+            if std::str::from_utf8(invalid).is_err_and(|err| err.error_len().is_none()) {
+                invalid.len()
+            } else {
+                0
+            }
+        };
+        output
+            .push(&String::from_utf8_lossy(&buf[..end - pending]), spill)
+            .await;
+        buf.copy_within(end - pending..end, 0);
+    }
+}
+
+async fn format_completed_output(
+    status: ExitStatus,
+    stdout: PipeOutput,
+    mut stderr: PipeOutput,
+    mode: CaptureMode,
+) -> String {
+    let limit = match mode {
+        CaptureMode::Shell => MAX_TOOL_RESPONSE_LENGTH,
+        CaptureMode::Monitor => MONITOR_OUTPUT_LIMIT,
+    };
+    let PipeOutput { mut preview, spill } = stdout;
+    // Keep stdout before stderr, matching the original tool output contract.
+    let ends_with_newline = if stderr.preview.len() > 0 {
+        stderr.preview.ends_with_newline()
+    } else {
+        preview.ends_with_newline()
+    };
+    let suffix = if status.success() {
+        String::new()
+    } else {
+        let separator = if preview.len() + stderr.preview.len() == 0 || ends_with_newline {
+            ""
+        } else {
+            "\n"
+        };
+        format!("{separator}(exit code: {})", status.code().unwrap_or(1))
+    };
+    let saved = if matches!(mode, CaptureMode::Shell)
+        && preview.len() + stderr.preview.len() + suffix.len() > limit
+    {
+        // Reuse the stdout spill, if any, and append stderr in stream order.
+        Some(
+            async {
+                let mut file = match spill {
+                    Some(spill) => spill?,
+                    None => {
+                        let mut file = SpillFile::new().await?;
+                        file.write_preview(&preview).await?;
+                        file
+                    }
+                };
+                stderr.write_to(&mut file).await?;
+                file.file.write_all(suffix.as_bytes()).await?;
+                file.keep().await
+            }
+            .await,
+        )
+    } else {
+        None
+    };
+    preview.append(&stderr.preview);
+    preview.push(&suffix);
+    // A command exit code is part of the output, not a tool execution error.
+    preview.render(limit, &ToolStatus::Success, saved)
 }
 
 fn default_timeout() -> u64 {
@@ -481,5 +645,79 @@ fn shell_tokens(command: &str) -> Vec<ShellToken> {
 fn push_word(tokens: &mut Vec<ShellToken>, word: &mut String) {
     if !word.is_empty() {
         tokens.push(ShellToken::Word(std::mem::take(word)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pipe_capture_decodes_utf8_across_reads() {
+        let first: &[u8] = b"head\xff\xe2";
+        let second: &[u8] = b"\x82";
+        let third: &[u8] = b"\xac\xf0\x9f";
+        let output = read_pipe(first.chain(second).chain(third), false)
+            .await
+            .unwrap();
+        assert_eq!(output.preview.retained_parts(), ("head�€�", ""));
+    }
+
+    #[tokio::test]
+    async fn monitor_check_bounds_output_and_only_returns_success() {
+        let output = check_shell_command(
+            "printf HEAD; head -c 200000 /dev/zero | tr '\\0' x; printf TAIL >&2",
+            Duration::from_secs(5),
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(output.chars().count() <= 32_000);
+        assert!(output.starts_with("HEAD"));
+        assert!(output.ends_with("TAIL"));
+        assert!(output.contains("characters omitted"));
+        assert!(!output.contains("Full output saved"));
+
+        assert!(
+            check_shell_command(
+                "head -c 200000 /dev/zero; exit 7",
+                Duration::from_secs(5),
+                false,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_monitor_check_kills_running_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let survived = dir.path().join("survived");
+        let command = format!(
+            "(touch '{}'; /bin/sleep 0.7 && touch '{}') & wait",
+            ready.display(),
+            survived.display(),
+        );
+        let check = tokio::spawn(async move {
+            check_shell_command(&command, Duration::from_secs(5), false).await
+        });
+        time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant started");
+        check.abort();
+        assert!(check.await.unwrap_err().is_cancelled());
+        time::sleep(Duration::from_millis(850)).await;
+        assert!(
+            !survived.exists(),
+            "aborted check left a running descendant"
+        );
     }
 }

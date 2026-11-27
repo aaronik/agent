@@ -740,6 +740,17 @@ fn resume_replay_shows_tool_commands() {
 }
 
 #[test]
+fn single_slash_resume_reports_failure_to_scripts() {
+    let home = tempfile::tempdir().unwrap();
+    agent_command()
+        .env("HOME", home.path())
+        .args(["--model", "mock", "--single", "/resume missing"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Could not resume session"));
+}
+
+#[test]
 fn slash_resume_replays_conversation_output() {
     let temp_home = tempfile::tempdir().expect("temp home");
 
