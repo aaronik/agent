@@ -39,6 +39,7 @@ impl std::fmt::Debug for ActivitySink {
 pub struct ToolRegistry {
     definitions: Vec<ToolDefinition>,
     allow_git_writes: bool,
+    spawn_fast: bool,
     monitor: Option<MonitorManager>,
     activity: Option<ActivitySink>,
 }
@@ -106,9 +107,15 @@ impl ToolRegistry {
         Self {
             definitions,
             allow_git_writes,
+            spawn_fast: false,
             monitor: None,
             activity: None,
         }
+    }
+
+    pub(crate) fn with_spawn_fast_mode(mut self, fast: bool) -> Self {
+        self.spawn_fast = fast;
+        self
     }
 
     pub fn with_spawn_activity(
@@ -238,6 +245,7 @@ impl ToolRegistry {
                         args,
                         cancellation_token,
                         &tool_call_id,
+                        self.spawn_fast,
                         self.activity.as_ref().map(|sink| sink.0.as_ref()),
                     )
                     .await

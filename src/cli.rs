@@ -2295,7 +2295,7 @@ fn build_loop_runner(
     monitor: Option<MonitorManager>,
     (display, live_subagent_usages): (&Arc<TerminalDisplay>, &Arc<Mutex<Vec<SubagentUsage>>>),
 ) -> Result<AgentLoop<Box<dyn Provider>>, Box<dyn Error>> {
-    let mut tools = build_tool_registry(allow_git_writes, !no_subagent);
+    let mut tools = build_tool_registry(allow_git_writes, !no_subagent).with_spawn_fast_mode(fast);
     if !no_subagent && display.live_enabled() && std::io::stdout().is_terminal() {
         let display = Arc::clone(display);
         let usages = Arc::clone(live_subagent_usages);

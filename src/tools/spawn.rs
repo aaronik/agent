@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::time;
 
 use crate::agent::{AgentMessage, CancellationToken, SubagentUsage};
-use crate::providers::{effective_model_name, list_models};
+use crate::providers::{effective_model_name, list_models, parse_model_id};
 use crate::session::SessionStore;
 
 pub(crate) const ACTIVITY_ENV: &str = "AGENT_CHILD_ACTIVITY";
@@ -74,7 +74,7 @@ pub async fn spawn_cancellable_with_usage(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
 ) -> Result<(String, Vec<SubagentUsage>), String> {
-    let output = spawn_observed(args, cancellation_token, "", None).await?;
+    let output = spawn_observed(args, cancellation_token, "", false, None).await?;
     output.content.map(|content| (content, output.usages))
 }
 
@@ -87,6 +87,7 @@ pub(super) async fn spawn_observed(
     args: SpawnArgs,
     cancellation_token: &CancellationToken,
     group: &str,
+    fast: bool,
     observer: Option<&Observer>,
 ) -> Result<SpawnOutput, String> {
     let agents = args.agents;
@@ -129,7 +130,7 @@ pub(super) async fn spawn_observed(
                     }
                 };
                 let result =
-                    spawn_one(agent, cancellation_token, observer.is_some(), &report).await;
+                    spawn_one(agent, cancellation_token, fast, observer.is_some(), &report).await;
                 report(match &result {
                     Ok(output) if output.content.is_ok() => SpawnState::Done,
                     _ if cancellation_token.is_cancelled() => SpawnState::Cancelled,
@@ -163,6 +164,7 @@ pub(super) async fn spawn_observed(
 async fn spawn_one(
     args: SpawnAgent,
     cancellation_token: &CancellationToken,
+    fast: bool,
     observed: bool,
     report: &(dyn Fn(SpawnState) + Sync),
 ) -> Result<SpawnOutput, String> {
@@ -194,6 +196,9 @@ async fn spawn_one(
     }
     set_process_group(&mut command);
 
+    if fast && parse_model_id(&raw_model).provider == "openai" {
+        command.arg("--fast");
+    }
     if let Some(conversation_id) = args.conversation_id.as_deref() {
         command.arg("--resume").arg(conversation_id);
     }

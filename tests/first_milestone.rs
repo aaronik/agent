@@ -2180,6 +2180,98 @@ async fn fast_flag_requests_priority_only_when_enabled() {
     assert_eq!(bodies[2]["service_tier"], "priority");
 }
 
+#[tokio::test]
+async fn spawned_openai_agents_inherit_the_parent_sessions_fast_mode() {
+    let server = MockServer::start().await;
+    let response = |response| {
+        let event = json!({"type": "response.completed", "response": response});
+        ResponseTemplate::new(200).set_body_raw(
+            format!("data: {event}\n\ndata: [DONE]\n\n"),
+            "text/event-stream",
+        )
+    };
+    let args = json!({"intent":"Check inherited mode", "agents":[
+        {"task":"worker-alpha"},
+        {"task":"worker-beta", "conversation_id":"worker-session"}
+    ]});
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(wiremock::matchers::body_string_contains("parent-task"))
+        .respond_with(response(json!({"output":[{
+            "type":"function_call", "call_id":"batch", "name":"spawn", "arguments":args.to_string()
+        }]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(wiremock::matchers::body_string_contains(
+            "function_call_output",
+        ))
+        .respond_with(response(json!({"output_text":"Parent done"})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(response(json!({"output_text":"Worker done"})))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+
+    for (startup_fast, saved_fast) in [(false, false), (true, false), (false, true)] {
+        let home = tempfile::tempdir().unwrap();
+        let store = SessionStore::with_root(home.path().join(".agent"));
+        let mut parent = agent_rs::session::Session::new("parent".into(), vec![]);
+        parent.fast = saved_fast;
+        store.save(&parent).unwrap();
+        store
+            .save(&agent_rs::session::Session::new(
+                "worker-session".into(),
+                vec![],
+            ))
+            .unwrap();
+        let existing_requests = server.received_requests().await.unwrap().len();
+        agent_command()
+            .env("HOME", home.path())
+            .env("OPENAI_API_KEY", "test-key")
+            .env("AGENT_BASE_URL", server.uri())
+            .env("AGENT_SPAWN_MODEL", "openai:worker")
+            .env_remove("AGENT_SPAWN_BIN")
+            .args(startup_fast.then_some("--fast"))
+            .args([
+                "--model",
+                "openai:parent",
+                "--resume",
+                "parent",
+                "--single",
+                "parent-task",
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Parent done"));
+
+        let requests = server.received_requests().await.unwrap();
+        let bodies = requests[existing_requests..]
+            .iter()
+            .map(|req| req.body_json::<serde_json::Value>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 4, "{bodies:?}");
+        for task in ["worker-alpha", "worker-beta"] {
+            let request = bodies
+                .iter()
+                .find(|body| body["model"] == "worker" && body["input"].to_string().contains(task))
+                .unwrap_or_else(|| panic!("no request for {task}: {bodies:?}"));
+            assert_eq!(
+                request
+                    .get("service_tier")
+                    .and_then(serde_json::Value::as_str),
+                (startup_fast || saved_fast).then_some("priority"),
+                "{task}"
+            );
+        }
+    }
+}
+
 #[test]
 fn fast_slash_command_toggles_without_contacting_the_provider() {
     let home = tempfile::tempdir().unwrap();

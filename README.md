@@ -46,7 +46,8 @@ The `Cost` footer uses the tier OpenAI actually reports, including when a Fast
 request is served at standard rates. Run `/pricing refresh` to update cached
 LiteLLM rates. If the provider doesn't report a tier for a Fast request or a
 needed Fast rate is missing, the footer marks that portion `unknown`.
-The toggle doesn't apply to Ollama, realtime voice, background titles, or spawned agents.
+Spawned OpenAI text agents inherit Fast mode when it is enabled in the parent
+session. The toggle doesn't apply to Ollama, realtime voice, or background titles.
 
 Run with Ollama (using a vision-capable model):
 
